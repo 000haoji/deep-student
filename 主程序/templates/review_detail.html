@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>回顾详情 - DeepStudent</title>
+    <!-- 使用本地资源替代CDN链接 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+    <!-- 添加markdown样式 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/github-markdown.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/stream_analysis.css') }}">
+    <!-- 添加Font Awesome图标库 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/font-awesome.min.css') }}">
+    <script src="{{ url_for('static', filename='js/jquery.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+    
+    <!-- 添加markdown-it和KaTeX库，替换marked库 -->
+    <script src="{{ url_for('static', filename='js/markdown-it.min.js') }}"></script>
+    <!-- 只有在本地库存在时才尝试加载CDN资源 -->
+    <script>
+        // 只在markdown-it未定义时尝试加载CDN资源
+        if (typeof markdownit === 'undefined') {
+            try {
+                document.write('<script src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"><\/script>');
+                document.write('<script src="https://cdn.jsdelivr.net/npm/katex@0.16.7/dist/katex.min.js"><\/script>');
+                document.write('<script src="https://cdn.jsdelivr.net/npm/markdown-it-katex@2.0.3/index.min.js"><\/script>');
+                document.write('<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.7/dist/katex.min.css">');
+            } catch (e) {
+                console.warn("CDN资源加载失败，使用本地渲染功能");
+            }
+        }
+    </script>
+    
+    <!-- 添加流式分析JS -->
+    <script src="{{ url_for('static', filename='js/stream_analysis.js') }}"></script>
+    
+    <!-- 覆盖GitHub Markdown样式 -->
+    <style>
+        /* 强制覆盖GitHub Markdown CSS的样式 */
+        .markdown-body {
+            background-color: #ffffff !important;
+            color: #333333 !important;
+        }
+        .markdown-body pre,
+        .markdown-body code {
+            background-color: #f6f8fa !important;
+            color: #24292e !important;
+        }
+        .markdown-body h1,
+        .markdown-body h2,
+        .markdown-body h3,
+        .markdown-body h4,
+        .markdown-body h5,
+        .markdown-body h6,
+        .markdown-body p,
+        .markdown-body ul,
+        .markdown-body ol,
+        .markdown-body li {
+            color: #333333 !important;
+        }
+    </style>
+    <style>
+        .analysis-section {
+            margin-bottom: 1.5rem;
+            border-left: 3px solid #007bff;
+            padding-left: 1rem;
+        }
+        .analysis-heading {
+            font-weight: 600;
+            color: #007bff;
+            margin-bottom: 0.5rem;
+        }
+        .ai-analysis-card {
+            border: 1px solid rgba(0,123,255,0.2);
+            border-radius: 8px;
+            background-color: rgba(0,123,255,0.05);
+        }
+        .ai-badge {
+            background-color: #007bff;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            margin-left: 0.5rem;
+        }
+        /* 添加问题缩略图样式 */
+        .problem-thumbnail {
+            margin-bottom: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 5px;
+            padding: 10px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .problem-thumbnail:hover {
+            box-shadow: 0 3px 8px rgba(0,0,0,0.1);
+        }
+        .problem-thumbnail img {
+            max-width: 100%;
+            max-height: 200px;
+            object-fit: contain;
+            width: auto;
+            height: auto;
+            display: block;
+            margin: 0 auto 10px;
+        }
+        /* 小屏幕上进一步限制图片大小 */
+        @media (max-width: 768px) {
+            .problem-thumbnail img {
+                max-height: 150px;
+            }
+        }
+        .thumbnail-info {
+            padding-top: 8px;
+        }
+        .thumbnail-info h4 {
+            font-size: 1rem;
+            margin-bottom: 5px;
+        }
+        .thumbnail-info small {
+            color: #6c757d;
+            display: block;
+        }
+        /* 回顾分析结果区域样式 */
+        #reviewAnalysisContainer, .markdown-body {
+            background-color: #ffffff !important;
+            color: #333333 !important;
+        }
+        .result-content, .reasoning-chain, .analysis-section {
+            background-color: #ffffff !important;
+            color: #333333 !important;
+        }
+    </style>
+    <style>
+        /* 分析区域样式 */
+        .analysis-section {
+            margin-bottom: 1.5rem;
+            border-left: 3px solid #007bff;
+            padding-left: 1rem;
+            background-color: #ffffff !important;
+        }
+        
+        /* 强制所有分析相关内容区域使用白底黑字 */
+        #divAnalysisResult,
+        .analysis-content div,
+        .markdown-body div,
+        .analysis-content pre,
+        .analysis-content code,
+        .card-body,
+        .reasoning-content,
+        .result-content {
+            background-color: #ffffff !important;
+            color: #333333 !important;
+        }
+        
+        /* 强制代码块使用浅灰背景 */
+        .markdown-body pre,
+        .markdown-body code,
+        pre, code {
+            background-color: #f6f8fa !important;
+            color: #24292e !important;
+        }
+    </style>
+    <style>
+        /* VS Code编辑器主题覆盖 */
+        .vscode-dark,
+        [data-vscode-theme="dark"],
+        .vscode-theme-defaults-themes-dark_plus-json,
+        .vscode-theme-defaults-themes-dark_vs-json,
+        .vscode-theme-dark,
+        .monaco-editor.vs-dark,
+        .monaco-editor-background,
+        div[role="code"],
+        div[class*="code"] {
+            background-color: #ffffff !important;
+            color: #333333 !important;
+        }
+        
+        /* 直接对代码显示区域的背景进行覆盖 */
+        div[class*="analysis"] code,
+        div[id*="analysis"] code,
+        div[class*="Analysis"] code,
+        div[id*="Analysis"] code,
+        pre, code, 
+        .hljs {
+            background-color: #f8f9fa !important;
+            color: #333333 !important;
+        }
+        
+        /* 覆盖markdown样式 */
+        .markdown-body {
+            background-color: #ffffff !important;
+            color: #333333 !important;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+    
+    <div class="container py-4">
+        <h1 class="text-center mb-4">回顾详情</h1>
+        
+        <div class="mb-4">
+            <a href="/reviews" class="btn btn-outline-primary">返回回顾列表</a>
+        </div>
+        
+        <div id="reviewDetail">
+            <div class="text-center p-5">
+                <div class="spinner-border" role="status">
+                    <span class="visually-hidden">加载中...</span>
+                </div>
+                <p class="mt-2">正在加载回顾详情...</p>
+            </div>
+        </div>
+        
+        <!-- 新增: AI分析区域 -->
+        <div id="aiAnalysisSection" class="mt-5">
+            <div class="card mb-4">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">
+                        <i class="fas fa-robot me-2"></i> 智能分析
+                        <span class="ai-badge">DeepSeek</span>
+                    </h5>
+                    <div>
+                        <button id="refreshAiAnalysisBtn" class="btn btn-sm btn-light">
+                            <i class="fas fa-sync-alt"></i> 刷新分析
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="aiAnalysisPlaceholder">
+                        <div class="text-center py-5">
+                            <p>点击下方按钮获取基于DeepSeek的深度智能分析</p>
+                            <button id="startAiAnalysisBtn" class="btn btn-primary">
+                                <i class="fas fa-brain me-2"></i> 开始分析
+                            </button>
+                        </div>
+                    </div>
+                    <div id="aiAnalysisLoading" class="text-center py-5 d-none">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">分析中...</span>
+                        </div>
+                        <p class="mt-3">正在进行深度智能分析，请稍候...</p>
+                        <div class="progress mt-3">
+                            <div id="analysisProgressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width: 0%"></div>
+                        </div>
+                    </div>
+                    <div id="aiAnalysisResult" class="d-none">
+                        <!-- 这里将显示分析结果 -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 开始流式分析
+        function startStreamAnalysis(reviewId, problems) {
+            // 显示加载状态
+            const placeholder = document.getElementById('aiAnalysisPlaceholder');
+            const loading = document.getElementById('aiAnalysisLoading');
+            const resultContainer = document.getElementById('aiAnalysisResult');
+            
+            if (placeholder) placeholder.classList.add('d-none');
+            if (loading) loading.classList.remove('d-none');
+            if (resultContainer) {
+                resultContainer.classList.add('d-none');
+                resultContainer.innerHTML = '';
+            }
+            
+            // 准备请求数据
+            const requestData = {
+                review_id: reviewId,
+                problems: problems.map(p => ({
+                    id: p.id,
+                    content: p.problem_content || '',
+                    type: p.problem_category || '',
+                    error_cause: p.error_type || '',
+                    knowledge_tags: p.knowledge_tags || []
+                })),
+                subject: 'math' // 默认为数学学科
+            };
+            
+            console.log("[DEBUG] 发送保存请求，数据:", JSON.stringify(requestData));
+            
+            // 发送流式分析请求
+            fetch(`/api/review/stream-analysis/${reviewId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({})
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`服务器错误 (${response.status})`);
+                }
+                
+                // 隐藏加载状态，显示结果容器
+                if (loading) loading.classList.add('d-none');
+                if (resultContainer) resultContainer.classList.remove('d-none');
+                
+                // 处理流式响应
+                handleStreamResponse(response, resultContainer, reviewId);
+            })
+            .catch(error => {
+                console.error('流式分析请求失败:', error);
+                if (loading) loading.classList.add('d-none');
+                if (resultContainer) {
+                    resultContainer.classList.remove('d-none');
+                    resultContainer.innerHTML = `
+                        <div class="alert alert-danger">
+                            <h5>分析失败</h5>
+                            <p>${error.message || '无法完成分析，请稍后再试'}</p>
+                        </div>
+                    `;
+                }
+                if (placeholder) placeholder.classList.remove('d-none');
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const reviewId = window.location.pathname.split('/').pop();
+            let problemsData = []; // 存储问题数据，供多个函数使用
+            
+            // 加载回顾详情
+            fetch(`/api/review/${reviewId}`)
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`服务器错误 (${response.status})`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data.success) {
+                        const review = data.review;
+                        problemsData = data.problems || []; // 保存问题数据
+                        
+                        // 更新页面标题
+                        document.title = review.title ? `${review.title} - 回顾详情` : '回顾详情';
+                        
+                        // 渲染回顾详情
+                        renderReviewDetail(review, problemsData);
+                        
+                        // 检查是否有保存的分析结果
+                        checkSavedAnalysis(reviewId);
+                        
+                        // 初始化流式分析功能
+                        initStreamAnalysis(reviewId, problemsData);
+                    } else {
+                        throw new Error(data.error || '加载回顾详情失败');
+                    }
+                })
+                .catch(error => {
+                    console.error('加载回顾详情失败:', error);
+                    document.getElementById('reviewDetail').innerHTML = `
+                        <div class="alert alert-danger" role="alert">
+                            <h4 class="alert-heading">加载失败</h4>
+                            <p>${error.message || '无法加载回顾详情，请稍后再试'}</p>
+                            <hr>
+                            <p class="mb-0">请返回<a href="/reviews" class="alert-link">回顾列表</a>重新选择</p>
+                        </div>
+                    `;
+                });
+                
+            // 渲染回顾详情
+            function renderReviewDetail(review, problemsData) {
+                const detailDiv = document.getElementById('reviewDetail');
+                
+                // 解析问题 ID 列表和分析结果
+                let problemsIncluded = [];
+                let reviewAnalysis = {};
+                
+                try {
+                    problemsIncluded = typeof review.problems_included === 'string' ? 
+                                      JSON.parse(review.problems_included) : 
+                                      (Array.isArray(review.problems_included) ? review.problems_included : []);
+                } catch (e) {
+                    console.error('解析问题ID列表出错:', e);
+                }
+                
+                try {
+                    reviewAnalysis = typeof review.review_analysis === 'string' ? 
+                                    JSON.parse(review.review_analysis) : 
+                                    (typeof review.review_analysis === 'object' ? review.review_analysis : {});
+                } catch (e) {
+                    console.error('解析回顾分析出错:', e);
+                    reviewAnalysis = {}; // 确保失败时也有一个空对象而不是null
+                }
+                
+                // 如果review.description包含分析结果，尝试解析它（兼容新版表结构）
+                if (!reviewAnalysis || Object.keys(reviewAnalysis).length === 0) {
+                    try {
+                        if (review.description && typeof review.description === 'string') {
+                            const parsedDescription = JSON.parse(review.description);
+                            if (parsedDescription && typeof parsedDescription === 'object') {
+                                reviewAnalysis = parsedDescription;
+                                console.log("[INFO] 从description字段解析到分析结果:", reviewAnalysis);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('解析description字段出错:', e);
+                    }
+                }
+                
+                // 如果review.notes包含分析结果，尝试解析它（兼容旧版表结构）
+                if (!reviewAnalysis || Object.keys(reviewAnalysis).length === 0) {
+                    try {
+                        if (review.notes && typeof review.notes === 'string') {
+                            const parsedNotes = JSON.parse(review.notes);
+                            if (parsedNotes && typeof parsedNotes === 'object') {
+                                reviewAnalysis = parsedNotes;
+                                console.log("[INFO] 从notes字段解析到分析结果:", reviewAnalysis);
+                            }
+                        }
+                    } catch (e) {
+                        console.error('解析notes字段出错:', e);
+                    }
+                }
+                
+                console.log("[DEBUG] 最终解析的回顾分析结果:", reviewAnalysis);
+                
+                // 构建回顾详情HTML
+                let html = `
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h4 class="mb-0">回顾ID: ${review.id}</h4>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <p><strong>问题ID：</strong> ${review.problem_id || '无问题ID'}</p>
+                                    <p><strong>状态：</strong> ${review.status || '未知状态'}</p>
+                                    <p><strong>备注：</strong> ${review.notes || '无备注'}</p>
+                                </div>
+                                <div class="col-md-4">
+                                    <p><strong>回顾日期：</strong> ${review.review_date ? new Date(review.review_date).toLocaleDateString() : '未指定'}</p>
+                                    <p><strong>创建时间：</strong> ${review.created_at ? new Date(review.created_at).toLocaleString() : '未知'}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                // 构建分析结果HTML
+                html += `
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h4 class="mb-0">分析结果</h4>
+                        </div>
+                        <div class="card-body">
+                            <div class="mb-4">
+                                <h6>包含的错题：</h6>
+                                <p>此回顾分析包含 ${problemsIncluded.length} 道错题</p>
+                                <div class="list-group mb-3">
+                `;
+                
+                // 添加错题链接
+                problemsIncluded.forEach(problemId => {
+                    const problem = problemsData.find(p => p.id === problemId);
+                    if (problem) {
+                        html += `
+                            <a href="/problem/${problemId}" class="list-group-item list-group-item-action d-flex justify-content-between align-items-center">
+                                错题 #${problemId.substring(0, 8)}
+                                <span class="badge bg-primary rounded-pill">查看</span>
+                            </a>
+                        `;
+                    }
+                });
+                
+                html += `
+                                </div>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <h6>错误模式识别：</h6>
+                                <p>${reviewAnalysis.错误模式识别 || '无数据'}</p>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <h6>知识点薄弱区域：</h6>
+                                <p>${reviewAnalysis.知识点薄弱区域 || '无数据'}</p>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <h6>针对性学习策略：</h6>
+                                <p>${reviewAnalysis.针对性学习策略 || '无数据'}</p>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <h6>习题推荐：</h6>
+                                <p>${reviewAnalysis.习题推荐 || '无数据'}</p>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <h6>时间规划建议：</h6>
+                                <p>${reviewAnalysis.时间规划建议 || '无数据'}</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                // 添加错题缩略图
+                html += `
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h5 class="mb-0">包含的错题</h5>
+                        </div>
+                        <div class="card-body">
+                            <div id="problem-thumbnails" class="d-flex flex-wrap gap-3">
+                                <!-- 错题缩略图将在这里显示 -->
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                detailDiv.innerHTML = html;
+                
+                // 显示错题缩略图
+                const thumbnailsContainer = document.getElementById('problem-thumbnails');
+                if (problemsData && problemsData.length > 0) {
+                    problemsData.forEach(problem => {
+                        const thumbnailDiv = document.createElement('div');
+                        thumbnailDiv.className = 'problem-thumbnail';
+                        thumbnailDiv.onclick = function() {
+                            window.location.href = `/problem/${problem.id}`;
+                        };
+                        
+                        const thumbnailImg = document.createElement('img');
+                        thumbnailImg.src = problem.image_url || '/static/images/placeholder.png';
+                        thumbnailImg.alt = '错题缩略图';
+                        
+                        const thumbnailInfo = document.createElement('div');
+                        thumbnailInfo.className = 'thumbnail-info';
+                        
+                        const thumbnailTitle = document.createElement('h4');
+                        thumbnailTitle.textContent = truncateText(problem.problem_content, 30);
+                        
+                        const thumbnailCategory = document.createElement('small');
+                        thumbnailCategory.textContent = `${problem.problem_category || ''} - ${problem.problem_subcategory || ''}`;
+                        
+                        thumbnailInfo.appendChild(thumbnailTitle);
+                        thumbnailInfo.appendChild(thumbnailCategory);
+                        
+                        thumbnailDiv.appendChild(thumbnailImg);
+                        thumbnailDiv.appendChild(thumbnailInfo);
+                        
+                        thumbnailsContainer.appendChild(thumbnailDiv);
+                    });
+                } else {
+                    thumbnailsContainer.textContent = '没有找到相关错题';
+                }
+            }
+            
+            // 辅助函数：截断文本
+            function truncateText(text, maxLength) {
+                if (!text) return '无内容';
+                return text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
+            }
+            
+            // 检查是否有保存的分析结果
+            function checkSavedAnalysis(reviewId) {
+                console.log("[DEBUG] 检查是否有保存的分析结果", reviewId);
+                
+                fetch(`/api/review/${reviewId}/analysis`)
+                    .then(response => {
+                        if (!response.ok) {
+                            if (response.status === 404) {
+                                console.log("[INFO] 未找到保存的分析结果");
+                                return null;
+                            }
+                            throw new Error(`服务器错误 (${response.status})`);
+                        }
+                        return response.json();
+                    })
+                    .then(data => {
+                        if (data && data.success && data.analysis) {
+                            console.log("[INFO] 找到保存的分析结果", data);
+                            
+                            // 隐藏占位符和加载状态
+                            const placeholder = document.getElementById('aiAnalysisPlaceholder');
+                            const loading = document.getElementById('aiAnalysisLoading');
+                            const resultContainer = document.getElementById('aiAnalysisResult');
+                            
+                            if (placeholder) placeholder.classList.add('d-none');
+                            if (loading) loading.classList.add('d-none');
+                            if (resultContainer) {
+                                resultContainer.classList.remove('d-none');
+                                
+                                // 渲染保存的分析结果
+                                let analysisHtml = '';
+                                try {
+                                    // 检查markdown-it是否已定义
+                                    if (typeof markdownit !== 'undefined') {
+                                        const md = markdownit({
+                                            html: true,
+                                            linkify: true,
+                                            typographer: true,
+                                            breaks: true,
+                                            langPrefix: 'language-',
+                                            quotes: '“”‘’',
+                                            highlight: function (str, lang) {
+                                                if (lang && hljs.getLanguage(lang)) {
+                                                    try {
+                                                        return hljs.highlight(str, { language: lang, ignoreIllegals: true }).value;
+                                                    } catch (__) {}
+                                                }
+                                                
+                                                return ''; // use external default escaping
+                                            }
+                                        });
+                                        md.use(markdownitKatex);
+                                        analysisHtml = md.render(data.analysis);
+                                    } else {
+                                        // 如果markdown-it未定义，使用简单的HTML转换
+                                        analysisHtml = `<pre>${data.analysis}</pre>`;
+                                        console.warn("[WARN] markdown-it未定义，使用简单HTML显示");
+                                    }
+                                } catch (error) {
+                                    console.error("[ERROR] 解析Markdown失败:", error);
+                                    analysisHtml = `<pre>${data.analysis}</pre>`;
+                                }
+                                
+                                resultContainer.innerHTML = `
+                                    <div class="alert alert-info mb-4">
+                                        <i class="fas fa-info-circle me-2"></i> 显示的是之前保存的分析结果。如需重新分析，请点击"刷新分析"按钮。
+                                    </div>
+                                    <div class="analysis-content markdown-body">
+                                        ${analysisHtml}
+                                    </div>
+                                    <div class="d-flex justify-content-between mt-4">
+                                        <button id="refreshSavedAnalysisBtn" class="btn btn-outline-primary">
+                                            <i class="fas fa-sync-alt"></i> 刷新分析
+                                        </button>
+                                        <button id="savedAnalysisBtn" class="btn btn-success" disabled>
+                                            <i class="fas fa-check"></i> 已保存
+                                        </button>
+                                    </div>
+                                `;
+                                
+                                // 绑定刷新按钮事件
+                                document.getElementById('refreshSavedAnalysisBtn').addEventListener('click', function() {
+                                    startStreamAnalysis(reviewId, problemsData);
+                                });
+                            }
+                        } else {
+                            console.log("[INFO] 未找到有效的保存分析结果", data);
+                        }
+                    })
+                    .catch(error => {
+                        console.error('[ERROR] 检查保存的分析结果失败:', error);
+                        // 失败时不做任何处理，保持默认UI状态
+                    });
+            }
+            
+            // 初始化流式分析功能
+            function initStreamAnalysis(reviewId, problems) {
+                const startButton = document.getElementById('startAiAnalysisBtn');
+                const refreshButton = document.getElementById('refreshAiAnalysisBtn');
+                
+                if (startButton) {
+                    // 开始分析按钮点击事件
+                    startButton.addEventListener('click', function() {
+                        startStreamAnalysis(reviewId, problems);
+                    });
+                }
+                
+                if (refreshButton) {
+                    // 刷新分析按钮点击事件
+                    refreshButton.addEventListener('click', function() {
+                        startStreamAnalysis(reviewId, problems);
+                    });
+                }
+            }
+        });
+    </script>
+
+    <script>
+        // 保存分析结果到数据库
+        function saveAnalysisResult(analysis, saveButton, reviewId) {
+            console.log("[DEBUG] 尝试保存回顾分析结果", analysis);
+            
+            if (!reviewId) {
+                console.error("[ERROR] 无法获取有效的review_id，无法保存分析结果");
+                
+                if (saveButton) {
+                    // 显示错误消息
+                    saveButton.className = 'btn btn-danger btn-lg';
+                    saveButton.innerHTML = '<i class="fas fa-times"></i> 保存失败: 无法获取有效的回顾ID';
+                    
+                    // 3秒后恢复按钮状态
+                    setTimeout(() => {
+                        saveButton.disabled = false;
+                        saveButton.className = 'btn btn-success btn-lg';
+                        saveButton.innerHTML = '<i class="fas fa-save"></i> 重试保存';
+                    }, 3000);
+                }
+                
+                return;
+            }
+            
+            // 直接获取并使用DOM中的内容，确保是最新最完整的
+            const reasoningChain = document.querySelector('.reasoning-chain .reasoning-content');
+            const resultContent = document.querySelector('.result-content');
+            
+            // 构建完整的分析结果
+            let analysisContent = {};
+            
+            // 1. 首先从finalResultObject获取现有属性
+            if (typeof finalResultObject === 'object' && finalResultObject !== null) {
+                // 复制所有属性，避免引用问题
+                analysisContent = {...finalResultObject};
+            }
+            
+            // 2. 确保推理过程被保存
+            if (reasoningChain && reasoningChain.textContent) {
+                analysisContent.推理过程 = reasoningChain.textContent;
+            }
+            
+            // 3. 确保综合分析被保存
+            if (resultContent && resultContent.innerHTML) {
+                // 尝试提取综合分析部分
+                const analysisMatch = resultContent.innerHTML.match(/<h3>综合分析<\/h3>([\s\S]*?)(?:<h3>|$)/i);
+                if (analysisMatch && analysisMatch[1]) {
+                    analysisContent.综合分析 = analysisMatch[1].trim();
+                } else {
+                    // 如果没有匹配到特定格式，就保存整个内容
+                    analysisContent.综合分析 = resultContent.innerHTML;
+                }
+            }
+            
+            // 4. 如果还是一个空对象，尝试使用传入的分析参数
+            if (Object.keys(analysisContent).length === 0 && analysis) {
+                if (typeof analysis === 'string') {
+                    analysisContent = {分析结果: analysis};
+                } else if (typeof analysis === 'object') {
+                    analysisContent = analysis;
+                }
+            }
+            
+            console.log("[DEBUG] 最终保存的分析内容:", analysisContent);
+            
+            // 构建保存请求数据
+            const saveData = {
+                review_id: reviewId,
+                analysis_result: analysisContent,
+                title: `回顾分析 (${new Date().toLocaleString('zh-CN')})`,
+                save_to_history: true  // 新增参数，指示同时保存到回顾分析历史
+            };
+            
+            console.log("[DEBUG] 发送保存请求，数据:", JSON.stringify(saveData));
+            
+            // 发送保存请求到回顾分析API接口
+            fetch('/api/review/update-analysis', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(saveData)
+            })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`服务器错误 (${response.status})`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.success) {
+                    console.log("[INFO] 回顾分析结果保存成功", data);
+                    
+                    // 显示成功消息在状态区域
+                    const statusElement = document.getElementById('status-message');
+                    if (statusElement) {
+                        statusElement.textContent = '分析已完成并成功保存';
+                        statusElement.style.color = '#28a745'; // 绿色表示成功
+                    }
+                    
+                    // 如果提供了保存按钮，更新按钮状态
+                    if (saveButton) {
+                        // 显示成功消息
+                        saveButton.className = 'btn btn-success btn-lg';
+                        saveButton.innerHTML = '<i class="fas fa-check"></i> 保存成功';
+                        
+                        // 禁用保存按钮，防止重复保存
+                        saveButton.disabled = true;
+                        
+                        // 添加一个隐藏的标记，表示已保存
+                        const savedFlag = document.createElement('input');
+                        savedFlag.type = 'hidden';
+                        savedFlag.id = 'analysis-saved-flag';
+                        savedFlag.value = 'true';
+                        document.body.appendChild(savedFlag);
+                    }
+                } else {
+                    console.error("[ERROR] 保存分析结果失败:", data.error);
+                    
+                    // 如果提供了保存按钮，更新按钮状态
+                    if (saveButton) {
+                        // 显示错误消息
+                        saveButton.className = 'btn btn-danger btn-lg';
+                        saveButton.innerHTML = '<i class="fas fa-times"></i> 保存失败: ' + (data.error || '未知错误');
+                        
+                        // 3秒后恢复按钮状态
+                        setTimeout(() => {
+                            saveButton.disabled = false;
+                            saveButton.className = 'btn btn-success btn-lg';
+                            saveButton.innerHTML = '<i class="fas fa-save"></i> 重试保存';
+                        }, 3000);
+                    }
+                }
+            })
+            .catch(error => {
+                console.error("[ERROR] 保存分析请求出错:", error);
+                
+                // 如果提供了保存按钮，更新按钮状态
+                if (saveButton) {
+                    // 显示错误消息
+                    saveButton.className = 'btn btn-danger btn-lg';
+                    saveButton.innerHTML = '<i class="fas fa-times"></i> 网络错误，请重试';
+                    
+                    // 3秒后恢复按钮状态
+                    setTimeout(() => {
+                        saveButton.disabled = false;
+                        saveButton.className = 'btn btn-success btn-lg';
+                        saveButton.innerHTML = '<i class="fas fa-save"></i> 重试保存';
+                    }, 3000);
+                }
+            });
+        }
+
+        // 修改handleStreamResponse函数，添加reviewId参数
+        function handleStreamResponse(response, resultElement, reviewId) {
+            console.log("[DEBUG] 开始处理流式响应", response.status);
+            
+            // 获取响应流
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let incompleteData = '';
+            
+            // 存储最终结果对象
+            let finalResultObject = {
+                success: true,
+                知识点分布: [],
+                错误类型分布: [],
+                难度分布: [],
+                学习建议: '',
+                习题推荐: '',
+                时间规划建议: ''
+            };
+            
+            console.log("[DEBUG] 初始化结果对象:", finalResultObject ? JSON.stringify(finalResultObject) : "undefined");
+        
+            // 更新最终结果对象
+            function updateFinalResultObject(resultObj) {
+                console.log("[DEBUG] 更新最终结果对象:", resultObj ? JSON.stringify(resultObj) : "undefined");
+                
+                // 确保finalResultObject是一个有效的对象
+                if (!finalResultObject) {
+                    finalResultObject = {};
+                }
+                
+                // 合并对象属性
+                finalResultObject = { ...finalResultObject, ...resultObj };
+                
+                console.log("[DEBUG] 更新后的最终结果对象:", finalResultObject ? JSON.stringify(finalResultObject) : "undefined");
+            }
+        
+            // 显示思维链和结果区域
+            const reasoningChainElement = document.createElement('div');
+            reasoningChainElement.className = 'reasoning-chain mt-3 mb-3 p-3 border rounded';
+            reasoningChainElement.style.display = 'none';  // 默认隐藏
+            reasoningChainElement.innerHTML = '<h5>推理过程</h5><div class="reasoning-content"></div>';
+            resultElement.appendChild(reasoningChainElement);
+            
+            const resultContentElement = document.createElement('div');
+            resultContentElement.className = 'result-content mt-3';
+            resultElement.appendChild(resultContentElement);
+            
+            // 添加保存按钮容器(初始隐藏)
+            const saveButtonContainer = document.createElement('div');
+            saveButtonContainer.className = 'save-actions mt-3 text-center';
+            saveButtonContainer.style.display = 'none';
+            
+            // 创建保存按钮
+            const saveButton = document.createElement('button');
+            saveButton.className = 'btn btn-success btn-lg';
+            saveButton.innerHTML = '<i class="fas fa-save"></i> 保存分析结果';
+            saveButton.onclick = function() {
+                // 禁用按钮防止重复点击
+                saveButton.disabled = true;
+                saveButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 保存中...';
+                
+                // 保存分析结果
+                saveAnalysisResult(finalResultObject, saveButton, reviewId);
+            };
+            
+            saveButtonContainer.appendChild(saveButton);
+            resultElement.appendChild(saveButtonContainer);
+            
+            // 添加切换按钮
+            const toggleButton = document.createElement('button');
+            toggleButton.className = 'btn btn-sm btn-outline-secondary mt-2';
+            toggleButton.textContent = '显示推理过程';
+            toggleButton.onclick = function() {
+                const isHidden = reasoningChainElement.style.display === 'none';
+                reasoningChainElement.style.display = isHidden ? 'block' : 'none';
+                toggleButton.textContent = isHidden ? '隐藏推理过程' : '显示推理过程';
+            };
+            resultElement.insertBefore(toggleButton, reasoningChainElement);
+            
+            // 处理流式响应
+            function processStream() {
+                reader.read().then(({ done, value }) => {
+                    if (done) {
+                        console.log("[DEBUG] 流式响应完成");
+                        // 显示保存按钮
+                        saveButtonContainer.style.display = 'block';
+                        return;
+                    }
+                    
+                    // 解码接收到的数据
+                    const chunk = decoder.decode(value, { stream: true });
+                    console.log("[DEBUG] 收到数据块，长度:" + chunk.length);
+                    
+                    // 处理数据块
+                    processChunk(chunk);
+                    
+                    // 继续读取
+                    processStream();
+                }).catch(error => {
+                    console.error("[ERROR] 读取流时出错:", error);
+                    appendToResult(`\n\n**读取响应时出错:** ${error.message}`, resultContentElement);
+                });
+            }
+            
+            // 处理数据块
+            function processChunk(chunk) {
+                // 将新数据添加到不完整数据缓冲区
+                incompleteData += chunk;
+                
+                // 尝试处理完整的行
+                while (incompleteData.includes('\n')) {
+                    let lineEnd = incompleteData.indexOf('\n');
+                    let line = incompleteData.substring(0, lineEnd).trim();
+                    incompleteData = incompleteData.substring(lineEnd + 1);
+                    
+                    // 如果是数据行，立即处理
+                    if (line.startsWith('data:')) {
+                        const data = line.substring(5).trim();
+                        
+                        // 检查是否是完成标记
+                        if (data === '[DONE]') {
+                            console.log("[DEBUG] 收到完成标记");
+                            return;
+                        }
+                        
+                        try {
+                            // 尝试解析JSON
+                            let jsonData;
+                            try {
+                                jsonData = JSON.parse(data);
+                            } catch (e) {
+                                console.error("无法解析JSON数据:", data, e);
+                                return;
+                            }
+                            
+                            // 处理不同类型的响应
+                            if (jsonData.error) {
+                                console.error("[ERROR] 收到错误信息:", jsonData.error);
+                                appendToResult(`\n\n**错误:** ${jsonData.error}`, resultContentElement);
+                            } else if (jsonData.choices && jsonData.choices.length > 0) {
+                                const choice = jsonData.choices[0];
+                                
+                                // 处理思维链
+                                if (choice.reasoning || 
+                                    (choice.delta && choice.delta.reasoning) || 
+                                    (choice.delta && choice.delta.reasoning_content) || 
+                                    choice.reasoning_content) {
+                                    
+                                    const reasoningContent = reasoningChainElement.querySelector('.reasoning-content');
+                                    const reasoningText = choice.reasoning || 
+                                                        (choice.delta && choice.delta.reasoning) || 
+                                                        (choice.delta && choice.delta.reasoning_content) || 
+                                                        choice.reasoning_content || '';
+                                    
+                                    if (reasoningText) {
+                                        appendToResult(reasoningText, reasoningContent);
+                                        // 显示思维链区域
+                                        reasoningChainElement.style.display = 'block';
+                                        toggleButton.textContent = '隐藏推理过程';
+                                    }
+                                }
+                                
+                                // 处理内容增量
+                                if (choice.delta && choice.delta.content) {
+                                    appendToResult(choice.delta.content, resultContentElement);
+                                } else if (choice.content) {
+                                    appendToResult(choice.content, resultContentElement);
+                                }
+                                
+                                // 处理结构化数据
+                                if (choice.delta && choice.delta.structured_output) {
+                                    updateFinalResultObject(choice.delta.structured_output);
+                                } else if (choice.structured_output) {
+                                    updateFinalResultObject(choice.structured_output);
+                                }
+                            }
+                        } catch (error) {
+                            console.error("[ERROR] 处理数据时出错:", error);
+                        }
+                    }
+                }
+            }
+            
+            // 辅助函数：将内容添加到结果元素
+            function appendToResult(content, targetElement) {
+                if (!content || !targetElement) return;
+                
+                // 使用innerHTML以支持Markdown格式
+                const currentContent = targetElement.innerHTML;
+                targetElement.innerHTML = currentContent + content;
+            }
+            
+            // 开始处理流
+            processStream();
+        }
+    </script>
+</body>
+</html>

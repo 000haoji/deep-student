@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Markdown与LaTeX流式渲染测试</title>
+    <!-- 引入Bootstrap CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <!-- 引入主样式表 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    
+    <!-- 引入Markdown样式 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/markdown.css') }}">
+    
+    <!-- 引入highlight.js样式 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/highlight/github.min.css') }}">
+    
+    <!-- 引入必要的JS库 -->
+    <!-- 引入jQuery和Bootstrap JS -->
+    <script src="{{ url_for('static', filename='js/jquery-3.6.0.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+    
+    <!-- 引入marked.js (确保使用与主系统相同的版本) -->
+    <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
+    
+    <!-- 引入markdown-it (如果系统中有使用) -->
+    <script src="{{ url_for('static', filename='js/markdown-it.min.js') }}"></script>
+    
+    <!-- 引入highlight.js -->
+    <script src="{{ url_for('static', filename='js/highlight.min.js') }}"></script>
+    
+    <!-- 设置MathJax配置 -->
+    <script>
+    MathJax = {
+        tex: {
+            inlineMath: [['$', '$'], ['\\(', '\\)']],
+            displayMath: [['$$', '$$'], ['\\[', '\\]']],
+            processEscapes: true,
+            processEnvironments: true
+        },
+        options: {
+            skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+        },
+        startup: {
+            pageReady: function() {
+                return MathJax.startup.defaultPageReady();
+            }
+        }
+    };
+    </script>
+    <script id="MathJax-script" src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+    
+    <style>
+        .test-container {
+            max-width: 960px;
+            margin: 0 auto;
+        }
+        .test-section {
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        .example-buttons {
+            margin-bottom: 15px;
+        }
+        .result-container {
+            background-color: white;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            min-height: 200px;
+            position: relative;
+        }
+        /* 确保渲染区域样式正确 */
+        .analysis-result {
+            width: 100%;
+            min-height: 200px;
+            position: relative;
+        }
+        /* Markdown渲染样式 */
+        .markdown-body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            font-size: 16px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+        .markdown-body h1 {
+            font-size: 2em;
+            margin-top: 0.5em;
+            margin-bottom: 0.5em;
+        }
+        .markdown-body h2 {
+            font-size: 1.5em;
+            margin-top: 0.5em;
+            margin-bottom: 0.5em;
+        }
+        .markdown-body h3 {
+            font-size: 1.25em;
+            margin-top: 0.5em;
+            margin-bottom: 0.5em;
+        }
+        .markdown-body code {
+            background-color: rgba(27, 31, 35, 0.05);
+            border-radius: 3px;
+            padding: 0.2em 0.4em;
+            font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+        }
+        .markdown-body pre {
+            background-color: #f6f8fa;
+            border-radius: 3px;
+            padding: 16px;
+            overflow: auto;
+            font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+        }
+        .markdown-body pre code {
+            background-color: transparent;
+            padding: 0;
+        }
+        .markdown-body blockquote {
+            padding: 0 1em;
+            color: #6a737d;
+            border-left: 0.25em solid #dfe2e5;
+        }
+        .thinking-indicator {
+            position: absolute;
+            top: 15px;
+            left: 15px;
+            color: #6c757d;
+            font-style: italic;
+        }
+        .ml-2 {
+            margin-left: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container py-4 test-container">
+        <h1 class="text-center mb-4">Markdown与LaTeX流式渲染测试</h1>
+        
+        <!-- 状态信息区域 -->
+        <div id="status-message" class="alert alert-info d-none">
+            初始化测试环境...
+        </div>
+        
+        <div class="test-section">
+            <h3>渲染测试控制台</h3>
+            <p>此页面用于测试流式输出中的Markdown和LaTeX渲染效果。选择预设示例或输入自定义内容进行测试。</p>
+            
+            <div class="example-buttons mb-3">
+                <button class="btn btn-sm btn-outline-primary example-btn" data-example="markdown">Markdown基础示例</button>
+                <button class="btn btn-sm btn-outline-primary example-btn" data-example="latex">LaTeX公式示例</button>
+                <button class="btn btn-sm btn-outline-primary example-btn" data-example="mixed">混合内容示例</button>
+                <button class="btn btn-sm btn-outline-primary example-btn" data-example="complex">复杂排版示例</button>
+            </div>
+            
+            <div class="form-group">
+                <label for="content-input">测试内容：</label>
+                <textarea class="form-control" id="content-input" rows="6" placeholder="输入要测试渲染的Markdown或LaTeX内容..."></textarea>
+            </div>
+            
+            <div class="form-group mt-3">
+                <label for="speed-input">流式输出速度（毫秒/字符）：</label>
+                <input type="range" class="form-range" id="speed-input" min="10" max="200" value="50">
+                <span id="speed-display">50 ms</span>
+            </div>
+            
+            <div class="mt-3">
+                <button id="client-stream-btn" class="btn btn-primary">客户端流式渲染</button>
+                <button id="server-stream-btn" class="btn btn-info ml-2">服务器流式渲染</button>
+                <button id="direct-render-btn" class="btn btn-success ml-2">直接渲染</button>
+            </div>
+        </div>
+        
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="test-section">
+                    <h3>客户端渲染结果</h3>
+                    <div class="result-container">
+                        <div id="client-result" class="analysis-result"></div>
+                        <div id="thinkingIndicator" class="thinking-indicator" style="display: none;">正在生成...</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="test-section">
+                    <h3>服务器渲染结果</h3>
+                    <div class="result-container">
+                        <div id="server-result" class="analysis-result"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 引入流式分析JS -->
+    <script src="{{ url_for('static', filename='js/stream_analysis.js') }}"></script>
+    
+    <!-- 测试页面专用JS -->
+    <script src="{{ url_for('static', filename='js/markdown_latex_test.js') }}"></script>
+</body>
+</html>

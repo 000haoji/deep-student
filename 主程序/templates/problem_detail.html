@@ -1,0 +1,726 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>错题详情 - 考研{{ subject_info.name|default('数学') }}错题管理</title>
+    <!-- 使用Bootstrap自带的图标库替代Font Awesome -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+    <script src="{{ url_for('static', filename='js/jquery.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+    
+    <!-- 简单实现Markdown渲染，避免使用marked库 -->
+    <script>
+    function simpleMarkdown(text) {
+        if (!text) return '';
+        
+        // 基本Markdown转换
+        let html = text;
+        
+        // 标题
+        html = html.replace(/^### (.*?)$/gm, '<h3>$1</h3>');
+        html = html.replace(/^## (.*?)$/gm, '<h2>$1</h2>');
+        html = html.replace(/^# (.*?)$/gm, '<h1>$1</h1>');
+        
+        // 粗体
+        html = html.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+        
+        // 斜体
+        html = html.replace(/\*(.*?)\*/g, '<em>$1</em>');
+        
+        // 代码
+        html = html.replace(/`(.*?)`/g, '<code>$1</code>');
+        
+        // 换行
+        html = html.replace(/\n/g, '<br>');
+        
+        return html;
+    }
+    </script>
+    
+    <!-- 配置MathJax -->
+    <script>
+    MathJax = {
+        tex: {
+            inlineMath: [['$', '$'], ['\\(', '\\)']],
+            displayMath: [['$$', '$$'], ['\\[', '\\]']],
+            processEscapes: true,
+            processEnvironments: true
+        },
+        options: {
+            skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'code']
+        }
+    };
+    </script>
+    <script id="MathJax-script" src="{{ url_for('static', filename='js/tex-mml-svg.js') }}"></script>
+    <style>
+        /* 内联custom.css的内容 */
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+        }
+        .problem-image {
+            max-width: 100%;
+            max-height: 300px;
+            object-fit: contain;
+            width: auto;
+            height: auto;
+        }
+        /* 在较小屏幕上进一步限制图片大小 */
+        @media (max-width: 768px) {
+            .problem-image {
+                max-height: 250px;
+            }
+        }
+        .fullscreen-image {
+            max-width: 100%;
+            max-height: 80vh;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+        }
+        .typicality-stars {
+            display: inline-flex;
+            align-items: center;
+        }
+        .typicality-star {
+            cursor: pointer;
+            font-size: 1.25rem;
+            margin-right: 2px;
+            color: #dee2e6;
+        }
+        .typicality-star.active {
+            color: #ffc107;
+        }
+        .tag-badge {
+            background-color: #e9ecef;
+            color: #495057;
+            padding: 0.35em 0.65em;
+            border-radius: 0.25rem;
+            margin-right: 0.5em;
+            margin-bottom: 0.5em;
+            display: inline-block;
+        }
+        .problem-card {
+            margin-bottom: 15px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .tag {
+            display: inline-block;
+            background-color: #f0f0f0;
+            padding: 2px 8px;
+            margin: 2px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        /* 添加难度和典型度星星样式 */
+        .stars-container i {
+            color: #dee2e6;
+            margin-right: 2px;
+        }
+        .stars-container i.text-warning {
+            color: #ffc107;
+        }
+        /* 自定义占位符样式 */
+        .placeholder-img {
+            background-color: #f8f9fa;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 20px;
+            text-align: center;
+            color: #6c757d;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container mt-4">
+        <div class="row">
+            <!-- 左侧列：错题图片、基本信息、用户补充说明、操作按钮 -->
+            <div class="col-md-6">
+                <!-- 错题图片 -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">错题图片</h5>
+                    </div>
+                    <div class="card-body text-center">
+                        <img id="problem-image" src="https://via.placeholder.com/400x300?text=加载中..." 
+                             class="img-fluid rounded problem-image" alt="错题图片">
+                </div>
+            </div>
+            
+                <!-- 基本信息 -->
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">基本信息</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <strong>分类:</strong> 
+                            <span id="category-badge" class="badge bg-primary">加载中...</span>
+                            <span id="subcategory-badge" class="badge bg-secondary"></span>
+                        </div>
+                        <div class="mb-3">
+                            <strong>错误类型:</strong> 
+                            <span id="error-type">加载中...</span>
+                        </div>
+                        <div class="mb-3">
+                            <strong>难度:</strong>
+                            <div class="difficulty-stars" data-rating="3">
+                                <i class="fas fa-star text-warning"></i>
+                                <i class="fas fa-star text-warning"></i>
+                                <i class="fas fa-star text-warning"></i>
+                                <i class="far fa-star text-muted"></i>
+                                <i class="far fa-star text-muted"></i>
+                                <span class="ms-2" id="difficulty-value">3/5</span>
+                            </div>
+                        </div>
+                        <!-- 典型度评分 -->
+                        <div class="mb-3">
+                            <strong>典型度评分:</strong>
+                            <div class="typicality-container mt-2">
+                                <div class="typicality-stars" data-rating="3">
+                                    <i class="typicality-star far fa-star active" data-value="1"></i>
+                                    <i class="typicality-star far fa-star active" data-value="2"></i>
+                                    <i class="typicality-star far fa-star active" data-value="3"></i>
+                                    <i class="typicality-star far fa-star" data-value="4"></i>
+                                    <i class="typicality-star far fa-star" data-value="5"></i>
+                                    <span class="ms-2 typicality-value">3/5</span>
+                                </div>
+                                <small class="form-text text-muted">点击星星为这道题评分</small>
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <strong>标签:</strong> 
+                            <div id="tags-container">
+                                <span class="text-muted">加载中...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 用户补充说明 -->
+                <div class="card mb-3">
+                    <div class="card-header bg-light">
+                        <h5 class="card-title mb-0">用户补充说明</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if problem.notes %}
+                            {{ problem.notes }}
+                        {% else %}
+                            无补充说明
+                        {% endif %}
+                    </div>
+                            </div>
+                            
+                <!-- 操作按钮 -->
+                <div class="d-flex flex-column gap-2 mb-4">
+                    <button class="btn btn-danger w-100" id="deleteBtn" onclick="deleteProblem()">删除错题</button>
+                    <a href="{{ url_for('edit_problem', problem_id=problem.id, subject=current_subject|default('math')) }}" class="btn btn-primary w-100">编辑错题</a>
+                    <a href="{{ url_for('problems', subject=current_subject|default('math')) }}" class="btn btn-secondary w-100" onclick="backToList()">返回列表</a>
+                </div>
+                            </div>
+                            
+            <!-- 右侧列：题目内容和错误分析 -->
+                                <div class="col-md-6">
+                <!-- 加载状态提示 -->
+                <div id="loading" class="text-center py-5">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">正在加载...</span>
+                    </div>
+                    <p class="mt-2">正在加载错题详情...</p>
+                </div>
+
+                <!-- 错题内容区域 -->
+                <div id="content" style="display: none;">
+                    <!-- 题目内容 -->
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h5 class="card-title mb-0">题目内容</h5>
+                                </div>
+                        <div class="card-body markdown-body" id="problem-content-display">
+                            加载中...
+                                </div>
+                            </div>
+                            
+                    <!-- 错误分析 -->
+                    <div class="card mb-4">
+                        <div class="card-header">
+                            <h5 class="card-title mb-0">错误分析</h5>
+                        </div>
+                        <div class="card-body markdown-body" id="error-analysis-display">
+                            加载中...
+                        </div>
+                            </div>
+                            
+                    <!-- 隐藏正确解法部分 -->
+                    <div class="card mb-4" style="display: none;">
+                        <div class="card-header">
+                            <h5 class="card-title mb-0">正确解法</h5>
+                        </div>
+                        <div class="card-body markdown-body" id="correct-solution-display">
+                            加载中...
+                        </div>
+                    </div>
+                </div>
+                            </div>
+                        </div>
+                        
+        <!-- 错误提示区域 -->
+        <div id="error-container" class="alert alert-danger" style="display: none;"></div>
+                                </div>
+                                
+    <script>
+    // 从URL获取错题ID
+    const pathParts = window.location.pathname.split('/');
+    const problemId = pathParts[pathParts.length - 1];
+    
+    // 获取学科参数 - 从当前页面传递的变量
+    let currentSubject = "{{ current_subject|default('math') }}";
+    console.log("当前学科:", currentSubject);
+    
+    // 处理Markdown和LaTeX的函数（使用简化版本）
+    function processMarkdownWithLatex(text) {
+        if (!text) return '';
+        
+        // 步骤1: 暂时"保护"LaTeX公式，避免被Markdown解析器修改
+        const latexPlaceholders = [];
+        
+        // 保护行内公式: $...$
+        let processedText = text.replace(/\$([^\$]+)\$/g, function(match) {
+            latexPlaceholders.push(match);
+            return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+        });
+        
+        // 保护块级公式: $$...$$
+        processedText = processedText.replace(/\$\$([\s\S]+?)\$\$/g, function(match) {
+            latexPlaceholders.push(match);
+            return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+        });
+        
+        // 保护 \( ... \) 格式的公式
+        processedText = processedText.replace(/\\\(([\s\S]+?)\\\)/g, function(match) {
+            latexPlaceholders.push(match);
+            return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+        });
+        
+        // 保护 \[ ... \] 格式的公式
+        processedText = processedText.replace(/\\\[([\s\S]+?)\\\]/g, function(match) {
+            latexPlaceholders.push(match);
+            return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+        });
+
+        // 处理Markdown内容
+        const htmlContent = simpleMarkdown(processedText);
+        
+        // 步骤3: 恢复LaTeX公式
+        const finalContent = htmlContent.replace(/LATEXPLACEHOLDER(\d+)/g, function(match, index) {
+            return latexPlaceholders[parseInt(index)];
+        });
+        
+        return finalContent;
+    }
+
+    // 页面加载后执行
+    $(document).ready(function() {
+        console.log("页面已加载，准备获取错题详情，ID:", problemId);
+        
+        // 显示加载状态
+        $("#loading").show();
+        $("#content").hide();
+        $("#error-container").hide();
+        
+        // 加载错题详情
+        $.ajax({
+            url: `/api/problem/${problemId}`,
+            type: 'GET',
+            data: { subject: currentSubject }, // 使用当前学科变量
+            success: function(data) {
+                console.log("成功获取错题详情:", data);
+                
+                // 填充基本信息
+                $("#category-badge").text(data.problem_category || "未分类");
+                $("#subcategory-badge").text(data.problem_subcategory || "");
+                $("#error-type").text(data.error_type || "未指定");
+                
+                // 设置难度
+                const difficulty = data.difficulty || 3;
+                $("#difficulty-value").text(`${difficulty}/5`);
+                $(".difficulty-stars").attr("data-rating", difficulty);
+                $(".difficulty-stars i").each(function(index) {
+                    $(this).removeClass("fas fa-star text-warning far fa-star text-muted");
+                    if (index < difficulty) {
+                        $(this).addClass("fas fa-star text-warning");
+                    } else {
+                        $(this).addClass("far fa-star text-muted");
+                    }
+                });
+                
+                // 设置典型度
+                const typicality = data.typicality || 3;
+                $(".typicality-stars").attr("data-rating", typicality);
+                $(".typicality-value").text(`${typicality}/5`);
+                $(".typicality-star").removeClass("active");
+                $(".typicality-star").each(function() {
+                    if ($(this).data("value") <= typicality) {
+                        $(this).addClass("active");
+                    }
+                });
+                
+                // 填充内容区域
+                $("#problem-content-display").html(processMarkdownWithLatex(data.problem_content || "无题目内容"));
+                $("#error-analysis-display").html(processMarkdownWithLatex(data.error_analysis || "无错误分析"));
+                $("#correct-solution-display").html(processMarkdownWithLatex(data.correct_solution || "无正确解法"));
+                
+                // 处理标签
+                const tagsContainer = $("#tags-container");
+                tagsContainer.empty();
+                
+                if (data.tags && data.tags.length > 0) {
+                    data.tags.forEach(tag => {
+                        tagsContainer.append(`<span class="tag-badge">${tag}</span>`);
+                    });
+                } else {
+                    tagsContainer.append('<span class="text-muted">无标签</span>');
+                }
+                
+                // 处理图片 - 使用更简单的图片处理逻辑
+                if (data.image_path) {
+                    try {
+                        let imagePath = data.image_path;
+                        console.log("原始图片路径:", imagePath);
+                        
+                        // 构建服务器端图片路径
+                        let finalPath;
+                        
+                        if (imagePath.includes('://')) {
+                            // 完整URL
+                            finalPath = imagePath;
+                        } else {
+                            // 从路径提取文件名
+                            let filename = imagePath.replace(/\\/g, '/');
+                            if (filename.includes('/')) {
+                                filename = filename.split('/').pop();
+                            }
+                            
+                            // 构建uploads路径
+                            finalPath = `/uploads/${filename}`;
+                        }
+                        
+                        console.log("设置图片路径:", finalPath);
+                        $("#problem-image").attr("src", finalPath);
+                        
+                        // 添加点击放大功能
+                        $("#problem-image").css("cursor", "pointer").on("click", function() {
+                            showFullImage(finalPath);
+                        });
+                        
+                        // 图片错误处理
+                        $("#problem-image").off('error').on('error', function() {
+                            console.error("图片加载失败");
+                            // 使用内联的占位符而非外部图片
+                            $(this).replaceWith(
+                                `<div class="placeholder-img" style="width:100%; height:300px;">
+                                    <div>
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-image" viewBox="0 0 16 16">
+                                            <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+                                            <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2h-12zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1h12z"/>
+                                        </svg>
+                                        <p class="mt-2">图片加载失败</p>
+                                    </div>
+                                </div>`
+                            );
+                        });
+                    } catch (e) {
+                        console.error("处理图片路径时出错:", e);
+                        $("#problem-image").replaceWith(
+                            `<div class="placeholder-img" style="width:100%; height:300px;">
+                                <div>
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-exclamation-triangle" viewBox="0 0 16 16">
+                                        <path d="M7.938 2.016A.13.13 0 0 1 8.002 2a.13.13 0 0 1 .063.016.146.146 0 0 1 .054.057l6.857 11.667c.036.06.035.124.002.183a.163.163 0 0 1-.054.06.116.116 0 0 1-.066.017H1.146a.115.115 0 0 1-.066-.017.163.163 0 0 1-.054-.06.176.176 0 0 1 .002-.183L7.884 2.073a.147.147 0 0 1 .054-.057zm1.044-.45a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566z"/>
+                                        <path d="M7.002 12a1 1 0 1 1 2 0 1 1 0 0 1-2 0zM7.1 5.995a.905.905 0 1 1 1.8 0l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995z"/>
+                                    </svg>
+                                    <p class="mt-2">图片处理错误</p>
+                                </div>
+                            </div>`
+                        );
+                    }
+                } else {
+                    // 无图片
+                    $("#problem-image").replaceWith(
+                        `<div class="placeholder-img" style="width:100%; height:300px;">
+                            <div>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" fill="currentColor" class="bi bi-card-image" viewBox="0 0 16 16">
+                                    <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z"/>
+                                    <path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 14.5 2h-13zm13 1a.5.5 0 0 1 .5.5v6l-3.775-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12v.54A.5.5 0 0 1 1 12.5v-9a.5.5 0 0 1 .5-.5h13z"/>
+                                </svg>
+                                <p class="mt-2">无图片</p>
+                            </div>
+                        </div>`
+                    );
+                }
+                
+                // 渲染MathJax
+                setTimeout(function() {
+                    try {
+                        if (window.MathJax) {
+                            if (typeof window.MathJax.typeset === 'function') {
+                                window.MathJax.typeset();
+                                console.log("LaTeX渲染完成 (typeset)");
+                            } else if (typeof window.MathJax.Hub !== 'undefined' && typeof window.MathJax.Hub.Queue === 'function') {
+                                window.MathJax.Hub.Queue(["Typeset", window.MathJax.Hub]);
+                                console.log("LaTeX渲染完成 (Hub.Queue)");
+                            } else if (typeof window.MathJax.typesetPromise === 'function') {
+                                window.MathJax.typesetPromise()
+                                    .then(function() {
+                                        console.log("LaTeX渲染完成 (typesetPromise)");
+                                    })
+                                    .catch(function(err) {
+                                        console.error("LaTeX渲染错误:", err);
+                                    });
+                            } else {
+                                console.warn("MathJax加载但无法找到渲染方法");
+                            }
+                        } else {
+                            console.warn("MathJax未加载，无法渲染LaTeX");
+                        }
+                    } catch (e) {
+                        console.error("尝试渲染LaTeX时出错:", e);
+                    }
+                }, 500); // 增加延迟时间确保内容已加载
+                
+                // 隐藏加载状态，显示内容
+                $("#loading").hide();
+                $("#content").show();
+                
+                // 绑定典型度评分事件
+                $(".typicality-star").on("click", function() {
+                    const rating = $(this).data("value");
+                    updateTypicality(rating);
+                });
+            },
+            error: function(xhr, status, error) {
+                console.error("获取错题详情失败:", error);
+                console.error("状态码:", xhr.status);
+                console.error("响应:", xhr.responseText);
+                
+                $("#loading").hide();
+                $("#error-container")
+                    .html(`<div class="alert alert-danger">
+                        <h4>加载错题详情失败</h4>
+                        <p>${xhr.responseJSON?.error || error || "未知错误"}</p>
+                        <p>请确认错题ID是否正确，并检查网络连接。</p>
+                        <a href="/problems/${currentSubject}" class="btn btn-primary mt-2">返回错题列表</a>
+                    </div>`)
+                    .show();
+            }
+        });
+    });
+    
+    // 确保图片放大功能正常
+    function showFullImage(imageSrc) {
+        // 创建模态框的HTML
+        const modalHtml = `
+        <div class="modal fade" id="imageModal" tabindex="-1" role="dialog" aria-labelledby="imageModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="imageModalLabel">查看完整图片</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body text-center">
+                        <img src="${imageSrc}" class="fullscreen-image" alt="完整图片">
+                    </div>
+                </div>
+            </div>
+        </div>
+        `;
+        
+        // 确保不会重复添加模态框
+        $("#imageModal").remove();
+        $("body").append(modalHtml);
+        
+        // 显示模态框
+        const modal = new bootstrap.Modal(document.getElementById('imageModal'));
+        modal.show();
+    }
+
+    // 更新典型度函数
+    function updateTypicality(rating) {
+        if (!problemId) return;
+        
+        $.ajax({
+            url: `/api/problem/${problemId}/typicality`,
+            type: 'PUT',
+            data: {
+                typicality: rating,
+                subject: currentSubject
+            },
+            success: function(data) {
+                console.log("典型度更新成功:", data);
+                
+                // 更新UI
+                $(".typicality-stars").attr("data-rating", rating);
+                $(".typicality-value").text(`${rating}/5`);
+                $(".typicality-star").removeClass("active");
+                $(".typicality-star").each(function() {
+                    if ($(this).data("value") <= rating) {
+                        $(this).addClass("active");
+                    }
+                });
+                
+                // 显示成功提示
+                const toast = `
+                <div class="toast position-fixed top-0 end-0 m-3" role="alert" aria-live="assertive" aria-atomic="true" data-bs-delay="3000">
+                    <div class="toast-header bg-success text-white">
+                        <strong class="me-auto">操作成功</strong>
+                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                    </div>
+                    <div class="toast-body">典型度已更新为 ${rating} 星</div>
+                </div>
+                `;
+                $("body").append(toast);
+                const toastElement = document.querySelector('.toast');
+                const bsToast = new bootstrap.Toast(toastElement);
+                bsToast.show();
+            },
+            error: function(xhr, status, error) {
+                console.error("更新典型度失败:", error);
+                alert("更新典型度失败: " + (xhr.responseJSON?.error || error || "未知错误"));
+            }
+        });
+    }
+    
+    // 删除错题函数
+    function deleteProblem() {
+        if (!confirm("确定要删除此错题吗？此操作无法撤销。")) {
+            return;
+        }
+        
+        // 显示加载提示
+        $("#deleteBtn").prop("disabled", true).html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 删除中...');
+        
+        $.ajax({
+            url: `/api/problem/${problemId}`,
+            type: 'DELETE',
+            data: { subject: currentSubject },
+            success: function(data) {
+                console.log("错题删除成功:", data);
+                window.location.href = `/problems/${currentSubject}`;
+            },
+            error: function(xhr, status, error) {
+                console.error("删除错题失败:", error);
+                alert("删除错题失败: " + (xhr.responseJSON?.error || error || "未知错误"));
+                $("#deleteBtn").prop("disabled", false).text("删除错题");
+            }
+        });
+    }
+    
+    // 退出详情页函数
+    function backToList() {
+        window.location.href = `/problems/${currentSubject}`;
+    }
+            
+    // 全局兜底函数 - 防止任何分析结果调用失败
+    window.displayAnalysisResult = function(analysis) {
+        console.log('全局兜底函数 displayAnalysisResult 被调用:', analysis);
+        try {
+            // 确保analysis是有效对象
+            if (!analysis || typeof analysis !== 'object') {
+                analysis = {
+                    '题目类型': '未知类型',
+                    '具体分支': '未知分支',
+                    '错误类型': '未知错误类型',
+                    '题目原文': '未提供题目内容',
+                    '错误分析': '分析暂不可用，请稍后重试',
+                    '正确解法': '解法暂不可用，请稍后重试',
+                    '难度评估': 3,
+                    '知识点标签': []
+                };
+            }
+            
+            // 添加一个隐藏的成功标记，确保任务被标记为完成
+            const successMarker = document.createElement('div');
+            successMarker.id = 'analysis-success-marker';
+            successMarker.style.display = 'none';
+            document.body.appendChild(successMarker);
+            
+            // 显示分析结果（如果有相应的元素）
+            const problemCategoryElement = document.getElementById('category-badge');
+            if (problemCategoryElement) {
+                problemCategoryElement.textContent = analysis['题目类型'] || '未知类型';
+            }
+            
+            const problemSubcategoryElement = document.getElementById('subcategory-badge');
+            if (problemSubcategoryElement) {
+                problemSubcategoryElement.textContent = analysis['具体分支'] || '';
+            }
+            
+            const errorTypeElement = document.getElementById('error-type');
+            if (errorTypeElement) {
+                errorTypeElement.textContent = analysis['错误类型'] || '未知错误';
+            }
+            
+            const errorAnalysisElement = document.getElementById('error-analysis-display');
+            if (errorAnalysisElement) {
+                const errorAnalysis = analysis['错误分析'] || '分析暂不可用，请稍后重试';
+                errorAnalysisElement.innerHTML = errorAnalysis;
+            }
+            
+            const correctSolutionElement = document.getElementById('correct-solution-display');
+            if (correctSolutionElement) {
+                const correctSolution = analysis['正确解法'] || '解法暂不可用，请稍后重试';
+                correctSolutionElement.innerHTML = correctSolution;
+            }
+            
+            // 尝试保存分析结果
+            saveAnalysisResult(analysis);
+            
+        } catch (e) {
+            console.error('显示分析结果时出错:', e);
+        }
+    };
+            
+    // 保存分析结果到系统
+    function saveAnalysisResult(analysis) {
+        console.log('尝试保存分析结果');
+        
+        if (!problemId) {
+            console.warn('无法获取problem_id，无法保存分析结果');
+            return;
+        }
+        
+        // 构建保存请求数据
+        const saveData = {
+            problem_id: problemId,
+            analysis_result: analysis
+        };
+        
+        // 发送保存请求
+        fetch('/api/problem/update-analysis', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(saveData)
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                console.log('分析结果保存成功');
+            } else {
+                console.error('保存分析结果失败:', data.error);
+            }
+        })
+        .catch(error => {
+            console.error('保存分析请求出错:', error);
+        });
+    }
+    </script>
+</body>
+</html>

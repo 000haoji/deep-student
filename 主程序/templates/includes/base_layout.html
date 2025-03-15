@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}硅基流动{% endblock %}</title>
+    <!-- 使用本地Tailwind CSS替代CDN -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.min.css') }}">
+    <!-- 全局CSS -->
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f8f9fa;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+        .navbar {
+            background-color: #1a202c;
+            padding: 15px 0;
+            color: white;
+        }
+        .navbar-container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .navbar-brand {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: white;
+            text-decoration: none;
+        }
+        .navbar-nav {
+            display: flex;
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+        .nav-item {
+            margin-left: 20px;
+        }
+        .nav-link {
+            color: rgba(255, 255, 255, 0.8);
+            text-decoration: none;
+            padding: 5px 10px;
+            border-radius: 5px;
+            transition: background-color 0.3s, color 0.3s;
+        }
+        .nav-link:hover, .nav-link.active {
+            background-color: rgba(255, 255, 255, 0.1);
+            color: white;
+        }
+        .footer {
+            margin-top: 50px;
+            padding: 20px 0;
+            background-color: #f1f1f1;
+            text-align: center;
+            color: #666;
+            font-size: 0.9rem;
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <header class="navbar">
+        <div class="navbar-container container">
+            <a href="/" class="navbar-brand">硅基流动</a>
+            <ul class="navbar-nav">
+                <li class="nav-item">
+                    <a href="/" class="nav-link {% if request.path == '/' %}active{% endif %}">首页</a>
+                </li>
+                <li class="nav-item">
+                    <a href="/deepseek_stream" class="nav-link {% if request.path == '/deepseek_stream' %}active{% endif %}">流式请求</a>
+                </li>
+                <li class="nav-item">
+                    <a href="/langchain_rag" class="nav-link {% if request.path == '/langchain_rag' %}active{% endif %}">RAG增强</a>
+                </li>
+            </ul>
+        </div>
+    </header>
+    
+    <main>
+        {% block content %}{% endblock %}
+    </main>
+    
+    <footer class="footer">
+        <div class="container">
+            <p> 2023-2024 硅基流动. 保留所有权利.</p>
+        </div>
+    </footer>
+</body>
+</html>

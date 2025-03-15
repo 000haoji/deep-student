@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>复习计划 - 考研数学错题管理</title>
+    <!-- 使用CDN链接替代本地资源 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/jstree@3.3.12/dist/themes/default/style.min.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jstree@3.3.12/dist/jstree.min.js"></script>
+    <style>
+        /* 内联custom.css的内容 */
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .review-item {
+            transition: transform 0.2s;
+            margin-bottom: 15px;
+        }
+        .review-item:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .tag {
+            display: inline-block;
+            background-color: #f0f0f0;
+            padding: 2px 8px;
+            margin: 2px;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+        .tags-card {
+            height: 500px;
+            overflow-y: auto;
+        }
+        .tags-content {
+            position: sticky;
+            top: 0;
+        }
+        .tag-count {
+            font-size: 0.8em;
+            color: #6c757d;
+            margin-left: 3px;
+        }
+        .tag-tree-container {
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        .tag-stats {
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            padding: 10px;
+            margin-bottom: 15px;
+        }
+        /* 自定义jsTree样式 */
+        .jstree-default .jstree-anchor {
+            font-size: 14px;
+        }
+        .jstree-default .jstree-clicked {
+            background-color: #e9ecef;
+            box-shadow: none;
+        }
+        .jstree-default .jstree-hovered {
+            background-color: #f8f9fa;
+            box-shadow: none;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container py-4">
+        <h1 class="mb-4">复习计划</h1>
+        
+        <div class="row">
+            <!-- 左侧：创建复习计划和标签树 -->
+            <div class="col-lg-4">
+                <!-- 标签树 -->
+                <div class="card mb-4">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">知识点标签树</h5>
+                        <button class="btn btn-sm btn-outline-secondary" id="refreshTagsBtn">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="tag-stats" id="tagStats">
+                            <div class="d-flex justify-content-between mb-2">
+                                <div>总标签数: <strong id="totalTags">0</strong></div>
+                                <div>已标记题目: <strong id="totalTaggedProblems">0</strong></div>
+                            </div>
+                            <h6 class="mb-2">热门标签:</h6>
+                            <div id="topTags"></div>
+                        </div>
+                        
+                        <div class="tag-tree-container">
+                            <div id="tagTree"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 创建复习计划 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">创建复习计划</h5>
+                    </div>
+                    <div class="card-body">
+                        <form id="reviewForm">
+                            <div class="mb-3">
+                                <label for="reviewTitle" class="form-label">计划标题</label>
+                                <input type="text" class="form-control" id="reviewTitle" placeholder="例如: 高数极限专题复习">
+                            </div>
+                            <div class="mb-3">
+                                <label for="reviewDescription" class="form-label">计划描述</label>
+                                <textarea class="form-control" id="reviewDescription" rows="2" placeholder="简要描述计划内容和目标"></textarea>
+                            </div>
+                            <div class="mb-3">
+                                <label for="reviewTags" class="form-label">选择标签</label>
+                                <input type="text" class="form-control" id="reviewTags" placeholder="从标签树中选择或手动输入">
+                                <div class="form-text">多个标签用逗号分隔</div>
+                                <div id="selectedTags" class="mt-2"></div>
+                            </div>
+                            <div class="mb-3">
+                                <label for="reviewStartDate" class="form-label">开始日期</label>
+                                <input type="date" class="form-control" id="reviewStartDate">
+                            </div>
+                            <div class="mb-3">
+                                <label for="reviewEndDate" class="form-label">结束日期</label>
+                                <input type="date" class="form-control" id="reviewEndDate">
+                            </div>
+                            <button type="submit" class="btn btn-primary">创建复习计划</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 右侧：复习计划列表 -->
+            <div class="col-lg-8">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">我的复习计划</h5>
+                        <button class="btn btn-sm btn-outline-secondary" id="refreshReviewsBtn">
+                            <i class="fas fa-sync-alt"></i>
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div id="reviewsList">
+                            <div class="text-center py-4" id="loadingReviews">
+                                <div class="spinner-border text-primary" role="status">
+                                    <span class="visually-hidden">正在加载...</span>
+                                </div>
+                                <p class="mt-2">正在加载复习计划...</p>
+                            </div>
+                            <div class="text-center py-4" id="noReviews" style="display: none;">
+                                <i class="fas fa-info-circle fs-3 text-muted"></i>
+                                <p class="mt-2">暂无复习计划，请创建一个新的计划</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        $(document).ready(function() {
+            console.log('复习计划页面已加载');
+            
+            // 加载标签树
+            loadTagsTree();
+            
+            // 加载复习计划列表
+            loadReviews();
+            
+            // 绑定表单提交事件
+            $('#reviewForm').on('submit', function(e) {
+                e.preventDefault();
+                createReview();
+            });
+            
+            // 绑定刷新按钮事件
+            $('#refreshTagsBtn').on('click', function() {
+                loadTagsTree();
+            });
+            
+            $('#refreshReviewsBtn').on('click', function() {
+                loadReviews();
+            });
+            
+            // 从标签树选择标签
+            $(document).on('click', '.tag-item', function() {
+                const tag = $(this).data('tag');
+                addTag(tag);
+            });
+        });
+        
+        // 加载标签树
+        function loadTagsTree() {
+            $('#tagTree').html('<div class="text-center py-3"><div class="spinner-border spinner-border-sm text-primary" role="status"></div><p class="mt-2">加载标签中...</p></div>');
+            
+            $.ajax({
+                url: '/api/tags/tree',
+                type: 'GET',
+                success: function(response) {
+                    if (response.success) {
+                        // 更新统计信息
+                        $('#totalTags').text(response.stats.total_tags);
+                        $('#totalTaggedProblems').text(response.stats.total_tagged_problems);
+                        
+                        // 渲染热门标签
+                        const topTagsHtml = response.stats.top_tags.map(tag => 
+                            `<span class="tag tag-item" data-tag="${tag[0]}">${tag[0]} <span class="tag-count">(${tag[1]})</span></span>`
+                        ).join('');
+                        $('#topTags').html(topTagsHtml);
+                        
+                        // 准备jsTree数据
+                        const treeData = response.tag_tree.map(category => {
+                            const node = {
+                                id: category.id,
+                                text: category.text,
+                                state: { opened: false }
+                            };
+                            
+                            if (category.children) {
+                                node.children = category.children.map(subcategory => {
+                                    const subNode = {
+                                        id: subcategory.id,
+                                        text: subcategory.text,
+                                        state: { opened: false }
+                                    };
+                                    
+                                    if (subcategory.children) {
+                                        subNode.children = subcategory.children.map(tag => ({
+                                            id: tag.id,
+                                            text: tag.text,
+                                            icon: 'jstree-file'
+                                        }));
+                                    }
+                                    
+                                    return subNode;
+                                });
+                            }
+                            
+                            return node;
+                        });
+                        
+                        // 初始化jsTree
+                        $('#tagTree').empty();
+                        $('#tagTree').jstree({
+                            'core': {
+                                'data': treeData,
+                                'themes': {
+                                    'responsive': true
+                                }
+                            },
+                            'plugins': ['wholerow', 'search']
+                        });
+                        
+                        // 节点点击事件
+                        $('#tagTree').on('select_node.jstree', function(e, data) {
+                            const node = data.instance.get_node(data.selected[0]);
+                            const text = node.text.split(' ')[0]; // 移除括号中的计数
+                            addTag(text);
+                        });
+                        
+                    } else {
+                        $('#tagTree').html(`<div class="alert alert-danger">加载标签失败: ${response.error}</div>`);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#tagTree').html('<div class="alert alert-danger">加载标签失败，请稍后重试</div>');
+                    console.error('加载标签树失败:', error);
+                }
+            });
+        }
+        
+        // 添加标签
+        function addTag(tag) {
+            const currentTags = $('#reviewTags').val();
+            const tagsArray = currentTags ? currentTags.split(',').map(t => t.trim()) : [];
+            
+            if (!tagsArray.includes(tag)) {
+                tagsArray.push(tag);
+                $('#reviewTags').val(tagsArray.join(', '));
+                updateSelectedTags(tagsArray);
+            }
+        }
+        
+        // 更新已选标签显示
+        function updateSelectedTags(tags) {
+            if (!tags || tags.length === 0 || (tags.length === 1 && tags[0] === '')) {
+                $('#selectedTags').empty();
+                return;
+            }
+            
+            const tagsHtml = tags.map(tag => {
+                if (!tag) return '';
+                return `<span class="tag">${tag} <i class="fas fa-times-circle remove-tag" data-tag="${tag}"></i></span>`;
+            }).join('');
+            
+            $('#selectedTags').html(tagsHtml);
+            
+            // 绑定删除标签事件
+            $('.remove-tag').on('click', function() {
+                const tagToRemove = $(this).data('tag');
+                removeTag(tagToRemove);
+            });
+        }
+        
+        // 移除标签
+        function removeTag(tag) {
+            const currentTags = $('#reviewTags').val();
+            const tagsArray = currentTags.split(',').map(t => t.trim()).filter(t => t !== tag);
+            $('#reviewTags').val(tagsArray.join(', '));
+            updateSelectedTags(tagsArray);
+        }
+        
+        // 创建复习计划
+        function createReview() {
+            const title = $('#reviewTitle').val();
+            if (!title) {
+                alert('请输入计划标题');
+                return;
+            }
+            
+            const description = $('#reviewDescription').val();
+            const tagsInput = $('#reviewTags').val();
+            const tags = tagsInput ? tagsInput.split(',').map(t => t.trim()).filter(t => t) : [];
+            const startDate = $('#reviewStartDate').val();
+            const endDate = $('#reviewEndDate').val();
+            
+            // 检查日期
+            if (startDate && endDate && new Date(startDate) > new Date(endDate)) {
+                alert('开始日期不能晚于结束日期');
+                return;
+            }
+            
+            const data = {
+                title: title,
+                description: description,
+                tags: tags,
+                start_date: startDate,
+                end_date: endDate
+            };
+            
+            // 禁用提交按钮
+            const submitBtn = $('#reviewForm button[type="submit"]');
+            const originalText = submitBtn.text();
+            submitBtn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 创建中...');
+            
+            $.ajax({
+                url: '/api/review-plans',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(data),
+                success: function(response) {
+                    if (response.success) {
+                        alert('复习计划创建成功');
+                        // 清空表单
+                        $('#reviewForm')[0].reset();
+                        $('#selectedTags').empty();
+                        // 重新加载复习计划列表
+                        loadReviews();
+                    } else {
+                        alert(`创建失败: ${response.error}`);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    alert('创建复习计划失败，请稍后重试');
+                    console.error('创建复习计划失败:', error);
+                },
+                complete: function() {
+                    // 恢复提交按钮
+                    submitBtn.prop('disabled', false).text(originalText);
+                }
+            });
+        }
+        
+        // 加载复习计划列表
+        function loadReviews() {
+            $('#loadingReviews').show();
+            $('#noReviews').hide();
+            
+            $.ajax({
+                url: '/api/review-plans',
+                type: 'GET',
+                success: function(response) {
+                    $('#loadingReviews').hide();
+                    
+                    if (response.success) {
+                        const reviews = response.reviews;
+                        
+                        if (reviews.length === 0) {
+                            $('#noReviews').show();
+                            return;
+                        }
+                        
+                        let html = '';
+                        reviews.forEach(function(review) {
+                            const createdDate = new Date(review.created_at).toLocaleDateString();
+                            const startDate = review.start_date ? new Date(review.start_date).toLocaleDateString() : '未设置';
+                            const endDate = review.end_date ? new Date(review.end_date).toLocaleDateString() : '未设置';
+                            
+                            const tagsHtml = review.tags.map(tag => `<span class="tag">${tag}</span>`).join('');
+                            
+                            html += `
+                                <div class="card review-item">
+                                    <div class="card-header d-flex justify-content-between align-items-center">
+                                        <h5 class="card-title mb-0">${review.title}</h5>
+                                        <span class="badge bg-secondary">创建于 ${createdDate}</span>
+                                    </div>
+                                    <div class="card-body">
+                                        <p>${review.description || '无描述'}</p>
+                                        <div class="mb-2">
+                                            <i class="fas fa-tags text-muted me-1"></i> 
+                                            ${tagsHtml || '<span class="text-muted">无标签</span>'}
+                                        </div>
+                                        <div class="d-flex justify-content-between">
+                                            <div>
+                                                <i class="fas fa-calendar-alt text-muted me-1"></i> 
+                                                ${startDate} 至 ${endDate}
+                                            </div>
+                                            <div>
+                                                <a href="/review/${review.id}" class="btn btn-sm btn-primary">
+                                                    <i class="fas fa-eye me-1"></i> 查看
+                                                </a>
+                                                <button class="btn btn-sm btn-danger delete-review" data-id="${review.id}">
+                                                    <i class="fas fa-trash me-1"></i> 删除
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        
+                        $('#reviewsList').html(html);
+                        
+                        // 绑定删除按钮事件
+                        $('.delete-review').on('click', function() {
+                            const reviewId = $(this).data('id');
+                            if (confirm('确定要删除此复习计划吗？')) {
+                                deleteReview(reviewId);
+                            }
+                        });
+                    } else {
+                        $('#reviewsList').html(`<div class="alert alert-danger">加载复习计划失败: ${response.error}</div>`);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    $('#loadingReviews').hide();
+                    $('#reviewsList').html('<div class="alert alert-danger">加载复习计划失败，请稍后重试</div>');
+                    console.error('加载复习计划失败:', error);
+                }
+            });
+        }
+        
+        // 删除复习计划
+        function deleteReview(reviewId) {
+            $.ajax({
+                url: `/api/reviews/${reviewId}`,
+                type: 'DELETE',
+                success: function(response) {
+                    if (response.success) {
+                        alert('复习计划删除成功');
+                        loadReviews();
+                    } else {
+                        alert(`删除失败: ${response.error}`);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    alert('删除复习计划失败，请稍后重试');
+                    console.error('删除复习计划失败:', error);
+                }
+            });
+        }
+    </script>
+</body>
+</html> 

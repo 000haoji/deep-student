@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>标签管理 - 考研数学错题管理</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.5.0/font/bootstrap-icons.css">
+    <style>
+        .tag-item {
+            margin-bottom: 10px;
+            border-left: 3px solid #6c757d;
+            padding: 8px 12px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            transition: all 0.2s;
+        }
+        .tag-item:hover {
+            border-left-color: #0d6efd;
+            background-color: #e9ecef;
+        }
+        .tag-item.selected {
+            border-left-color: #198754;
+            background-color: #e8f5e9;
+        }
+        .tag-category {
+            font-weight: bold;
+            margin-top: 15px;
+            margin-bottom: 10px;
+            padding-bottom: 5px;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .tag-usage {
+            font-size: 0.8rem;
+            color: #6c757d;
+        }
+        .tag-actions {
+            visibility: hidden;
+        }
+        .tag-item:hover .tag-actions {
+            visibility: visible;
+        }
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container mt-4">
+        <div class="row mb-4">
+            <div class="col">
+                <h1>标签管理</h1>
+                <p class="text-muted">管理和组织错题标签</p>
+            </div>
+            <div class="col-auto d-flex align-items-center">
+                <button class="btn btn-primary me-2" data-bs-toggle="modal" data-bs-target="#createTagModal">
+                    <i class="bi bi-plus-circle"></i> 创建标签
+                </button>
+                <button id="mergeTagsBtn" class="btn btn-outline-primary" disabled>
+                    <i class="bi bi-arrows-collapse"></i> 合并所选标签
+                </button>
+            </div>
+        </div>
+        
+        <!-- 搜索和筛选 -->
+        <div class="row mb-4">
+            <div class="col-md-6">
+                <div class="input-group">
+                    <input type="text" id="tagSearchInput" class="form-control" placeholder="搜索标签...">
+                    <button id="clearSearchBtn" class="btn btn-outline-secondary" type="button">
+                        <i class="bi bi-x"></i>
+                    </button>
+                    <button id="searchBtn" class="btn btn-primary" type="button">
+                        <i class="bi bi-search"></i> 搜索
+                    </button>
+                </div>
+            </div>
+            <div class="col-md-6">
+                <div class="d-flex justify-content-md-end">
+                    <select id="categoryFilter" class="form-select" style="max-width: 200px;">
+                        <option value="">所有分类</option>
+                        <option value="高等数学">高等数学</option>
+                        <option value="线性代数">线性代数</option>
+                        <option value="概率论">概率论</option>
+                        <option value="错误类型">错误类型</option>
+                        <option value="通用知识点">通用知识点</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        <!-- 标签列表容器 -->
+        <div id="tagsContainer" class="mt-4">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">加载中...</span>
+            </div>
+            <p class="text-muted">正在加载标签...</p>
+        </div>
+    </div>
+
+    <!-- 创建标签模态框 -->
+    <div class="modal fade" id="createTagModal" tabindex="-1" aria-labelledby="createTagModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="createTagModalLabel">创建新标签</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="createTagForm">
+                        <div class="mb-3">
+                            <label for="tagName" class="form-label">标签名称</label>
+                            <input type="text" class="form-control" id="tagName" required>
+                            <div class="form-text">请输入一个描述性的标签名称</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="tagCategory" class="form-label">标签分类</label>
+                            <select class="form-select" id="tagCategory">
+                                <option value="高等数学">高等数学</option>
+                                <option value="线性代数">线性代数</option>
+                                <option value="概率论">概率论</option>
+                                <option value="错误类型">错误类型</option>
+                                <option value="通用知识点">通用知识点</option>
+                            </select>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" id="saveTagBtn">保存</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 合并标签模态框 -->
+    <div class="modal fade" id="mergeTagsModal" tabindex="-1" aria-labelledby="mergeTagsModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="mergeTagsModalLabel">合并标签</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p>您已选择了以下标签进行合并：</p>
+                    <ul id="selectedTagsList"></ul>
+                    <div class="alert alert-warning">
+                        <i class="bi bi-exclamation-triangle"></i> 合并标签操作不可撤销
+                    </div>
+                    <div class="mb-3">
+                        <label for="targetTag" class="form-label">目标标签（其他标签将合并到此）</label>
+                        <select class="form-select" id="targetTag"></select>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" id="confirmMergeBtn">确认合并</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 通知容器 -->
+    <div class="toast-container"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 全局变量
+        let allTags = [];
+        let selectedTags = [];
+        
+        // 页面加载完成后
+        document.addEventListener('DOMContentLoaded', function() {
+            loadTags();
+            
+            // 搜索按钮点击事件
+            document.getElementById('searchBtn').addEventListener('click', filterTags);
+            
+            // 清除搜索按钮点击事件
+            document.getElementById('clearSearchBtn').addEventListener('click', function() {
+                document.getElementById('tagSearchInput').value = '';
+                filterTags();
+            });
+            
+            // 分类过滤下拉框变化事件
+            document.getElementById('categoryFilter').addEventListener('change', filterTags);
+            
+            // 创建标签按钮点击事件
+            document.getElementById('saveTagBtn').addEventListener('click', createTag);
+            
+            // 合并标签按钮点击事件
+            document.getElementById('mergeTagsBtn').addEventListener('click', showMergeModal);
+            
+            // 确认合并按钮点击事件
+            document.getElementById('confirmMergeBtn').addEventListener('click', mergeTags);
+        });
+        
+        // 加载所有标签
+        async function loadTags() {
+            try {
+                const response = await fetch('/api/tags');
+                if (!response.ok) {
+                    throw new Error('获取标签失败');
+                }
+                
+                allTags = await response.json();
+                displayTags(allTags);
+            } catch (error) {
+                console.error('加载标签失败:', error);
+                showToast('加载标签失败: ' + error.message, 'danger');
+            }
+        }
+        
+        // 显示标签
+        function displayTags(tags) {
+            const container = document.getElementById('tagsContainer');
+            
+            // 清空容器
+            container.innerHTML = '';
+            
+            // 按分类分组标签
+            const tagsByCategory = {};
+            tags.forEach(tag => {
+                if (!tagsByCategory[tag.category]) {
+                    tagsByCategory[tag.category] = [];
+                }
+                tagsByCategory[tag.category].push(tag);
+            });
+            
+            // 如果没有标签
+            if (Object.keys(tagsByCategory).length === 0) {
+                container.innerHTML = `
+                    <div class="alert alert-info">
+                        <i class="bi bi-info-circle"></i> 没有找到符合条件的标签
+                    </div>
+                `;
+                return;
+            }
+            
+            // 创建标签分组
+            for (const [category, categoryTags] of Object.entries(tagsByCategory)) {
+                const categoryElem = document.createElement('div');
+                categoryElem.className = 'tag-category';
+                categoryElem.textContent = category || '未分类';
+                container.appendChild(categoryElem);
+                
+                const tagsWrapper = document.createElement('div');
+                tagsWrapper.className = 'row';
+                
+                categoryTags.forEach(tag => {
+                    const isSelected = selectedTags.some(t => t.id === tag.id);
+                    
+                    const tagCol = document.createElement('div');
+                    tagCol.className = 'col-md-4 col-lg-3';
+                    
+                    tagCol.innerHTML = `
+                        <div class="tag-item ${isSelected ? 'selected' : ''}" data-tag-id="${tag.id}">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div class="form-check">
+                                    <input class="form-check-input tag-checkbox" type="checkbox" 
+                                           value="${tag.id}" id="tag-${tag.id}" ${isSelected ? 'checked' : ''}>
+                                    <label class="form-check-label" for="tag-${tag.id}">
+                                        ${tag.name}
+                                    </label>
+                                </div>
+                                <div class="tag-actions">
+                                    <button class="btn btn-sm btn-outline-danger delete-tag" data-tag-id="${tag.id}">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="tag-usage">
+                                使用次数: ${tag.actual_count || 0}
+                            </div>
+                        </div>
+                    `;
+                    
+                    tagsWrapper.appendChild(tagCol);
+                });
+                
+                container.appendChild(tagsWrapper);
+            }
+            
+            // 添加标签选择事件
+            document.querySelectorAll('.tag-checkbox').forEach(checkbox => {
+                checkbox.addEventListener('change', function() {
+                    const tagId = parseInt(this.value);
+                    const tagName = this.nextElementSibling.textContent.trim();
+                    const tagItem = this.closest('.tag-item');
+                    
+                    if (this.checked) {
+                        selectedTags.push({ id: tagId, name: tagName });
+                        tagItem.classList.add('selected');
+                    } else {
+                        selectedTags = selectedTags.filter(t => t.id !== tagId);
+                        tagItem.classList.remove('selected');
+                    }
+                    
+                    // 更新合并按钮状态
+                    updateMergeButtonState();
+                });
+            });
+            
+            // 添加删除标签事件
+            document.querySelectorAll('.delete-tag').forEach(button => {
+                button.addEventListener('click', function() {
+                    const tagId = this.getAttribute('data-tag-id');
+                    deleteTag(tagId);
+                });
+            });
+        }
+        
+        // 过滤标签
+        function filterTags() {
+            const searchTerm = document.getElementById('tagSearchInput').value.toLowerCase();
+            const category = document.getElementById('categoryFilter').value;
+            
+            const filteredTags = allTags.filter(tag => {
+                const matchesSearch = !searchTerm || tag.name.toLowerCase().includes(searchTerm);
+                const matchesCategory = !category || tag.category === category;
+                return matchesSearch && matchesCategory;
+            });
+            
+            displayTags(filteredTags);
+        }
+        
+        // 创建新标签
+        async function createTag() {
+            const tagName = document.getElementById('tagName').value.trim();
+            const tagCategory = document.getElementById('tagCategory').value;
+            
+            if (!tagName) {
+                showToast('请输入标签名称', 'warning');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/tags/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        name: tagName,
+                        category: tagCategory
+                    })
+                })
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                if (result.success) {
+                    // 关闭模态框
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('createTagModal'));
+                    modal.hide();
+                    
+                    // 清空表单
+                    document.getElementById('tagName').value = '';
+                    
+                    // 显示通知
+                    showToast('标签创建成功', 'success');
+                    
+                    // 重新加载标签列表
+                    loadTags();
+                } else {
+                    showToast(result.error || '创建标签失败', 'danger');
+                }
+            } else {
+                const errorData = await response.json();
+                showToast(errorData.error || '创建标签失败', 'danger');
+            }
+        } catch (error) {
+            console.error('创建标签失败:', error);
+            showToast('创建标签失败: ' + error.message, 'danger');
+        }
+    }
+    
+    // 删除标签
+    async function deleteTag(tagId) {
+        // 确认是否删除
+        if (!confirm('确定要删除这个标签吗？此操作不可撤销。')) {
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/tags/delete/${tagId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast('标签已删除', 'success');
+                    
+                    // 如果被删除的标签在已选标签列表中，则移除
+                    selectedTags = selectedTags.filter(t => t.id !== parseInt(tagId));
+                    
+                    // 更新合并按钮状态
+                    updateMergeButtonState();
+                    
+                    // 重新加载标签列表
+                    loadTags();
+                } else {
+                    showToast(result.error || '删除标签失败', 'danger');
+                }
+            } else {
+                const errorData = await response.json();
+                showToast(errorData.error || '删除标签失败', 'danger');
+            }
+        } catch (error) {
+            console.error('删除标签失败:', error);
+            showToast('删除标签失败: ' + error.message, 'danger');
+        }
+    }
+    
+    // 更新合并按钮状态
+    function updateMergeButtonState() {
+        const mergeBtn = document.getElementById('mergeTagsBtn');
+        
+        // 至少需要两个标签才能执行合并操作
+        if (selectedTags.length >= 2) {
+            mergeBtn.removeAttribute('disabled');
+        } else {
+            mergeBtn.setAttribute('disabled', 'disabled');
+        }
+    }
+    
+    // 显示合并标签模态框
+    function showMergeModal() {
+        // 填充已选标签列表
+        const selectedTagsList = document.getElementById('selectedTagsList');
+        selectedTagsList.innerHTML = '';
+        
+        selectedTags.forEach(tag => {
+            const li = document.createElement('li');
+            li.textContent = tag.name;
+            selectedTagsList.appendChild(li);
+        });
+        
+        // 填充目标标签下拉列表
+        const targetTagSelect = document.getElementById('targetTag');
+        targetTagSelect.innerHTML = '';
+        
+        selectedTags.forEach(tag => {
+            const option = document.createElement('option');
+            option.value = tag.id;
+            option.textContent = tag.name;
+            targetTagSelect.appendChild(option);
+        });
+        
+        // 显示模态框
+        const mergeModal = new bootstrap.Modal(document.getElementById('mergeTagsModal'));
+        mergeModal.show();
+    }
+    
+    // 合并标签
+    async function mergeTags() {
+        try {
+            const targetTagId = document.getElementById('targetTag').value;
+            const sourceIds = selectedTags.map(t => t.id).filter(id => id != targetTagId);
+            
+            if (sourceIds.length === 0) {
+                showToast('无效的合并操作', 'warning');
+                return;
+            }
+            
+            const response = await fetch('/api/tags/merge', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    source_ids: sourceIds,
+                    target_id: parseInt(targetTagId)
+                })
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                if (result.success) {
+                    // 关闭模态框
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('mergeTagsModal'));
+                    modal.hide();
+                    
+                    // 清空已选标签列表
+                    selectedTags = [];
+                    
+                    // 更新合并按钮状态
+                    updateMergeButtonState();
+                    
+                    // 显示通知
+                    showToast('标签合并成功', 'success');
+                    
+                    // 重新加载标签列表
+                    loadTags();
+                } else {
+                    showToast(result.error || '合并标签失败', 'danger');
+                }
+            } else {
+                const errorData = await response.json();
+                showToast(errorData.error || '合并标签失败', 'danger');
+            }
+        } catch (error) {
+            console.error('合并标签失败:', error);
+            showToast('合并标签失败: ' + error.message, 'danger');
+        }
+    }
+    
+    // 显示Toast通知
+    function showToast(message, type) {
+        const toastContainer = document.querySelector('.toast-container');
+        
+        const toastHTML = `
+            <div class="toast align-items-center text-white bg-${type} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        ${message}
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+            </div>
+        `;
+        
+        toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+        
+        const toastElement = toastContainer.lastElementChild;
+        const toast = new bootstrap.Toast(toastElement, { autohide: true, delay: 3000 });
+        toast.show();
+        
+        // 设置自动移除
+        toastElement.addEventListener('hidden.bs.toast', function () {
+            toastElement.remove();
+        });
+    }
+    </script>
+</body>
+</html>

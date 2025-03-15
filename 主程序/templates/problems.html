@@ -1,0 +1,1398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ subject_info.name|default('数学') }}错题列表 - 考研错题管理</title>
+    <!-- 使用CDN链接替代本地资源 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <style>
+        /* 内联custom.css的内容 */
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+        }
+        .problem-card {
+            transition: transform 0.2s;
+            height: 100%;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .problem-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .filter-section {
+            background-color: #f8f9fa;
+            border-radius: 0.25rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .tag-badge, .tag {
+            display: inline-block;
+            background-color: #e9ecef;
+            color: #495057;
+            padding: 0.25em 0.65em;
+            border-radius: 0.25rem;
+            margin-right: 0.25em;
+            margin-bottom: 0.25em;
+            font-size: 0.85em;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            background-color: #f8f9fa;
+            border-radius: 0.25rem;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container mt-4">
+        <div class="row mb-3">
+            <div class="col">
+                <h1>{{ subject_info.name|default('数学') }}错题库</h1>
+            </div>
+            <div class="col-auto">
+                <div class="btn-group" role="group">
+                    <button id="batchAnalysisBtn" class="btn btn-primary">
+                        <i class="fas fa-chart-pie me-1"></i> 创建回顾分析
+            </button>
+                    <a href="/?subject={{ current_subject|default('math') }}" class="btn btn-success">
+                        <i class="fas fa-plus-circle me-1"></i> 添加错题
+                    </a>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 筛选部分 -->
+        <div class="filter-section mb-4">
+            <div class="row g-2">
+                <div class="col-md-3">
+                    <select id="category-filter" class="form-select">
+                        <option value="">所有分类</option>
+                        <!-- 分类选项将由JavaScript动态填充 -->
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <select id="subcategory-filter" class="form-select">
+                        <option value="">所有子分类</option>
+                        <!-- 子分类选项将由JavaScript动态填充 -->
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <select id="difficulty-filter" class="form-select">
+                        <option value="">所有难度</option>
+                        <option value="1">难度 1</option>
+                        <option value="2">难度 2</option>
+                        <option value="3">难度 3</option>
+                        <option value="4">难度 4</option>
+                        <option value="5">难度 5</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <select id="sort-option" class="form-select">
+                        <option value="date-desc">最新添加</option>
+                        <option value="date-asc">最早添加</option>
+                        <option value="difficulty-desc">难度由高到低</option>
+                        <option value="difficulty-asc">难度由低到高</option>
+                        <option value="typicality-desc">典型度由高到低</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row mt-2">
+                <div class="col-md-12">
+                    <input type="text" id="search-input" class="form-control" placeholder="搜索错题...">
+                </div>
+            </div>
+            <div class="row mt-2">
+                <div class="col-md-12">
+                    <button id="apply-filters" class="btn btn-primary btn-sm">应用筛选</button>
+                    <button id="clear-filters" class="btn btn-outline-secondary btn-sm ms-2">清除筛选</button>
+                    <button id="batch-delete" class="btn btn-danger btn-sm ms-2" disabled>批量删除</button>
+                    <div class="form-check form-check-inline ms-3">
+                        <input class="form-check-input" type="checkbox" id="select-all">
+                        <label class="form-check-label" for="select-all">全选</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 加载提示 -->
+        <div id="loading" class="text-center py-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">正在加载...</span>
+            </div>
+            <p class="mt-2">正在加载错题列表...</p>
+        </div>
+        
+        <!-- 错题卡片容器 -->
+        <div id="problems-container" class="row row-cols-1 row-cols-md-3 g-4" style="display: none;"></div>
+        
+        <!-- 空状态提示 -->
+        <div id="empty-state" class="empty-state" style="display: none;">
+            <h4 class="mt-3">暂无错题</h4>
+            <p class="text-muted">点击"添加新错题"按钮开始添加你的第一个错题</p>
+            <a href="/?subject={{ current_subject|default('math') }}" class="btn btn-primary mt-2">添加新错题</a>
+        </div>
+    </div>
+
+    <!-- 问题卡片模板 -->
+    <template id="problemCardTemplate">
+        <div class="col-md-6 col-lg-4 mb-4">
+            <div class="card h-100 problem-card">
+                <div class="card-selection-overlay d-none">
+                    <div class="form-check">
+                        <input class="form-check-input problem-select-checkbox" type="checkbox" value="">
+                    </div>
+                </div>
+                <div class="card-body">
+                    <h5 class="card-title problem-title"></h5>
+                    <p class="card-text problem-content"></p>
+                    <div class="tags-container mb-2"></div>
+                    <div class="knowledge-tags-container mb-2"></div>
+                    <p class="card-text"><small class="text-muted problem-date"></small></p>
+                </div>
+                <div class="card-footer bg-transparent border-top-0">
+                    <a href="#" class="btn btn-sm btn-outline-primary view-btn">查看详情</a>
+                    <a href="#" class="btn btn-sm btn-outline-secondary edit-btn">编辑</a>
+                    <button class="btn btn-sm btn-outline-danger delete-btn">删除</button>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <!-- 回顾分析模态框 -->
+    <div class="modal fade" id="analysisModal" tabindex="-1" aria-labelledby="analysisModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="analysisModalLabel">错题回顾分析</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="analysisLoading" class="text-center">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">正在分析...</span>
+                        </div>
+                        <p class="mt-2">正在分析选中的错题，请稍候...</p>
+                    </div>
+                    
+                    <div id="analysisResult" class="d-none">
+                        <div class="mb-4">
+                            <h5>分析摘要</h5>
+                            <div class="alert alert-info" id="analysisSummary"></div>
+                        </div>
+                        
+                        <div class="row mb-4">
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h6 class="mb-0">知识点统计</h6>
+                                    </div>
+                                    <div class="card-body p-0">
+                                        <div class="list-group list-group-flush" id="knowledgeStatsList">
+                                            <!-- 知识点统计将由JavaScript动态填充 -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="card">
+                                    <div class="card-header">
+                                        <h6 class="mb-0">错因统计</h6>
+                                    </div>
+                                    <div class="card-body p-0">
+                                        <div class="list-group list-group-flush" id="errorCauseStatsList">
+                                            <!-- 错因统计将由JavaScript动态填充 -->
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h5>知识点关联</h5>
+                            <div class="list-group" id="knowledgeConnectionsList">
+                                <!-- 知识点关联将由JavaScript动态填充 -->
+                            </div>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h5>薄弱点分析</h5>
+                            <div class="list-group" id="weakPointsList">
+                                <!-- 薄弱点将由JavaScript动态填充 -->
+                            </div>
+                        </div>
+                        
+                        <div class="mb-4">
+                            <h5>复习策略</h5>
+                            <div class="card">
+                                <div class="card-body">
+                                    <pre id="reviewStrategy" class="mb-0"></pre>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <h5>包含的错题</h5>
+                            <div class="list-group" id="includedProblemsList">
+                                <!-- 包含的错题将由JavaScript动态填充 -->
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div id="analysisError" class="d-none">
+                        <div class="alert alert-danger" id="analysisErrorMessage"></div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button id="createReviewButton" class="btn btn-primary d-none">
+                        <i class="fas fa-chart-line"></i> 完整分析
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    $(document).ready(function() {
+        console.log("页面已加载，准备加载错题列表");
+        
+        let problems = []; // 存储所有错题
+        let categories = new Set(); // 存储所有分类
+        let subcategories = new Set(); // 存储所有子分类
+        let selectedProblems = []; // 存储已选中的错题ID
+
+            // 加载错题列表
+        loadProblems();
+        
+        // 绑定筛选事件
+        $("#apply-filters").on("click", applyFilters);
+        $("#clear-filters").on("click", clearFilters);
+        $("#select-all").on("change", toggleSelectAll);
+        $("#batch-delete").on("click", batchDelete);
+        
+        // 调试函数：添加到页面顶部的错误信息栏
+        function addDebugInfo(title, content) {
+            if (!$('#debugPanel').length) {
+                $('body').prepend(`
+                    <div id="debugPanel" class="alert alert-warning alert-dismissible fade show m-2" role="alert" style="position: fixed; top: 10px; right: 10px; z-index: 9999; max-width: 500px; max-height: 80vh; overflow-y: auto;">
+                        <h5>调试信息面板</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        <div id="debugContent"></div>
+                    </div>
+                `);
+            }
+            
+            $('#debugContent').append(`
+                <div class="mb-2">
+                    <strong>${title}</strong>
+                    <pre style="background-color: #f8f9fa; padding: 10px; border-radius: 5px; overflow-x: auto;">${typeof content === 'object' ? JSON.stringify(content, null, 2) : content}</pre>
+                </div>
+            `);
+        }
+        
+        // 创建回顾分析按钮点击事件
+        $('#batchAnalysisBtn').click(function() {
+            // 收集选中的错题ID
+            selectedProblems = [];
+            $(".problem-checkbox:checked").each(function() {
+                const problemId = $(this).val();
+                console.log("选中的错题ID:", problemId);  // 添加调试日志
+                if (problemId) {
+                    selectedProblems.push(problemId);
+                }
+            });
+            
+            console.log("选中的所有错题ID:", selectedProblems);  // 添加调试日志
+            
+            if (selectedProblems.length === 0) {
+                alert('请至少选择一个错题进行分析');
+                return;
+            }
+            
+            // 显示分析模态框
+            const analysisModal = new bootstrap.Modal(document.getElementById('analysisModal'));
+            analysisModal.show();
+            
+            // 显示加载状态
+            $('#analysisLoading').removeClass('d-none');
+            $('#analysisResult').addClass('d-none');
+            $('#analysisError').addClass('d-none');
+            $('#createReviewButton').addClass('d-none');
+            
+            // 在前端执行分析逻辑
+            setTimeout(() => {
+                try {
+                    // 根据ID查找完整的错题对象
+                    const selectedProblemObjects = problems.filter(problem => 
+                        selectedProblems.includes(problem.id)
+                    );
+                    
+                    console.log("找到的错题对象:", selectedProblemObjects);
+                    
+                    if (selectedProblemObjects.length === 0) {
+                        throw new Error("找不到选中的错题数据");
+                    }
+                    
+                    // 执行分析
+                    const analysisResult = analyzeProblemData(selectedProblemObjects);
+                    
+                    // 构建结果对象
+                    const analysisData = {
+                        analysis_id: 'local-' + Date.now(),
+                        title: `错题回顾分析 (${new Date().toLocaleString()})`,
+                        description: `分析了${selectedProblemObjects.length}道错题的模式和知识点`,
+                        created_at: new Date().toISOString(),
+                        problems: selectedProblemObjects,
+                        analysis_result: analysisResult
+                    };
+                    
+                    console.log("分析结果:", analysisData);
+                    
+                    // 显示分析结果
+                    $('#analysisLoading').addClass('d-none');
+                    displayAnalysisResult(analysisData);
+                    
+                    // 存储当前分析以供详细页面使用
+                    localStorage.setItem('currentAnalysis', JSON.stringify(analysisData));
+                    
+                    // 显示查看完整分析按钮
+                    $('#createReviewButton').removeClass('d-none');
+                    
+                    // 为"完整分析"按钮添加点击事件
+                    $('#createReviewButton').off('click').on('click', function() {
+                        // 显示加载状态
+                        $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> 准备分析中...');
+                        
+                        // 获取当前分析的问题ID
+                        const problemIds = selectedProblems;
+                        
+                        // 调用API创建新的回顾会话
+                        $.ajax({
+                            url: '/api/review/create-from-problems',
+                            type: 'POST',
+                            contentType: 'application/json',
+                            data: JSON.stringify({
+                                problem_ids: problemIds
+                            }),
+                            success: function(response) {
+                                if (response.success) {
+                                    // 跳转到回顾详情页
+                                    window.location.href = `/review/${response.review_id}`;
+                                } else {
+                                    alert('创建回顾失败: ' + (response.error || '未知错误'));
+                                    $('#createReviewButton').prop('disabled', false).html('<i class="fas fa-chart-line"></i> 完整分析');
+                                }
+                            },
+                            error: function(xhr, status, error) {
+                                alert('创建回顾失败: ' + error);
+                                $('#createReviewButton').prop('disabled', false).html('<i class="fas fa-chart-line"></i> 完整分析');
+                            }
+                        });
+                    });
+                } catch (error) {
+                    console.error("分析错误:", error);
+                    $('#analysisLoading').addClass('d-none');
+                    $('#analysisError').removeClass('d-none');
+                    $('#analysisErrorMessage').text('创建回顾分析失败: ' + error.message);
+                }
+            }, 1000); // 添加延迟以显示加载动画
+        });
+        
+        // 新增：保存分析结果到数据库
+        function saveAnalysisToDatabase(analysisData) {
+            // 添加UUID生成函数
+            function generateUUID() {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                    return v.toString(16);
+                });
+            }
+
+            console.log("准备保存分析结果到数据库:", analysisData);
+            
+            // 确保分析数据包含所有必需字段
+            if (!analysisData.analysis_id) {
+                analysisData.analysis_id = generateUUID();
+                console.log("生成新的分析ID:", analysisData.analysis_id);
+            }
+            
+            if (!analysisData.title) {
+                analysisData.title = `错题分析 (${new Date().toLocaleString('zh-CN')})`;
+                console.log("生成默认标题:", analysisData.title);
+            }
+            
+            // 确保problems字段是一个数组
+            if (!analysisData.problems || !Array.isArray(analysisData.problems)) {
+                console.error("错误: problems必须是数组");
+                if (analysisData.problem_ids && Array.isArray(analysisData.problem_ids)) {
+                    // 如果只有problem_ids，将其转换为problems数组格式
+                    console.log("正在将problem_ids转换为problems数组");
+                    analysisData.problems = analysisData.problem_ids.map(id => ({ id: id }));
+                } else {
+                    analysisData.problems = [];
+                }
+            }
+            
+            // 确保有analysis_result字段
+            if (!analysisData.analysis_result) {
+                console.error("错误: 缺少analysis_result字段");
+                analysisData.analysis_result = { summary: "无分析结果" };
+            }
+            
+            // 添加时间戳
+            if (!analysisData.created_at) {
+                analysisData.created_at = new Date().toISOString();
+            }
+            
+            // 创建发送到API的数据对象
+            const postData = {
+                analysis_id: analysisData.analysis_id,
+                title: analysisData.title,
+                description: analysisData.description || `包含${analysisData.problems.length}道错题的分析`,
+                problems: analysisData.problems,
+                analysis_result: analysisData.analysis_result,
+                created_at: analysisData.created_at
+            };
+            
+            console.log("发送到API的数据:", postData);
+            
+            // 发送请求到API
+            return $.ajax({
+                url: '/api/review-analysis',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify(postData),
+                success: function(response) {
+                    console.log("分析结果保存成功:", response);
+                    
+                    if (response.success && response.analysis_id) {
+                        // 更新本地存储中的database_id
+                        var currentAnalysis = JSON.parse(localStorage.getItem('currentAnalysis') || '{}');
+                        currentAnalysis.database_id = response.analysis_id;
+                        localStorage.setItem('currentAnalysis', JSON.stringify(currentAnalysis));
+                        
+                        // 更新查看按钮链接
+                        $('#viewAnalysisBtn').attr('href', `/review-analysis/${response.analysis_id}`);
+                        
+                        // 显示成功消息
+                        showDebugMessage("分析结果已保存到数据库", "success");
+                    } else {
+                        showDebugMessage("保存成功，但响应格式异常", "warning");
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error("保存分析结果请求失败:", status, error);
+                    console.error("错误详情:", xhr.responseText);
+                    
+                    try {
+                        const errorResponse = JSON.parse(xhr.responseText);
+                        showDebugMessage(`API错误: ${errorResponse.error || error}`, "danger");
+                    } catch (e) {
+                        showDebugMessage(`保存失败: ${error}`, "danger");
+                    }
+                }
+            });
+        }
+        
+        // 新增: 请求DeepseekR1进行AI分析
+        function requestDeepseekR1Analysis(problemsData) {
+            return new Promise((resolve, reject) => {
+                // 准备发送给DeepseekR1分析的数据
+                const problemsForAI = problemsData.map(problem => {
+                    // 提取题目内容
+                    const content = problem.problem_content || problem.content || '';
+                    
+                    // 提取用户补充说明
+                    const userComments = problem.user_comments || '';
+                    
+                    // 提取错因分析
+                    let errorCause = '';
+                    try {
+                        if (problem.analysis) {
+                            // 尝试解析JSON
+                            let analysisObj;
+                            try {
+                                analysisObj = JSON.parse(problem.analysis);
+                                // 如果是JSON，尝试获取错因分析部分
+                                if (analysisObj.error_analysis) {
+                                    errorCause = analysisObj.error_analysis;
+                                } else if (analysisObj.error_causes) {
+                                    errorCause = Array.isArray(analysisObj.error_causes) 
+                                        ? analysisObj.error_causes.join("; ")
+                                        : analysisObj.error_causes;
+                                } else if (analysisObj.error_cause) {
+                                    errorCause = analysisObj.error_cause;
+                                } else {
+                                    // 如果找不到具体的错因字段，使用整个分析
+                                    errorCause = problem.analysis;
+                                }
+                            } catch (e) {
+                                // 如果不是JSON，直接使用分析文本
+                                errorCause = problem.analysis;
+                            }
+                        }
+                    } catch (e) {
+                        console.error("处理错因时出错:", e);
+                    }
+                    
+                    return {
+                        id: problem.id,
+                        title: problem.title || problem.problem_title || '未命名错题',
+                        content: content,
+                        user_comments: userComments,
+                        error_cause: errorCause,
+                        knowledge_tags: problem.knowledge_tags || problem.tags || []
+                    };
+                });
+                
+                // 显示AI分析的加载状态
+                if ($('#aiAnalysisLoading').length === 0) {
+                    $('#analysisResult').append(`
+                        <div class="mb-4">
+                            <h5>深度分析</h5>
+                            <div class="card">
+                                <div class="card-body">
+                                    <div class="alert alert-info">
+                                        <i class="fas fa-info-circle"></i> 浮窗中只提供基础分析。
+                                        点击下方"完整分析"按钮获取深度AI智能分析结果。
+                                    </div>
+                                    <div class="text-center mt-3">
+                                        <button id="floatingCreateReviewButton" class="btn btn-primary" data-problem-id="${problemId}">
+                                            <i class="fas fa-chart-line"></i> 完整分析
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `);
+                    
+                    // 为浮窗中的"完整分析"按钮添加点击事件
+                    $('#floatingCreateReviewButton').off('click').on('click', function() {
+                        // 显示加载状态
+                        $(this).prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> 准备分析中...');
+                        
+                        // 获取当前分析的问题ID
+                        const problemIds = [$(this).data('problem-id')];
+                        
+                        // 调用API创建新的回顾会话
+                        $.ajax({
+                            url: '/api/review/create-from-problems',
+                            type: 'POST',
+                            contentType: 'application/json',
+                            data: JSON.stringify({
+                                problem_ids: problemIds
+                            }),
+                            success: function(response) {
+                                if (response.success) {
+                                    // 跳转到回顾详情页
+                                    window.location.href = `/review/${response.review_id}`;
+                                } else {
+                                    alert('创建回顾失败: ' + (response.error || '未知错误'));
+                                    $('#floatingCreateReviewButton').prop('disabled', false).html('<i class="fas fa-chart-line"></i> 完整分析');
+                                }
+                            },
+                            error: function(xhr, status, error) {
+                                alert('创建回顾失败: ' + error);
+                                $('#floatingCreateReviewButton').prop('disabled', false).html('<i class="fas fa-chart-line"></i> 完整分析');
+                            }
+                        });
+                    });
+                }
+                
+                // 调用DeepseekR1分析API
+                $.ajax({
+                    url: '/api/ai/deepseek-analysis',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({
+                        problems: problemsForAI,
+                    }),
+                    success: function(response) {
+                        if (response.success) {
+                            // 隐藏加载状态，显示分析结果
+                            $('#aiAnalysisLoading').addClass('d-none');
+                            $('#aiAnalysisResult').removeClass('d-none');
+                            
+                            // 添加AI分析结果
+                            $('#aiAnalysisResult').html(`
+                                <div class="card">
+                                    <div class="card-body">
+                                        <h6>综合分析</h6>
+                                        <div class="mb-3">${response.result.overview || '无综合分析'}</div>
+                                        
+                                        <h6>错题模式识别</h6>
+                                        <div class="mb-3">${response.result.patterns || '未识别到明显模式'}</div>
+                                        
+                                        <h6>针对性学习建议</h6>
+                                        <div>${response.result.recommendations || '无具体建议'}</div>
+                                    </div>
+                                </div>
+                            `);
+                            
+                            // 解析并返回AI分析结果
+                            resolve(response.result);
+                        } else {
+                            // 显示错误信息
+                            $('#aiAnalysisLoading').addClass('d-none');
+                            $('#aiAnalysisResult').removeClass('d-none').html(`
+                                <div class="alert alert-warning">
+                                    获取AI分析失败: ${response.error || '未知错误'}
+                                </div>
+                                <button id="retryAiAnalysisBtn" class="btn btn-outline-primary">重试分析</button>
+                            `);
+                            
+                            $('#retryAiAnalysisBtn').click(function() {
+                                $('#aiAnalysisResult').addClass('d-none');
+                                $('#aiAnalysisLoading').removeClass('d-none');
+                                requestDeepseekR1Analysis(problemsData);
+                            });
+                            
+                            reject(new Error(response.error || '未知错误'));
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        // 显示错误信息
+                        $('#aiAnalysisLoading').addClass('d-none');
+                        $('#aiAnalysisResult').removeClass('d-none').html(`
+                            <div class="alert alert-warning">
+                                获取AI分析失败: ${xhr.responseJSON?.error || error || '服务器错误'}
+                            </div>
+                            <button id="retryAiAnalysisBtn" class="btn btn-outline-primary">重试分析</button>
+                        `);
+                        
+                        $('#retryAiAnalysisBtn').click(function() {
+                            $('#aiAnalysisResult').addClass('d-none');
+                            $('#aiAnalysisLoading').removeClass('d-none');
+                            requestDeepseekR1Analysis(problemsData);
+                        });
+                        
+                        // 如果API尚未实现或者出错，提供模拟的分析结果
+                        if (xhr.status === 404 || xhr.status === 501) {
+                            console.log("DeepseekR1 API未实现，使用模拟数据");
+                            const mockAnalysis = {
+                                overview: "模拟AI分析：根据您提供的错题，主要存在概念理解不清、计算错误和解题方法选择不当等问题。",
+                                patterns: "1. 多项选择题中频繁混淆相似概念<br>2. 计算题中常出现符号错误<br>3. 解题过程中跳过中间步骤导致错误",
+                                recommendations: "建议：<br>1. 制作错题类型表，分类整理常见错误<br>2. 针对计算题，养成检查的习惯<br>3. 对于概念混淆，制作对比卡片加深理解<br>4. 增加基础题练习，巩固解题方法"
+                            };
+                            
+                            setTimeout(() => {
+                                $('#aiAnalysisLoading').addClass('d-none');
+                                $('#aiAnalysisResult').removeClass('d-none').html(`
+                                    <div class="card">
+                                        <div class="card-body">
+                                            <div class="alert alert-info mb-3">
+                                                提示：DeepseekR1 API尚未实现，以下为模拟的分析结果
+                                            </div>
+                                            <h6>综合分析</h6>
+                                            <div class="mb-3">${mockAnalysis.overview}</div>
+                                            
+                                            <h6>错题模式识别</h6>
+                                            <div class="mb-3">${mockAnalysis.patterns}</div>
+                                            
+                                            <h6>针对性学习建议</h6>
+                                            <div>${mockAnalysis.recommendations}</div>
+                                        </div>
+                                    </div>
+                                `);
+                                
+                                resolve(mockAnalysis);
+                            }, 2000);
+                        } else {
+                            reject(new Error(xhr.responseJSON?.error || error || '服务器错误'));
+                        }
+                    }
+                });
+            });
+        }
+
+        // 新增: 更新已显示的分析结果
+        function updateDisplayedAnalysis(analysisResult) {
+            // 如果AI分析部分已存在但隐藏，则显示它
+            if ($('#aiAnalysisResult').length > 0) {
+                $('#aiAnalysisLoading').addClass('d-none');
+                $('#aiAnalysisResult').removeClass('d-none');
+            }
+            
+            // 如果已有AI分析结果但尚未显示，则添加显示
+            if (analysisResult.ai_analysis && $('#aiAnalysisResult').length === 0) {
+                // 添加AI分析结果部分
+                $('#analysisResult').append(`
+                    <div class="mb-4">
+                        <h5>深度分析</h5>
+                        <div id="aiAnalysisResult">
+                            <div class="card">
+                                <div class="card-body">
+                                    <h6>综合分析</h6>
+                                    <div class="mb-3">${analysisResult.ai_analysis.overview || '无综合分析'}</div>
+                                    
+                                    <h6>错题模式识别</h6>
+                                    <div class="mb-3">${analysisResult.ai_analysis.patterns || '未识别到明显模式'}</div>
+                                    
+                                    <h6>针对性学习建议</h6>
+                                    <div>${analysisResult.ai_analysis.recommendations || '无具体建议'}</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `);
+            }
+        }
+        
+        // 显示分析结果
+        function displayAnalysisResult(analysis) {
+            const result = analysis.analysis_result;
+            
+            // 显示分析摘要
+            $('#analysisSummary').text(`共分析了 ${result.total_problems} 道错题，找出了 ${Object.keys(result.knowledge_stats).length} 个相关知识点和 ${Object.keys(result.error_cause_stats).length} 个常见错因。`);
+            
+            // 显示知识点统计
+            $('#knowledgeStatsList').empty();
+            const sortedKnowledgeStats = Object.entries(result.knowledge_stats)
+                .sort((a, b) => b[1].count - a[1].count);
+            
+            for (const [tag, stats] of sortedKnowledgeStats) {
+                const percentage = Math.round(stats.count / result.total_problems * 100);
+                $('#knowledgeStatsList').append(`
+                    <div class="list-group-item d-flex justify-content-between align-items-center">
+                        <div>${tag}</div>
+                        <div>
+                            <span class="badge bg-primary rounded-pill">${stats.count}题</span>
+                            <span class="badge bg-secondary rounded-pill">${percentage}%</span>
+                        </div>
+                    </div>
+                `);
+            }
+            
+            // 显示错因统计
+            $('#errorCauseStatsList').empty();
+            const sortedErrorCauseStats = Object.entries(result.error_cause_stats)
+                .sort((a, b) => b[1].count - a[1].count);
+            
+            for (const [cause, stats] of sortedErrorCauseStats) {
+                const percentage = Math.round(stats.count / result.total_problems * 100);
+                $('#errorCauseStatsList').append(`
+                    <div class="list-group-item">
+                        <div class="d-flex justify-content-between">
+                            <div>${cause}</div>
+                            <div>
+                                <span class="badge bg-danger rounded-pill">${stats.count}题</span>
+                                <span class="badge bg-secondary rounded-pill">${percentage}%</span>
+                            </div>
+                        </div>
+                    </div>
+                `);
+            }
+            
+            // 显示知识点关联
+            $('#knowledgeConnectionsList').empty();
+            if (result.knowledge_connections.length > 0) {
+                for (const connection of result.knowledge_connections) {
+                    $('#knowledgeConnectionsList').append(`
+                        <div class="list-group-item">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div>${connection.tags.join(' + ')}</div>
+                                <span class="badge bg-info rounded-pill">出现${connection.count}次</span>
+                            </div>
+                        </div>
+                    `);
+                }
+            } else {
+                $('#knowledgeConnectionsList').append(`
+                    <div class="list-group-item text-muted">未发现明显的知识点关联</div>
+                `);
+            }
+            
+            // 显示薄弱点
+            $('#weakPointsList').empty();
+            if (result.weak_points.length > 0) {
+                for (const point of result.weak_points) {
+                    const badgeClass = point.type === 'knowledge' ? 'bg-primary' : 'bg-danger';
+                    const typeText = point.type === 'knowledge' ? '知识点' : '错因';
+                    $('#weakPointsList').append(`
+                        <div class="list-group-item">
+                            <div class="d-flex align-items-center mb-2">
+                                <div>
+                                    <span class="badge ${badgeClass} me-2">${typeText}</span>
+                                    ${point.content}
+                                </div>
+                                <span class="badge bg-warning text-dark rounded-pill">频率: ${point.frequency}/${result.total_problems}</span>
+                            </div>
+                        </div>
+                    `);
+                }
+            } else {
+                $('#weakPointsList').append(`
+                    <div class="list-group-item text-muted">未发现明显的薄弱点</div>
+                `);
+            }
+            
+            // 显示复习策略
+            $('#reviewStrategy').text(result.review_strategy);
+            
+            // 显示包含的错题
+            $('#includedProblemsList').empty();
+            for (const problem of analysis.problems) {
+                const tags = problem.knowledge_tags && problem.knowledge_tags.length > 0 ? problem.knowledge_tags : problem.tags;
+                const tagsHtml = tags && tags.length > 0 ? tags.map(tag => `<span class="badge bg-info me-1">${tag}</span>`).join('') : '';
+                
+                $('#includedProblemsList').append(`
+                    <a href="/problem/${problem.id}" class="list-group-item list-group-item-action">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>${problem.title || problem.problem_title || '未命名错题'}</div>
+                        </div>
+                        <div class="mt-2">${tagsHtml}</div>
+                    </a>
+                `);
+            }
+            
+            // 显示结果区域
+            $('#analysisResult').removeClass('d-none');
+            
+            // 如果已有AI分析结果，显示它
+            if (result.ai_analysis) {
+                updateDisplayedAnalysis(result);
+            }
+        }
+        
+        // 函数：加载所有错题
+        function loadProblems() {
+            $("#loading").show();
+            $("#problems-container").hide();
+            $("#empty-state").hide();
+            
+            // 获取当前页面的学科参数
+            let currentSubject = '{{ current_subject|default("math") }}';
+            console.log("当前学科:", currentSubject);
+            
+            $.ajax({
+                url: '/api/problems',
+                type: 'GET',
+                data: { subject: currentSubject }, // 添加学科参数
+                success: function(data) {
+                    console.log("成功获取错题列表:", data);
+                    problems = data;
+                    
+                    // 提取所有分类和子分类
+                    categories.clear();
+                    subcategories.clear();
+                    
+                    problems.forEach(problem => {
+                        if (problem.problem_category) {
+                            categories.add(problem.problem_category);
+                        }
+                        if (problem.problem_subcategory) {
+                            subcategories.add(problem.problem_subcategory);
+                        }
+                    });
+                    
+                    // 填充筛选选项
+                    populateFilterOptions();
+                    
+                    // 渲染错题列表
+                    renderProblems(problems);
+                    
+                    // 更新按钮状态
+                    updateBatchButtons();
+                    
+                    $("#loading").hide();
+                    
+                    if (problems.length > 0) {
+                        $("#problems-container").show();
+                    } else {
+                        $("#empty-state").show();
+                    }
+                },
+                error: function(xhr, status, error) {
+                    console.error("加载错题列表失败:", error);
+                    $("#loading").hide();
+                    $("#empty-state").show().html(`
+                        <h4 class="mt-3">加载失败</h4>
+                        <p class="text-muted">${xhr.responseJSON?.error || error || "未知错误"}</p>
+                        <button class="btn btn-primary mt-2" onclick="window.location.reload()">重试</button>
+                    `);
+                }
+            });
+        }
+        
+        // 函数：填充筛选选项
+        function populateFilterOptions() {
+            const categoryFilter = $("#category-filter");
+            const subcategoryFilter = $("#subcategory-filter");
+            
+            // 清空现有选项（保留第一个默认选项）
+            categoryFilter.find("option:not(:first)").remove();
+            subcategoryFilter.find("option:not(:first)").remove();
+            
+            // 添加分类选项
+            categories.forEach(category => {
+                categoryFilter.append(`<option value="${category}">${category}</option>`);
+            });
+            
+            // 添加子分类选项
+            subcategories.forEach(subcategory => {
+                subcategoryFilter.append(`<option value="${subcategory}">${subcategory}</option>`);
+            });
+        }
+        
+        // 函数：渲染错题列表
+        function renderProblems(problemsToRender) {
+            const container = $("#problems-container");
+            container.empty();
+            
+            if (problemsToRender.length === 0) {
+                $("#empty-state").show();
+                container.hide();
+                return;
+            }
+            
+            $("#empty-state").hide();
+            container.show();
+            
+            problemsToRender.forEach(problem => {
+                // 确保问题ID可用
+                const problemId = problem.id || '';
+                console.log("渲染错题:", problem.id, problem.problem_title || problem.title || '未命名错题');
+                
+                // 准备标签HTML
+                let tagsHtml = '';
+                if (problem.tags && problem.tags.length > 0) {
+                    tagsHtml = problem.tags.map(tag => `<span class="tag-badge">${tag}</span>`).join('');
+                }
+                
+                // 处理图片路径 - 添加错误处理机制
+                let imageUrl = 'https://via.placeholder.com/400x300?text=无图片';
+                if (problem.image_path) {
+                    try {
+                        let filename = problem.image_path;
+                        
+                        // 处理完整URL的情况
+                        if (filename.includes('://')) {
+                            // 如果是完整URL，直接使用
+                            imageUrl = filename;
+                            } else {
+                            // 如果包含多个路径分隔符，确保只取最后一部分
+                            if (filename.includes('/') || filename.includes('\\')) {
+                                filename = filename.replace(/\\/g, '/'); // 统一使用正斜杠
+                                filename = filename.split('/').pop(); // 获取最后一部分
+                            }
+                            
+                            // 构建图片URL
+                            imageUrl = `/uploads/${filename}`;
+                        }
+                        
+                        console.log(`处理图片路径: ${problem.image_path} -> ${imageUrl}`);
+                    } catch (e) {
+                        console.error("处理图片路径时出错:", e);
+                        imageUrl = "https://via.placeholder.com/400x300?text=图片处理错误";
+                    }
+                }
+                
+                // 创建卡片HTML，确保复选框包含有效的value属性
+                const cardHtml = `
+                    <div class="col">
+                        <div class="card problem-card" data-problem-id="${problemId}">
+                            <div class="card-header py-2">
+                                <div class="d-flex align-items-center mb-2">
+                                    <div class="form-check me-2">
+                                        <input class="form-check-input problem-checkbox" type="checkbox" value="${problemId}" id="problem_${problemId}">
+                                        <label class="form-check-label" for="problem_${problemId}">选择</label>
+                                    </div>
+                                    <div class="ms-auto">
+                                        <span class="badge bg-primary">${problem.problem_category || '未知分类'}</span>
+                                        <span class="badge bg-secondary">${problem.problem_subcategory || '未知子分类'}</span>
+                                    </div>
+                                </div>
+                                <div class="text-end">
+                                    <small class="text-muted">难度: ${problem.difficulty || 3}/5</small>
+                                </div>
+                            </div>
+                            <div class="card-img-top text-center p-2" style="height: 150px;">
+                                <img src="${imageUrl}" class="img-fluid h-100" alt="错题图片" 
+                                     style="object-fit: contain;"
+                                     onerror="this.onerror=null; this.src='https://via.placeholder.com/400x300?text=图片加载失败';">
+                            </div>
+                            <div class="card-body">
+                                <p class="card-text" style="height: auto; max-height: 80px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; line-height: 1.5;">${problem.problem_content || '无题目内容'}</p>
+                                <div class="mt-2" style="min-height: 30px;">
+                                    ${tagsHtml}
+                                </div>
+                                <div class="d-grid mt-2">
+                                    <a href="/problem/${problemId}" class="btn btn-outline-primary btn-sm">查看详情</a>
+                                </div>
+                            </div>
+                            </div>
+                        </div>
+                    `;
+                
+                container.append(cardHtml);
+            });
+            
+            // 绑定复选框事件
+            $(".problem-checkbox").on("change", function() {
+                console.log("复选框状态变化:", $(this).val(), $(this).prop('checked'));
+                updateBatchButtons();
+            });
+        }
+        
+        // 函数：应用筛选
+        function applyFilters() {
+            const category = $("#category-filter").val();
+            const subcategory = $("#subcategory-filter").val();
+            const difficulty = $("#difficulty-filter").val();
+            const searchText = $("#search-input").val().toLowerCase();
+            const sortOption = $("#sort-option").val();
+            
+            // 筛选
+            let filtered = problems.filter(problem => {
+                let matches = true;
+                
+                if (category && problem.problem_category !== category) {
+                    matches = false;
+                }
+                
+                if (subcategory && problem.problem_subcategory !== subcategory) {
+                    matches = false;
+                }
+                
+                if (difficulty && problem.difficulty != difficulty) {
+                    matches = false;
+                }
+                
+                if (searchText) {
+                    const contentMatches = problem.problem_content && problem.problem_content.toLowerCase().includes(searchText);
+                    const categoryMatches = problem.problem_category && problem.problem_category.toLowerCase().includes(searchText);
+                    const subcategoryMatches = problem.problem_subcategory && problem.problem_subcategory.toLowerCase().includes(searchText);
+                    
+                    let tagMatches = false;
+                    if (problem.tags && problem.tags.length > 0) {
+                        tagMatches = problem.tags.some(tag => tag.toLowerCase().includes(searchText));
+                    }
+                    
+                    if (!(contentMatches || categoryMatches || subcategoryMatches || tagMatches)) {
+                        matches = false;
+                    }
+                }
+                
+                return matches;
+            });
+            
+            // 排序
+            filtered.sort((a, b) => {
+                switch (sortOption) {
+                    case 'date-desc':
+                        return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+                    case 'date-asc':
+                        return new Date(a.created_at || 0) - new Date(b.created_at || 0);
+                    case 'difficulty-desc':
+                        return (b.difficulty || 3) - (a.difficulty || 3);
+                    case 'difficulty-asc':
+                        return (a.difficulty || 3) - (b.difficulty || 3);
+                    case 'typicality-desc':
+                        return (b.typicality || 3) - (a.typicality || 3);
+                    default:
+                        return 0;
+                }
+            });
+            
+            // 渲染筛选后的结果
+            renderProblems(filtered);
+        }
+        
+        // 函数：清除筛选
+        function clearFilters() {
+            $("#category-filter").val('');
+            $("#subcategory-filter").val('');
+            $("#difficulty-filter").val('');
+            $("#search-input").val('');
+            $("#sort-option").val('date-desc');
+            
+            renderProblems(problems);
+        }
+        
+        // 函数：切换全选
+        function toggleSelectAll() {
+            const isChecked = $(this).prop('checked');
+            $(".problem-checkbox").prop('checked', isChecked);
+            updateBatchButtons();
+        }
+        
+        // 函数：更新批量操作按钮状态
+        function updateBatchButtons() {
+            const checkedCount = $(".problem-checkbox:checked").length;
+            
+            // 更新批量删除按钮
+            $("#batch-delete").prop('disabled', checkedCount === 0);
+            $("#batch-delete").text(`批量删除 (${checkedCount})`);
+            
+            // 更新回顾分析按钮
+            if (checkedCount > 0) {
+                $("#batchAnalysisBtn").html(`<i class="fas fa-chart-pie me-1"></i> 分析 ${checkedCount} 道错题`);
+            } else {
+                $("#batchAnalysisBtn").html('<i class="fas fa-chart-pie me-1"></i> 创建回顾分析');
+            }
+        }
+        
+        // 函数：批量删除
+        function batchDelete() {
+            const selectedIds = [];
+            $(".problem-checkbox:checked").each(function() {
+                selectedIds.push($(this).val());
+            });
+            
+            if (selectedIds.length === 0) return;
+            
+            if (confirm(`确定要删除选中的 ${selectedIds.length} 个错题吗？此操作不可恢复。`)) {
+                $.ajax({
+                    url: '/api/problems/batch-delete',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ problem_ids: selectedIds }),
+                    success: function(data) {
+                        console.log("批量删除成功:", data);
+                        // 重新加载错题列表
+                        loadProblems();
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("批量删除失败:", error);
+                        alert("批量删除失败: " + (xhr.responseJSON?.error || error || "未知错误"));
+                    }
+                });
+            }
+        }
+        
+        // 前端分析函数 - 分析错题数据
+        function analyzeProblemData(problemsData) {
+            // 初始化结果对象
+            const result = {
+                total_problems: problemsData.length,
+                knowledge_stats: {},
+                error_cause_stats: {},
+                knowledge_connections: [],
+                weak_points: [],
+                review_strategy: "",
+                ai_analysis: null // 新增: 用于存储DeepseekR1的分析结果
+            };
+            
+            // 1. 提取和统计知识点
+            problemsData.forEach(problem => {
+                // 处理知识点标签
+                const knowledgeTags = problem.knowledge_tags || problem.tags || [];
+                if (Array.isArray(knowledgeTags)) {
+                    knowledgeTags.forEach(tag => {
+                        if (!tag) return;
+                        
+                        if (!result.knowledge_stats[tag]) {
+                            result.knowledge_stats[tag] = { 
+                                count: 0,
+                                problems: []
+                            };
+                        }
+                        
+                        result.knowledge_stats[tag].count++;
+                        result.knowledge_stats[tag].problems.push(problem.id);
+                    });
+                }
+                
+                // 处理错因分析
+                let errorCauses = [];
+                
+                // 尝试从错题分析中提取错因
+                try {
+                    if (problem.analysis && typeof problem.analysis === 'string') {
+                        // 尝试解析JSON
+                        let analysisObj;
+                        try {
+                            analysisObj = JSON.parse(problem.analysis);
+                        } catch (e) {
+                            // 如果不是JSON，则直接使用字符串
+                            analysisObj = { error_causes: [problem.analysis] };
+                        }
+                        
+                        // 从分析对象中提取错因
+                        if (analysisObj.error_causes) {
+                            errorCauses = Array.isArray(analysisObj.error_causes) 
+                                ? analysisObj.error_causes 
+                                : [analysisObj.error_causes];
+                        } else if (analysisObj.error_cause) {
+                            errorCauses = [analysisObj.error_cause];
+                        } else if (analysisObj.error_analysis) {
+                            errorCauses = [analysisObj.error_analysis];
+                        }
+                    } else if (problem.error_causes) {
+                        // 直接使用错因字段
+                        errorCauses = Array.isArray(problem.error_causes) 
+                            ? problem.error_causes 
+                            : [problem.error_causes];
+                    } else if (problem.error_cause) {
+                        errorCauses = [problem.error_cause];
+                    }
+                } catch (e) {
+                    console.error("处理错因时出错:", e);
+                }
+                
+                // 如果没有找到错因，尝试使用用户补充说明
+                if (errorCauses.length === 0 && problem.user_comments) {
+                    errorCauses = [problem.user_comments];
+                }
+                
+                // 统计错因
+                errorCauses.forEach(cause => {
+                    if (!cause) return;
+                    
+                    // 如果是字符串，直接使用
+                    let causeText = typeof cause === 'string' ? cause : JSON.stringify(cause);
+                    
+                    // 限制长度
+                    if (causeText.length > 100) {
+                        causeText = causeText.substring(0, 97) + '...';
+                    }
+                    
+                    if (!result.error_cause_stats[causeText]) {
+                        result.error_cause_stats[causeText] = {
+                            count: 0,
+                            problems: []
+                        };
+                    }
+                    
+                    result.error_cause_stats[causeText].count++;
+                    result.error_cause_stats[causeText].problems.push(problem.id);
+                });
+            });
+            
+            // 2. 识别知识点之间的关联
+            // 查找在同一个问题中出现的知识点对
+            const tagPairs = {};
+            
+            problemsData.forEach(problem => {
+                const tags = problem.knowledge_tags || problem.tags || [];
+                if (!Array.isArray(tags) || tags.length < 2) return;
+                
+                // 生成所有可能的标签对
+                for (let i = 0; i < tags.length; i++) {
+                    for (let j = i + 1; j < tags.length; j++) {
+                        const tag1 = tags[i];
+                        const tag2 = tags[j];
+                        if (!tag1 || !tag2) continue;
+                        
+                        const pairKey = [tag1, tag2].sort().join('___');
+                        
+                        if (!tagPairs[pairKey]) {
+                            tagPairs[pairKey] = {
+                                tags: [tag1, tag2],
+                                count: 0
+                            };
+                        }
+                        
+                        tagPairs[pairKey].count++;
+                    }
+                }
+            });
+            
+            // 只保留出现次数大于1的标签对
+            result.knowledge_connections = Object.values(tagPairs)
+                .filter(pair => pair.count > 1)
+                .sort((a, b) => b.count - a.count);
+            
+            // 3. 识别薄弱点 - 高频出现的知识点和错因
+            // 提取知识点薄弱点
+            const knowledgeWeakPoints = Object.entries(result.knowledge_stats)
+                .filter(([, stats]) => stats.count > 1)
+                .map(([tag, stats]) => ({
+                    type: 'knowledge',
+                    content: tag,
+                    frequency: stats.count,
+                    problems: stats.problems
+                }))
+                .sort((a, b) => b.frequency - a.frequency)
+                .slice(0, 5);  // 只取前5个
+                
+            // 提取错因薄弱点
+            const errorCauseWeakPoints = Object.entries(result.error_cause_stats)
+                .filter(([, stats]) => stats.count > 1)
+                .map(([cause, stats]) => ({
+                    type: 'error_cause',
+                    content: cause,
+                    frequency: stats.count,
+                    problems: stats.problems
+                }))
+                .sort((a, b) => b.frequency - a.frequency)
+                .slice(0, 5);  // 只取前5个
+                
+            // 合并薄弱点
+            result.weak_points = [...knowledgeWeakPoints, ...errorCauseWeakPoints]
+                .sort((a, b) => b.frequency - a.frequency);
+                
+            // 4. 生成复习策略
+            const strategyParts = [];
+            
+            // 添加总体概述
+            strategyParts.push(`本次分析覆盖了 ${result.total_problems} 道错题，涉及 ${Object.keys(result.knowledge_stats).length} 个知识点。`);
+            
+            // 针对重点知识点的建议
+            if (knowledgeWeakPoints.length > 0) {
+                strategyParts.push("\n重点关注以下知识点：");
+                knowledgeWeakPoints.forEach(point => {
+                    strategyParts.push(`- ${point.content}（出现频率：${point.frequency}/${result.total_problems}）`);
+                });
+            }
+            
+            // 针对常见错因的建议
+            if (errorCauseWeakPoints.length > 0) {
+                strategyParts.push("\n注意避免以下常见错误：");
+                errorCauseWeakPoints.forEach(point => {
+                    strategyParts.push(`- ${point.content}（出现频率：${point.frequency}/${result.total_problems}）`);
+                });
+            }
+            
+            // 针对知识点关联的建议
+            if (result.knowledge_connections.length > 0) {
+                strategyParts.push("\n注意以下知识点之间的关联：");
+                result.knowledge_connections.slice(0, 3).forEach(connection => {
+                    strategyParts.push(`- ${connection.tags.join(' 与 ')}（共同出现：${connection.count}次）`);
+                });
+            }
+            
+            // 复习建议
+            strategyParts.push("\n复习建议：");
+            if (result.total_problems <= 5) {
+                strategyParts.push("- 由于错题数量较少，建议集中一次性复习所有错题");
+            } else {
+                strategyParts.push("- 按照知识点分组复习，优先关注出现频率高的知识点");
+                strategyParts.push("- 对于多个知识点关联的错题，需要全面理解各知识点间的联系");
+                strategyParts.push("- 建议每天复习3-5道错题，一周内完成全部错题的复习");
+            }
+            
+            result.review_strategy = strategyParts.join("\n");
+            
+            // 5. 准备调用DeepseekR1进行AI分析
+            requestDeepseekR1Analysis(problemsData).then(aiAnalysis => {
+                if (aiAnalysis) {
+                    result.ai_analysis = aiAnalysis;
+                    
+                    // 更新已显示的分析结果
+                    updateDisplayedAnalysis(result);
+                    
+                    // 更新localStorage中的分析数据
+                    const analysisData = JSON.parse(localStorage.getItem('currentAnalysis'));
+                    if (analysisData) {
+                        analysisData.analysis_result.ai_analysis = aiAnalysis;
+                        localStorage.setItem('currentAnalysis', JSON.stringify(analysisData));
+                    }
+                }
+            }).catch(error => {
+                console.error("DeepseekR1分析请求失败:", error);
+            });
+            
+            return result;
+        }
+    });
+    </script>
+</body>
+</html>

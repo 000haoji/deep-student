@@ -1,0 +1,50 @@
+# API密钥和配置文件
+*.env
+主程序/config.ini
+主程序/config.json
+主程序/config.ini.bak
+主程序/config.json.bak
+RAG2025/.env
+
+# 数据库文件
+*.db
+*.sqlite
+
+# 备份文件
+*.bak
+config.json.backup
+
+# 虚拟环境和依赖库
+venv/
+env/
+主程序/venv/
+RAG2025/venv/
+主程序/env/
+RAG2025/env/
+*/venv/
+*/env/
+lib/
+主程序/lib/
+RAG2025/lib/
+__pycache__/
+*/__pycache__/
+*/*/__pycache__/
+*.py[cod]
+*$py.class
+
+# 日志文件
+*.log
+*/logs/
+logs/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 上传和临时文件目录
+uploads/
+temp/
+主程序/uploads/
+主程序/temp/
+RAG2025/uploads/
+RAG2025/temp/

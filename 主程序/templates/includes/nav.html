@@ -1,0 +1,158 @@
+<!-- 导航栏 -->
+<nav class="navbar navbar-expand-lg navbar-light bg-light">
+    <div class="container">
+        <a class="navbar-brand" href="/">DeepStudent</a>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNavAltMarkup" aria-controls="navbarNavAltMarkup" aria-expanded="false" aria-label="Toggle navigation">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="collapse navbar-collapse" id="navbarNavAltMarkup">
+            <div class="navbar-nav">
+                <a class="nav-link {% if active_nav|default('') == 'home' %}active{% endif %}" href="/">首页</a>
+                
+                <!-- 学科选择下拉菜单 -->
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle" href="#" id="subjectDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="fas {% if current_subject|default('math') == 'math' %}fa-square-root-alt{% elif current_subject == 'english' %}fa-language{% elif current_subject == 'politics' %}fa-landmark{% else %}fa-book{% endif %} me-1"></i>
+                        {% if current_subject|default('math') == 'math' %}
+                            数学
+                        {% elif current_subject == 'english' %}
+                            英语
+                        {% elif current_subject == 'politics' %}
+                            政治
+                        {% elif current_subject == 'professional' %}
+                            专业课
+                        {% else %}
+                            数学
+                        {% endif %}
+                    </a>
+                    <ul class="dropdown-menu" aria-labelledby="subjectDropdown">
+                        {% for subject_key, subject_info in subjects.items() %}
+                            {% if subject_info.enabled %}
+                                <li>
+                                    <a class="dropdown-item {% if current_subject|default('math') == subject_key %}active{% endif %}" 
+                                       href="/problems/{{ subject_key }}">
+                                        <i class="fas {{ subject_info.icon }} me-1"></i> {{ subject_info.name }}
+                                    </a>
+                                </li>
+                            {% endif %}
+                        {% endfor %}
+                    </ul>
+                </li>
+                
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle {% if active_nav == 'problems' %}active{% endif %}" href="#" id="problemsDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="fas fa-exclamation-circle me-1"></i> 错题管理
+                    </a>
+                    <ul class="dropdown-menu" aria-labelledby="problemsDropdown">
+                        <li><a class="dropdown-item" href="/problems/{{ current_subject|default('math') }}"><i class="fas fa-list me-1"></i> 错题库</a></li>
+                        <li><a class="dropdown-item" href="/reviews"><i class="fas fa-chart-pie me-1"></i> 回顾记录</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="/problem/add?subject={{ current_subject|default('math') }}"><i class="fas fa-plus me-1"></i> 添加错题</a></li>
+                    </ul>
+                </li>
+                <a class="nav-link {% if active_nav|default('') == 'review' %}active{% endif %}" href="/review">复习计划</a>
+                <a class="nav-link {% if active_nav|default('') == 'api_config' %}active{% endif %}" href="/api_config">API设置</a>
+                <a class="nav-link {% if active_nav|default('') == 'prompt_settings' %}active{% endif %}" href="/prompt_settings">
+                    <i class="fas fa-edit me-1"></i>学科Prompt设置
+                </a>
+                <li class="nav-item">
+                    <a class="nav-link {% if active_nav == 'backup' %}active{% endif %}" href="/backup">
+                        <i class="fas fa-save me-1"></i>备份/恢复
+                    </a>
+                </li>
+                <!-- 添加RAG2025知识库系统链接 -->
+                <li class="nav-item">
+                    <a class="nav-link {% if active_nav == 'rag' %}active{% endif %}" href="http://localhost:5000" target="_blank">
+                        <i class="fas fa-book me-1"></i>知识库查询
+                    </a>
+                </li>
+            </div>
+        </div>
+    </div>
+</nav>
+
+<!-- 导入模态框 -->
+<div class="modal fade" id="importModal" tabindex="-1" aria-labelledby="importModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="importModalLabel">导入数据</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <form id="importForm" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="importFile" class="form-label">选择JSON文件</label>
+                        <input class="form-control" type="file" id="importFile" accept=".json">
+                        <div class="form-text">选择之前导出的JSON数据文件</div>
+                    </div>
+                    <div class="form-check mb-3">
+                        <input class="form-check-input" type="checkbox" id="overwriteExisting">
+                        <label class="form-check-label" for="overwriteExisting">
+                            覆盖现有数据（如果ID冲突）
+                        </label>
+                    </div>
+                </form>
+                <div class="alert alert-warning">
+                    <i class="fas fa-exclamation-triangle"></i> 警告：导入操作可能会影响现有数据，建议先导出备份。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="importButton">导入</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// 确保导航栏在所有页面正确初始化
+document.addEventListener('DOMContentLoaded', function() {
+    // 强制重新应用导航栏样式
+    const navLinks = document.querySelectorAll('.navbar-nav .nav-link');
+    
+    // 如果URL中包含对应路径，手动添加active类
+    const currentPath = window.location.pathname;
+    navLinks.forEach(link => {
+        const href = link.getAttribute('href');
+        if (href === currentPath || 
+            (href !== '/' && currentPath.startsWith(href))) {
+            link.classList.add('active');
+        }
+    });
+});
+
+// 处理导入操作
+$(document).ready(function() {
+    $("#importButton").on("click", function() {
+        const fileInput = document.getElementById('importFile');
+        if (!fileInput.files.length) {
+            alert('请选择文件');
+            return;
+        }
+        
+        const file = fileInput.files[0];
+        const overwrite = $("#overwriteExisting").is(":checked");
+        
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('overwrite', overwrite);
+        
+        $.ajax({
+            url: '/api/import',
+            type: 'POST',
+            data: formData,
+            processData: false,
+            contentType: false,
+            success: function(response) {
+                alert('导入成功: ' + response.message);
+                $('#importModal').modal('hide');
+                window.location.reload();
+            },
+            error: function(xhr) {
+                alert('导入失败: ' + (xhr.responseJSON?.error || '未知错误'));
+            }
+        });
+    });
+});
+</script>

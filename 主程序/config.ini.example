@@ -1,0 +1,23 @@
+[API]
+openai_api_url = https://dashscope.aliyuncs.com/compatible-mode/v1
+openai_api_key = YOUR_OPENAI_API_KEY
+deepseek_api_url = https://api.deepseek.com/v1
+deepseek_api_key = YOUR_DEEPSEEK_API_KEY
+default_extraction_model = multimodal_qwen-vl
+default_analysis_model = deepseek
+test_key = test_value
+
+[VISION_API]
+api_key = YOUR_VISION_API_KEY
+api_url = https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
+model_name = qwen2.5-vl-72b-instruct
+
+[TEXT_API]
+api_key = YOUR_TEXT_API_KEY
+api_url = https://api.deepseek.com/v1/chat/completions
+model_name = deepseek-chat
+
+[PATHS]
+upload_folder = uploads
+database_path = math_errors.db
+

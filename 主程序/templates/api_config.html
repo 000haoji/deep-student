@@ -1,0 +1,1026 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API设置 - 考研数学错题管理</title>
+    <!-- 使用CDN链接替代本地资源 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <style>
+        /* 内联custom.css的内容 */
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+        }
+        .config-card {
+            transition: transform 0.2s;
+            margin-bottom: 15px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .config-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .api-tab-content {
+            padding: 20px;
+        }
+        .tab-pane {
+            padding-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container mt-4">
+        <!-- 标题 -->
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>API设置</h1>
+            <button id="saveSettings" class="btn btn-primary">
+                保存设置
+            </button>
+        </div>
+        
+        <!-- API状态指示器 -->
+        <div id="apiStatusAlert" class="alert alert-info mb-4 d-none">
+            <span id="apiStatusMessage">正在测试API连接...</span>
+        </div>
+        
+        <!-- API选项卡导航 -->
+        <ul class="nav nav-tabs" id="apiTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="openai-tab" data-bs-toggle="tab" data-bs-target="#openai" type="button" role="tab" aria-controls="openai" aria-selected="true">OpenAI</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="deepseek-tab" data-bs-toggle="tab" data-bs-target="#deepseek" type="button" role="tab" aria-controls="deepseek" aria-selected="false">DeepSeek</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="qwen-vl-tab" data-bs-toggle="tab" data-bs-target="#qwen-vl" type="button" role="tab" aria-controls="qwen-vl" aria-selected="false">千问VL多模态</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="gemini-tab" data-bs-toggle="tab" data-bs-target="#gemini" type="button" role="tab" aria-controls="gemini" aria-selected="false">Google Gemini</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="claude-tab" data-bs-toggle="tab" data-bs-target="#claude" type="button" role="tab" aria-controls="claude" aria-selected="false">Claude</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="aliyun-ocr-tab" data-bs-toggle="tab" data-bs-target="#aliyun-ocr" type="button" role="tab" aria-controls="aliyun-ocr" aria-selected="false">阿里云OCR</button>
+            </li>
+        </ul>
+        
+        <!-- API选项卡内容 -->
+        <div class="tab-content" id="apiTabContent">
+            <!-- OpenAI配置 -->
+            <div class="tab-pane fade show active" id="openai" role="tabpanel" aria-labelledby="openai-tab">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">OpenAI API设置</h5>
+                            </div>
+                            <div class="card-body">
+                                <form class="api-form" id="openai-form">
+                                    <div class="mb-3">
+                                        <label for="openai-key" class="form-label">API密钥</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="openai-key" name="api_key" placeholder="输入您的OpenAI API密钥">
+                                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="openai-key">
+                                                <i class="fas fa-eye-slash"></i>
+                                            </button>
+                                        </div>
+                                        <div class="form-text">您的API密钥会安全地存储在本地数据库中</div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="openai-endpoint" class="form-label">API端点</label>
+                                        <input type="text" class="form-control" id="openai-endpoint" name="api_url" placeholder="例如: https://api.openai.com/v1">
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="openai-model" class="form-label">模型名称</label>
+                                        <input type="text" class="form-control" id="openai-model" name="model" placeholder="例如: gpt-4">
+                                    </div>
+                                    
+                                    <div class="text-end mt-3">
+                                        <button type="button" class="btn btn-outline-primary test-api d-none" data-api-type="openai">测试连接</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-4 d-none">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">OpenAI API状态</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="openai-status" class="text-center py-3">
+                                    <div class="spinner-border text-primary mb-2" role="status">
+                                        <span class="visually-hidden">检查中...</span>
+                                    </div>
+                                    <p class="mb-0" id="openai-status-text">正在检查连接状态...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- DeepSeek配置 -->
+            <div class="tab-pane fade" id="deepseek" role="tabpanel" aria-labelledby="deepseek-tab">
+                <div class="row mb-3">
+                    <div class="col-12">
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle"></i> 您可以添加最多3个DeepSeek API配置，系统自动从上到下尝试使用。
+                        </div>
+                    </div>
+                </div>
+
+                <!-- DeepSeek API列表 -->
+                <div id="deepseek-api-list">
+                    <!-- 备用API容器 - 将由JS动态添加 -->
+                    <div id="deepseek-alternatives-container"></div>
+                </div>
+                
+                <!-- 添加API按钮 -->
+                <div class="row mb-4">
+                    <div class="col-12">
+                        <button id="add-deepseek-api" class="btn btn-success">
+                            <i class="fas fa-plus"></i> 添加DeepSeek API
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- API总体状态 -->
+                <div class="row">
+                    <div class="col-md-4">
+                        <div class="card mb-4 d-none">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">DeepSeek API状态</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="deepseek-status" class="text-center py-3">
+                                    <div class="spinner-border text-primary mb-2" role="status">
+                                        <span class="visually-hidden">检查中...</span>
+                                    </div>
+                                    <p class="mb-0" id="deepseek-status-text">正在检查连接状态...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 千问VL配置 -->
+            <div class="tab-pane fade" id="qwen-vl" role="tabpanel" aria-labelledby="qwen-vl-tab">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">千问VL多模态 API设置</h5>
+                            </div>
+                            <div class="card-body">
+                                <form class="api-form" id="qwen-vl-form">
+                                    <div class="mb-3">
+                                        <label for="qwen-vl-key" class="form-label">API密钥</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="qwen-vl-key" name="api_key" placeholder="输入您的千问VL API密钥">
+                                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="qwen-vl-key">
+                                                <i class="fas fa-eye-slash"></i>
+                                            </button>
+                                        </div>
+                                        <div class="form-text">您的API密钥会安全地存储在本地数据库中</div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="qwen-vl-endpoint" class="form-label">API端点</label>
+                                        <input type="text" class="form-control" id="qwen-vl-endpoint" name="api_url" placeholder="例如: https://dashscope.aliyuncs.com/v1">
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="qwen-vl-model" class="form-label">模型名称</label>
+                                        <input type="text" class="form-control" id="qwen-vl-model" name="model" placeholder="例如: qwen-vl-plus">
+                                    </div>
+                                    
+                                    <div class="text-end mt-3">
+                                        <button type="button" class="btn btn-outline-primary test-api d-none" data-api-type="qwen-vl">测试连接</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-4 d-none">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">千问VL API状态</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="qwen-vl-status" class="text-center py-3">
+                                    <div class="spinner-border text-primary mb-2" role="status">
+                                        <span class="visually-hidden">检查中...</span>
+                                    </div>
+                                    <p class="mb-0" id="qwen-vl-status-text">正在检查连接状态...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Gemini配置 -->
+            <div class="tab-pane fade" id="gemini" role="tabpanel" aria-labelledby="gemini-tab">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">Google Gemini API设置</h5>
+                            </div>
+                            <div class="card-body">
+                                <form class="api-form" id="gemini-form">
+                                    <div class="mb-3">
+                                        <label for="gemini-key" class="form-label">API密钥</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="gemini-key" name="api_key" placeholder="输入您的Gemini API密钥">
+                                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="gemini-key">
+                                                <i class="fas fa-eye-slash"></i>
+                                            </button>
+                                        </div>
+                                        <div class="form-text">您的API密钥会安全地存储在本地数据库中</div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="gemini-endpoint" class="form-label">API端点</label>
+                                        <input type="text" class="form-control" id="gemini-endpoint" name="api_url" placeholder="例如: https://generativelanguage.googleapis.com">
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="gemini-model" class="form-label">模型名称</label>
+                                        <input type="text" class="form-control" id="gemini-model" name="model" placeholder="例如: gemini-pro">
+                                    </div>
+                                    
+                                    <div class="text-end mt-3">
+                                        <button type="button" class="btn btn-outline-primary test-api d-none" data-api-type="gemini">测试连接</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-4 d-none">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">Gemini API状态</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="gemini-status" class="text-center py-3">
+                                    <div class="spinner-border text-primary mb-2" role="status">
+                                        <span class="visually-hidden">检查中...</span>
+                                    </div>
+                                    <p class="mb-0" id="gemini-status-text">正在检查连接状态...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Claude配置 -->
+            <div class="tab-pane fade" id="claude" role="tabpanel" aria-labelledby="claude-tab">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">Claude API设置</h5>
+                            </div>
+                            <div class="card-body">
+                                <form class="api-form" id="claude-form">
+                                    <div class="mb-3">
+                                        <label for="claude-key" class="form-label">API密钥</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="claude-key" name="api_key" placeholder="输入您的Claude API密钥">
+                                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="claude-key">
+                                                <i class="fas fa-eye-slash"></i>
+                                            </button>
+                                        </div>
+                                        <div class="form-text">您的API密钥会安全地存储在本地数据库中</div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="claude-endpoint" class="form-label">API端点</label>
+                                        <input type="text" class="form-control" id="claude-endpoint" name="api_url" placeholder="例如: https://api.anthropic.com/v1/messages">
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="claude-model" class="form-label">模型名称</label>
+                                        <input type="text" class="form-control" id="claude-model" name="model" placeholder="例如: claude-3-opus-20240229">
+                                    </div>
+                                    
+                                    <div class="text-end mt-3">
+                                        <button type="button" class="btn btn-outline-primary test-api d-none" data-api-type="claude">测试连接</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-4 d-none">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">Claude API状态</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="claude-status" class="text-center py-3">
+                                    <div class="spinner-border text-primary mb-2" role="status">
+                                        <span class="visually-hidden">检查中...</span>
+                                    </div>
+                                    <p class="mb-0" id="claude-status-text">正在检查连接状态...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 阿里云OCR配置 -->
+            <div class="tab-pane fade" id="aliyun-ocr" role="tabpanel" aria-labelledby="aliyun-ocr-tab">
+                <div class="row">
+                    <div class="col-md-8">
+                        <div class="card mb-4">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">阿里云OCR API设置</h5>
+                            </div>
+                            <div class="card-body">
+                                <form class="api-form" id="aliyun-ocr-form">
+                                    <div class="mb-3">
+                                        <label for="aliyun-ocr-access-key" class="form-label">Access Key ID</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="aliyun-ocr-access-key" name="access_key_id" placeholder="输入您的阿里云Access Key ID">
+                                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="aliyun-ocr-access-key">
+                                                <i class="fas fa-eye-slash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="aliyun-ocr-access-secret" class="form-label">Access Key Secret</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control" id="aliyun-ocr-access-secret" name="access_key_secret" placeholder="输入您的阿里云Access Key Secret">
+                                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="aliyun-ocr-access-secret">
+                                                <i class="fas fa-eye-slash"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="aliyun-ocr-region" class="form-label">地区</label>
+                                        <input type="text" class="form-control" id="aliyun-ocr-region" name="region_id" placeholder="例如: cn-shanghai">
+                                    </div>
+                                    
+                                    <div class="text-end mt-3">
+                                        <button type="button" class="btn btn-outline-primary test-api d-none" data-api-type="aliyun-ocr">测试连接</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="card mb-4 d-none">
+                            <div class="card-header">
+                                <h5 class="card-title mb-0">阿里云OCR API状态</h5>
+                            </div>
+                            <div class="card-body">
+                                <div id="aliyun-ocr-status" class="text-center py-3">
+                                    <div class="spinner-border text-primary mb-2" role="status">
+                                        <span class="visually-hidden">检查中...</span>
+                                    </div>
+                                    <p class="mb-0" id="aliyun-ocr-status-text">正在检查连接状态...</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">AI设置说明</h5>
+            </div>
+            <div class="card-body">
+                <p>配置AI服务以启用以下功能:</p>
+                <ul>
+                    <li>错题自动分类</li>
+                    <li>错误分析建议</li>
+                    <li>解题思路生成</li>
+                    <li>自动标签推荐</li>
+                </ul>
+                <p class="text-muted small">注意: 需要有效的API密钥才能使用这些功能</p>
+                
+                <div class="mt-3">
+                    <h6>默认模型选择</h6>
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <label for="default-extraction-model" class="form-label">默认题目提取模型</label>
+                            <select class="form-select" id="default-extraction-model">
+                                <option value="multimodal_qwen-vl">千问VL多模态</option>
+                                <option value="multimodal_gemini">Google Gemini多模态</option>
+                                <option value="openai">通用OpenAI兼容API</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 mb-3">
+                            <label for="default-analysis-model" class="form-label">默认题目分析模型</label>
+                            <select class="form-select" id="default-analysis-model">
+                                <option value="gemini">Google Gemini</option>
+                                <option value="deepseek">DeepSeek-Coder</option>
+                                <option value="openai">通用OpenAI兼容API</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">API使用情况</h5>
+            </div>
+            <div class="card-body">
+                <p>本月API调用次数: <span id="apiCallCount">0</span></p>
+                <p>估计费用: <span id="estimatedCost">$0.00</span></p>
+                <div class="progress mb-3">
+                    <div class="progress-bar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                </div>
+                <button id="testAllConnections" class="btn btn-outline-primary me-2">测试所有连接</button>
+                <button id="resetUsage" class="btn btn-outline-secondary">重置使用统计</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+    // 显示通知消息
+    function showToast(title, message, type = 'info') {
+        let toastDiv = document.createElement('div');
+        toastDiv.className = `toast align-items-center text-white bg-${type} border-0`;
+        toastDiv.setAttribute('role', 'alert');
+        toastDiv.setAttribute('aria-live', 'assertive');
+        toastDiv.setAttribute('aria-atomic', 'true');
+        
+        let toastContent = `
+            <div class="d-flex">
+                <div class="toast-body">
+                    <strong>${title}</strong>: ${message}
+                </div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭"></button>
+            </div>
+        `;
+        toastDiv.innerHTML = toastContent;
+        
+        let toastContainer = document.getElementById('toast-container');
+        if (!toastContainer) {
+            toastContainer = document.createElement('div');
+            toastContainer.id = 'toast-container';
+            toastContainer.className = 'toast-container position-fixed bottom-0 end-0 p-3';
+            document.body.appendChild(toastContainer);
+        }
+        
+        toastContainer.appendChild(toastDiv);
+        
+        const toast = new bootstrap.Toast(toastDiv, {
+            delay: 5000
+        });
+        toast.show();
+    }
+    
+    // 更新DeepSeek API的优先级顺序和显示
+    function updateDeepSeekApiPriority() {
+        let apiCards = $('#deepseek-alternatives-container .api-card');
+        
+        // 遍历所有API卡片
+        apiCards.each(function(index) {
+            // 更新优先级显示
+            $(this).find('.priority-badge').text(`优先级: ${index + 1}`);
+            
+            // 禁用/启用上移下移按钮
+            if (index === 0) {
+                // 第一个卡片，禁用上移按钮
+                $(this).find('.move-up-btn').prop('disabled', true).addClass('btn-secondary').removeClass('btn-success');
+            } else {
+                $(this).find('.move-up-btn').prop('disabled', false).addClass('btn-success').removeClass('btn-secondary');
+            }
+            
+            if (index === apiCards.length - 1) {
+                // 最后一个卡片，禁用下移按钮
+                $(this).find('.move-down-btn').prop('disabled', true).addClass('btn-secondary').removeClass('btn-warning');
+            } else {
+                $(this).find('.move-down-btn').prop('disabled', false).addClass('btn-warning').removeClass('btn-secondary');
+            }
+        });
+        
+        // 如果只有一个卡片，禁用所有移动按钮
+        if (apiCards.length === 1) {
+            apiCards.find('.move-up-btn, .move-down-btn').prop('disabled', true)
+                .addClass('btn-secondary').removeClass('btn-success btn-warning');
+        }
+        
+        // 如果超过3个卡片，禁用添加按钮
+        if (apiCards.length >= 3) {
+            $('#add-deepseek-api').prop('disabled', true);
+        } else {
+            $('#add-deepseek-api').prop('disabled', false);
+        }
+    }
+    
+    // 移动API卡片位置
+    function moveApiCard(apiId, direction) {
+        let apiCard = $(`[data-api-id="${apiId}"]`);
+        
+        // 添加视觉反馈
+        // 确保direction是布尔值
+        let isMovingUp = (direction === true);
+        let button = isMovingUp ? apiCard.find('.move-up-btn') : apiCard.find('.move-down-btn');
+        let originalText = button.html();
+        button.html('<i class="fas fa-spinner fa-spin"></i>');
+        button.prop('disabled', true);
+        
+        if (isMovingUp) {
+            // 上移卡片
+            let prevCard = apiCard.prev('.api-card');
+            if (prevCard.length) {
+                apiCard.insertBefore(prevCard);
+            }
+        } else {
+            // 下移卡片
+            let nextCard = apiCard.next('.api-card');
+            if (nextCard.length) {
+                apiCard.insertAfter(nextCard);
+            }
+        }
+        
+        // 恢复按钮状态
+        setTimeout(function() {
+            button.html(originalText);
+            button.prop('disabled', false);
+            
+            // 更新优先级显示
+            updateDeepSeekApiPriority();
+        }, 200);
+    }
+    
+    // 添加DeepSeek替代API
+    function addDeepSeekAltAPI(data = {}, providedApiId = null) {
+        // 生成唯一ID或使用提供的ID
+        // 使用时间戳和随机数的组合生成更可靠的唯一ID
+        const timestamp = Date.now().toString(36);
+        const random = Math.random().toString(36).substr(2, 6);
+        const apiId = providedApiId || `api_${timestamp}_${random}`;
+        console.log(`创建API卡片，ID: ${apiId}`, data);
+        
+        // 添加API卡片HTML
+        $("#deepseek-alternatives-container").append(`
+            <div class="card mb-3 api-card" data-api-id="${apiId}">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span class="fw-bold">DeepSeek API <span class="badge bg-primary priority-badge">优先级: 0</span></span>
+                    <div class="btn-group" role="group">
+                        <button type="button" class="btn btn-outline-secondary btn-sm remove-api-btn" data-toggle="tooltip" title="移除API">
+                            <i class="fa fa-trash"></i>
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm move-up-btn" data-toggle="tooltip" title="上移">
+                            <i class="fa fa-arrow-up"></i>
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm move-down-btn" data-toggle="tooltip" title="下移">
+                            <i class="fa fa-arrow-down"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="${apiId}-name" class="form-label">API名称</label>
+                        <input type="text" class="form-control api-name" id="${apiId}-name" placeholder="API名称" value="${data.name || ''}">
+                    </div>
+                    <div class="mb-3">
+                        <label for="${apiId}-key" class="form-label">API密钥</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control api-key" id="${apiId}-key" placeholder="输入API密钥" value="${data.api_key || ''}">
+                            <button class="btn btn-outline-secondary toggle-password" type="button" data-target="${apiId}-key">
+                                <i class="fas fa-eye-slash"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="${apiId}-url" class="form-label">API地址 (可选)</label>
+                        <input type="text" class="form-control api-url" id="${apiId}-url" placeholder="API地址" value="${data.api_url || ''}">
+                    </div>
+                    <div class="mb-3">
+                        <label for="${apiId}-model" class="form-label">模型名称</label>
+                        <input type="text" class="form-control api-model" id="${apiId}-model" placeholder="模型名称" value="${data.model || 'deepseek-chat'}">
+                    </div>
+                    <input type="hidden" class="original-api-id" value="${apiId}">
+                </div>
+            </div>
+        `);
+        
+        // 绑定移除按钮事件
+        $(`[data-api-id="${apiId}"] .remove-api-btn`).on('click', function() {
+            $(this).closest('.api-card').remove();
+            updateDeepSeekApiPriority(); // 更新其他卡片的优先级
+        });
+
+        // 绑定上移按钮事件
+        $(`[data-api-id="${apiId}"] .move-up-btn`).on('click', function() {
+            moveApiCard(apiId, true);
+            updateDeepSeekApiPriority();
+        });
+
+        // 绑定下移按钮事件
+        $(`[data-api-id="${apiId}"] .move-down-btn`).on('click', function() {
+            moveApiCard(apiId, false);
+            updateDeepSeekApiPriority();
+        });
+        
+        return apiId; // 返回API ID
+    }
+    
+    // 测试API连接
+    function testApiConnection(apiType, apiKey, apiUrl, model) {
+        // 此功能已移除
+        console.log("API测试功能已移除");
+    }
+    
+    // 测试备用API连接
+    function testAlternativeApiConnection(apiId, apiName, apiKey, apiUrl, apiModel) {
+        // 此功能已移除
+        console.log("API测试功能已移除");
+    }
+    
+    // 更新API状态UI
+    function updateApiStatusUI(apiType, message, status) {
+        // 此功能已移除
+        console.log("API状态更新功能已移除");
+    }
+    
+    // 更新所有API状态
+    function updateApiStatus() {
+        // 此功能已移除
+        console.log("API状态更新功能已移除");
+    }
+    
+    // 保存API设置
+    function saveSettings() {
+        // 显示加载指示器
+        $("#loading-indicator").removeClass("d-none");
+        
+        // 构建DeepSeek替代API JSON
+        let deepseekAlternatives = {}; 
+        $("#deepseek-alternatives-container .api-card").each(function(index) {
+            let apiId = $(this).attr("data-api-id");
+            let priority = index + 1; // 基于显示顺序设置优先级
+            
+            let apiKey = $(this).find(".api-key").val().trim();
+            let apiUrl = $(this).find(".api-url").val().trim();
+            let apiName = $(this).find(".api-name").val().trim() || `API ${index+1}`;
+            let apiModel = $(this).find(".api-model").val().trim() || "deepseek-chat";
+            
+            // 仅保存有API密钥的配置
+            if (apiKey) {
+                deepseekAlternatives[apiId] = {
+                    api_key: apiKey,
+                    api_url: apiUrl,
+                    name: apiName,
+                    model: apiModel,
+                    priority: priority
+                };
+            }
+        });
+        
+        // 构建请求数据
+        let requestData = {
+            enable_autosave: $("#enable-autosave").is(":checked"),
+            autosave_interval: parseInt($("#autosave-interval").val()),
+            api_alternatives: {
+                deepseek: deepseekAlternatives
+            }
+        };
+        
+        // 发送API请求
+        $.ajax({
+            url: "/api/settings",
+            type: "POST",
+            contentType: "application/json",
+            data: JSON.stringify(requestData),
+            success: function(response) {
+                if (response.success) {
+                    showToast("成功", "API设置已保存", "success");
+                    
+                    // 添加：保存成功后重新加载设置
+                    setTimeout(function() {
+                        loadSettings();  // 重新加载设置以显示最新数据
+                    }, 500);  // 延迟500毫秒，确保后端处理完成
+                } else {
+                    showToast("错误", "保存API设置失败: " + response.error, "danger");
+                }
+                
+                // 隐藏加载指示器
+                $("#loading-indicator").addClass("d-none");
+            },
+            error: function(xhr) {
+                let errorMsg = "未知错误";
+                try {
+                    errorMsg = xhr.responseJSON ? xhr.responseJSON.error : xhr.statusText;
+                } catch (e) {}
+                
+                showToast("错误", "保存API设置失败: " + errorMsg, "danger");
+                
+                // 隐藏加载指示器
+                $("#loading-indicator").addClass("d-none");
+            }
+        });
+    }
+    
+    // 加载设置
+    function loadSettings() {
+        // 显示加载指示器
+        $("#loading-indicator").removeClass("d-none");
+        
+        $.ajax({
+            url: "/api/settings",
+            type: "GET",
+            success: function(response) {
+                console.log("API返回的原始响应:", response);
+                
+                // 检查response和response.data是否存在
+                if (!response || !response.data) {
+                    if (response && response.error) {
+                        showToast("错误", "加载设置失败: " + response.error, "danger");
+                    } else {
+                        showToast("错误", "加载设置失败: 服务器返回的数据格式无效", "danger");
+                    }
+                    console.error("API返回的数据无效:", response);
+                    // 隐藏加载指示器
+                    $("#loading-indicator").addClass("d-none");
+                    // 添加一个空的API卡片
+                    addDeepSeekAltAPI();
+                    return;
+                }
+                
+                // 检查response.success
+                if (!response.success) {
+                    showToast("错误", "加载设置失败: " + (response.error || "未知错误"), "danger");
+                    // 隐藏加载指示器
+                    $("#loading-indicator").addClass("d-none");
+                    // 添加一个空的API卡片
+                    addDeepSeekAltAPI();
+                    return;
+                }
+                
+                const settings = response.data;
+                console.log("加载的设置:", settings);
+                
+                // 打印DeepSeek替代API配置
+                if (settings.api_alternatives && settings.api_alternatives.deepseek) {
+                    console.log("DeepSeek替代API:", settings.api_alternatives.deepseek);
+                    console.log("替代API类型:", Array.isArray(settings.api_alternatives.deepseek) ? "数组" : "对象");
+                } else {
+                    console.log("未找到DeepSeek替代API配置");
+                }
+                
+                // 清空DeepSeek替代API容器
+                $("#deepseek-alternatives-container").empty();
+                
+                // 使用新函数加载替代API
+                loadAlternativeAPIs(settings);
+                
+                // 填充其他API设置
+                if (settings.openai) {
+                    $("#openai-key").val(settings.openai.api_key || "");
+                    $("#openai-endpoint").val(settings.openai.api_url || "");
+                    $("#openai-model").val(settings.openai.model || "");
+                }
+                
+                if (settings.qwen_vl) {
+                    $("#qwen-vl-key").val(settings.qwen_vl.api_key || "");
+                    $("#qwen-vl-endpoint").val(settings.qwen_vl.api_url || "");
+                    $("#qwen-vl-model").val(settings.qwen_vl.model || "");
+                }
+                
+                if (settings.gemini) {
+                    $("#gemini-key").val(settings.gemini.api_key || "");
+                    $("#gemini-endpoint").val(settings.gemini.api_url || "");
+                    $("#gemini-model").val(settings.gemini.model || "");
+                }
+                
+                if (settings.claude) {
+                    $("#claude-key").val(settings.claude.api_key || "");
+                    $("#claude-endpoint").val(settings.claude.api_url || "");
+                    $("#claude-model").val(settings.claude.model || "");
+                }
+                
+                if (settings.aliyun_ocr) {
+                    $("#aliyun-ocr-access-key").val(settings.aliyun_ocr.access_key_id || "");
+                    $("#aliyun-ocr-access-secret").val(settings.aliyun_ocr.access_key_secret || "");
+                    $("#aliyun-ocr-region").val(settings.aliyun_ocr.region || "");
+                }
+                
+                // 设置默认模型
+                if (settings.default_extraction_model) {
+                    $("#default-extraction-model").val(settings.default_extraction_model);
+                }
+                if (settings.default_analysis_model) {
+                    $("#default-analysis-model").val(settings.default_analysis_model);
+                }
+                
+                // 隐藏加载指示器
+                $("#loading-indicator").addClass("d-none");
+                
+                // 显示加载成功提示
+                showToast("成功", "API设置已加载", "success");
+            },
+            error: function(xhr) {
+                let errorMsg = "未知错误";
+                try {
+                    errorMsg = xhr.responseJSON ? xhr.responseJSON.error : xhr.statusText;
+                } catch (e) {}
+                
+                showToast("错误", "加载API设置失败: " + errorMsg, "danger");
+                
+                // 隐藏加载指示器
+                $("#loading-indicator").addClass("d-none");
+                
+                // 添加一个空白API卡片
+                addDeepSeekAltAPI();
+            }
+        });
+    }
+    
+    // 页面加载完成后执行
+    $(document).ready(function() {
+        // 加载设置
+        loadSettings();
+        
+        // 密码可见性切换
+        $(document).on('click', '.toggle-password', function() {
+            const targetId = $(this).data('target');
+            const input = $('#' + targetId);
+            
+            // 切换输入类型
+            if (input.attr('type') === 'password') {
+                input.attr('type', 'text');
+                $(this).find('i').removeClass('fa-eye-slash').addClass('fa-eye');
+            } else {
+                input.attr('type', 'password');
+                $(this).find('i').removeClass('fa-eye').addClass('fa-eye-slash');
+            }
+        });
+        
+        // 添加DeepSeek API按钮事件
+        $("#add-deepseek-api").on('click', function() {
+            // 检查当前API数量
+            let apiCount = $("#deepseek-alternatives-container .api-card").length;
+            
+            // 如果已有3个API，显示警告并禁止添加
+            if (apiCount >= 3) {
+                showToast("警告", "最多只能添加3个DeepSeek API配置", "warning");
+                return;
+            }
+            
+            addDeepSeekAltAPI();
+            updateDeepSeekApiPriority();
+        });
+        
+        // 更新保存按钮状态
+        let saveBtn = $("#saveSettings");
+        if (saveBtn.length) {
+            console.log("找到保存按钮");
+            saveBtn.on('click', function() {
+                saveSettings();
+            });
+        } else {
+            console.error("未找到保存按钮，请检查页面结构");
+        }
+    });
+
+    // 加载替代API
+    function loadAlternativeAPIs(settings) {
+        // 清空替代API容器
+        $("#deepseek-alternatives-container").empty();
+        
+        // 收集所有API配置以正确排序
+        let allApis = [];
+        
+        console.log("开始加载API配置...");
+        console.log("API设置数据:", settings);
+        
+        // 构建所有API列表
+        if (settings.api_alternatives && settings.api_alternatives.deepseek) {
+            console.log("处理所有DeepSeek API...");
+            const deepseekConfig = settings.api_alternatives.deepseek;
+            
+            // 处理对象格式
+            if (typeof deepseekConfig === 'object' && !Array.isArray(deepseekConfig)) {
+                for (let apiId in deepseekConfig) {
+                    if (apiId === "main_api_id") continue; // 跳过main_api_id字段
+                    
+                    let api = deepseekConfig[apiId];
+                    // 确保API有key，避免添加空API
+                    if (api && (api.api_key || api.key)) {
+                        // 统一字段名
+                        const apiKey = api.api_key || api.key || "";
+                        const apiUrl = api.api_url || api.url || "";
+                        const apiModel = api.model || api.model_name || "deepseek-chat";
+                        const apiName = api.name || `API ${apiId}`;
+                        const priority = api.priority || 999; // 默认低优先级
+                        
+                        // 使用原始ID，不重新生成
+                        console.log(`添加API [${apiId}]:`, apiName, "优先级:", priority);
+                        allApis.push({
+                            id: apiId,
+                            data: {
+                                name: apiName,
+                                api_key: apiKey,
+                                api_url: apiUrl,
+                                model: apiModel
+                            },
+                            priority: priority
+                        });
+                    }
+                }
+            } 
+            // 处理数组格式
+            else if (Array.isArray(deepseekConfig)) {
+                console.log("处理数组格式API, 长度:", deepseekConfig.length);
+                deepseekConfig.forEach((api, index) => {
+                    if (!api || !api.api_key) return; // 跳过无效API
+                    
+                    // 使用原始ID，尽量避免生成新ID
+                    // 使用更可靠的ID生成方式
+                    const apiId = api.id || api.original_id || `api_${index+1}_${Date.now().toString(36).substr(2, 5)}${Math.random().toString(36).substr(2, 5)}`;
+                    const priority = api.priority || (index + 1); // 按顺序设置优先级
+                    
+                    console.log(`添加数组格式API [${apiId}]:`, api.name, "优先级:", priority);
+                    allApis.push({
+                        id: apiId,
+                        data: {
+                            name: api.name || `API ${index+1}`,
+                            api_key: api.api_key,
+                            api_url: api.api_url || "",
+                            model: api.model || "deepseek-chat"
+                        },
+                        priority: priority
+                    });
+                });
+            }
+        }
+        
+        // 检查deepseek主API配置（向后兼容）
+        if (settings.deepseek && settings.deepseek.api_key) {
+            console.log("添加主DeepSeek API:", settings.deepseek);
+            // 对主API使用稳定ID
+            const mainApiId = "main";
+            const mainApiConfig = {
+                id: mainApiId,
+                data: {
+                    name: settings.deepseek.name || "主DeepSeek API",
+                    api_key: settings.deepseek.api_key,
+                    api_url: settings.deepseek.api_url || "",
+                    model: settings.deepseek.model || "deepseek-chat"
+                },
+                priority: settings.deepseek.priority || 1, // 主API默认优先级1
+            };
+            
+            // 检查是否已经存在同ID的API
+            const existingMain = allApis.find(api => api.id === mainApiId);
+            if (!existingMain) {
+                allApis.push(mainApiConfig);
+                console.log("已添加主DeepSeek API:", mainApiConfig.data.name, "优先级:", mainApiConfig.priority);
+            }
+        }
+        
+        // 按优先级排序
+        allApis.sort((a, b) => a.priority - b.priority);
+        console.log("排序后的API列表:", allApis.map(api => `${api.data.name} (优先级: ${api.priority})`));
+        
+        // 添加API到UI，限制最多3个
+        const apiLimit = 3;
+        let addedCount = 0;
+        
+        for (let api of allApis) {
+            if (addedCount < apiLimit) {
+                // 使用原始ID，不重新生成
+                const apiId = addDeepSeekAltAPI(api.data, api.id);
+                console.log(`添加API卡片 #${addedCount+1}: ${apiId}, 名称: ${api.data.name}`);
+                addedCount++;
+            }
+        }
+        
+        // 如果没有API，添加一个空的
+        if (addedCount === 0) {
+            console.log("没有找到API配置，添加空白API卡片");
+            addDeepSeekAltAPI();
+        }
+        
+        // 更新DeepSeek优先级显示
+        updateDeepSeekApiPriority();
+    }
+    </script>
+</body>
+</html>

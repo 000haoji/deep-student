@@ -1,0 +1,218 @@
+/**
+ * 流式分析功能样式
+ * 用于主程序中的流式分析显示
+ */
+
+/* 推理过程容器 */
+.reasoning-chain {
+    background-color: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    font-size: 0.9rem;
+    margin: 1rem 0;
+    max-height: 400px;
+    overflow-y: auto;
+    color: #212529;
+}
+
+.reasoning-chain h5 {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+    font-weight: 600;
+}
+
+.reasoning-content {
+    white-space: pre-wrap;
+    font-family: monospace;
+    word-wrap: break-word;
+    word-break: break-all;
+}
+
+/* 结果容器 */
+.result-content {
+    background-color: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    padding: 1rem;
+    margin-top: 1rem;
+    word-wrap: break-word;
+    word-break: normal;
+    overflow-wrap: break-word;
+}
+
+/* 代码块样式 */
+.result-content pre {
+    background-color: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    padding: 0.5rem;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+
+.result-content code {
+    font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    font-size: 0.875rem;
+    word-wrap: break-word;
+    word-break: break-all;
+}
+
+/* 分析结果容器 */
+.problem-result {
+    background-color: #fff;
+    border: 1px solid #dee2e6;
+    border-radius: 0.25rem;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+    word-wrap: break-word;
+    word-break: normal;
+}
+
+.problem-result h4 {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+}
+
+/* 加载指示器 */
+.loading-indicator {
+    text-align: center;
+    padding: 1rem;
+}
+
+/* 表格样式 */
+.result-content table {
+    width: 100%;
+    margin-bottom: 1rem;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.result-content th, 
+.result-content td {
+    padding: 0.5rem;
+    border: 1px solid #dee2e6;
+    word-wrap: break-word;
+    word-break: normal;
+}
+
+.result-content th {
+    background-color: #f8f9fa;
+    font-weight: 600;
+}
+
+/* 引用样式 */
+.result-content blockquote {
+    border-left: 4px solid #ced4da;
+    padding-left: 1rem;
+    margin-left: 0;
+    color: #6c757d;
+    word-wrap: break-word;
+    word-break: normal;
+}
+
+/* 链接样式 */
+.result-content a {
+    color: #007bff;
+    text-decoration: none;
+    word-wrap: break-word;
+    word-break: break-all;
+}
+
+.result-content a:hover {
+    text-decoration: underline;
+}
+
+/* 数学公式区域 */
+.result-content .math {
+    overflow-x: auto;
+    margin: 0.5rem 0;
+}
+
+/* 回顾分析结果区域 */
+.review-analysis-container,
+.markdown-body,
+.markdown-body *,
+div[id*="analysis"],
+div[id*="Analysis"],
+div[class*="analysis"],
+div[class*="Analysis"],
+.analysis-content,
+.analysis-content *,
+.reasoning-chain,
+.reasoning-content,
+.result-content,
+pre, code,
+.card-body {
+    background-color: #ffffff !important;
+    color: #333333 !important;
+    word-wrap: break-word !important;
+    word-break: normal !important;
+    overflow-wrap: break-word !important;
+}
+
+/* 代码块样式保持浅灰背景 */
+.markdown-body pre,
+.markdown-body code,
+pre, code {
+    background-color: #f6f8fa !important;
+    color: #24292e !important;
+    white-space: pre-wrap !important;
+    word-wrap: break-word !important;
+}
+
+/* 分析结果表格样式 */
+.analysis-content table,
+.markdown-body table {
+    background-color: #ffffff !important;
+    color: #333333 !important;
+    border-collapse: collapse;
+    width: 100%;
+    margin-bottom: 1rem;
+    table-layout: fixed;
+}
+
+.analysis-content th,
+.analysis-content td,
+.markdown-body th,
+.markdown-body td {
+    background-color: #ffffff !important;
+    color: #333333 !important;
+    border: 1px solid #dee2e6 !important;
+    padding: 0.5rem;
+    word-wrap: break-word !important;
+    word-break: normal !important;
+}
+
+.analysis-content th,
+.markdown-body th {
+    background-color: #f8f9fa !important;
+}
+
+/* 分析结果标题 */
+.analysis-title {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+    color: #333333;
+}
+
+/* 回顾分析内容区域 */
+.analysis-content {
+    background-color: #ffffff;
+    color: #333333;
+    word-wrap: break-word;
+    word-break: normal;
+    overflow-wrap: break-word;
+}
+
+/* 特别针对中文内容的换行处理 */
+p, div, span, li, td, th, blockquote, h1, h2, h3, h4, h5, h6 {
+    word-wrap: break-word !important;
+    word-break: normal !important;
+    overflow-wrap: break-word !important;
+}

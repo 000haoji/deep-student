@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API配置管理 - 考研数学错题管理</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.5.0/font/bootstrap-icons.css">
+    <style>
+        .api-card {
+            margin-bottom: 20px;
+            border-left: 4px solid #0d6efd;
+        }
+        .api-card.active {
+            border-left-color: #198754;
+            box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        }
+        .api-card.inactive {
+            border-left-color: #dc3545;
+        }
+        .status-badge {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+        }
+        .response-time {
+            font-size: 0.85rem;
+            color: #6c757d;
+        }
+        .model-select {
+            max-width: 300px;
+        }
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1050;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导航栏 -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="/">考研数学错题管理</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <li class="nav-item">
+                        <a class="nav-link" href="/">首页</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/problems">错题库</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="/reviews">复习计划</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" href="/api-settings">API配置</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主要内容 -->
+    <div class="container mt-4">
+        <h1 class="mb-4">API 配置管理</h1>
+        
+        <!-- 功能说明 -->
+        <div class="alert alert-info mb-4">
+            <h5 class="alert-heading">功能说明</h5>
+            <p>本页面用于管理和测试系统使用的AI服务API配置。您可以设置API端点、测试连接、保存配置，以及选择默认的处理模型。</p>
+            <ul>
+                <li><strong>API端点设置</strong>：配置OpenAI兼容API和DeepSeek API的URL和密钥</li>
+                <li><strong>连接测试</strong>：测试API连接是否正常，并显示响应时间</li>
+                <li><strong>默认模型设置</strong>：选择用于题目提取和分析的默认模型</li>
+            </ul>
+            <p class="mb-0">配置保存后将立即生效，无需重启系统。</p>
+        </div>
+        
+        <!-- 状态通知容器 -->
+        <div class="toast-container" id="toastContainer"></div>
+
+        <!-- 测试连接结果提示 -->
+        <div id="connection-alert" class="alert alert-info d-none">
+            正在测试API连接，请稍候...
+        </div>
+
+        <!-- API配置卡片区域 -->
+        <div class="row" id="api-cards-container">
+            <div class="col-12 text-center my-5">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">加载中...</span>
+                </div>
+                <p class="mt-2">正在加载API配置信息...</p>
+            </div>
+        </div>
+
+        <!-- API端点配置区域 -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">API端点设置</h5>
+            </div>
+            <div class="card-body">
+                <form id="endpoints-form">
+                    <!-- OpenAI兼容API设置 -->
+                    <div class="mb-3">
+                        <label for="openai-api-url" class="form-label">OpenAI兼容API端点</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="openai-api-url" name="openai_api_url" placeholder="例如: https://dashscope.aliyuncs.com/compatible-mode/v1">
+                            <button type="button" class="btn btn-outline-secondary test-api" data-api-type="openai">测试连接</button>
+                        </div>
+                        <div class="form-text">用于兼容OpenAI接口的API端点</div>
+                    </div>
+
+                    <!-- DeepSeek API设置 -->
+                    <div class="mb-3">
+                        <label for="deepseek-api-url" class="form-label">DeepSeek API端点</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="deepseek-api-url" name="deepseek_api_url" placeholder="例如: https://api.deepseek.com/v1">
+                            <button type="button" class="btn btn-outline-secondary test-api" data-api-type="deepseek">测试连接</button>
+                        </div>
+                        <div class="form-text">用于DeepSeek API的端点</div>
+                    </div>
+                    
+                    <!-- 千问VL多模态API设置 -->
+                    <div class="mb-3">
+                        <label for="qwen-vl-api-url" class="form-label">千问VL多模态API端点</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="qwen-vl-api-url" name="qwen_vl_api_url" placeholder="例如: https://dashscope.aliyuncs.com/v1">
+                            <button type="button" class="btn btn-outline-secondary test-api" data-api-type="qwen-vl">测试连接</button>
+                        </div>
+                        <div class="form-text">用于千问VL多模态的API端点</div>
+                    </div>
+                    
+                    <!-- Google Gemini API设置 -->
+                    <div class="mb-3">
+                        <label for="gemini-api-url" class="form-label">Google Gemini API端点</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="gemini-api-url" name="gemini_api_url" placeholder="例如: https://generativelanguage.googleapis.com">
+                            <button type="button" class="btn btn-outline-secondary test-api" data-api-type="gemini">测试连接</button>
+                        </div>
+                        <div class="form-text">用于Google Gemini的API端点</div>
+                    </div>
+
+                    <!-- API密钥设置 -->
+                    <h5 class="mt-4 mb-3">API密钥设置</h5>
+                    
+                    <div class="mb-3">
+                        <label for="openai-api-key" class="form-label">OpenAI兼容API密钥</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="openai-api-key" name="openai_api_key" placeholder="sk-...">
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="deepseek-api-key" class="form-label">DeepSeek API密钥</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="deepseek-api-key" name="deepseek_api_key" placeholder="sk-...">
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="qwen-vl-api-key" class="form-label">千问VL API密钥</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="qwen-vl-api-key" name="qwen_vl_api_key" placeholder="sk-...">
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="gemini-api-key" class="form-label">Google Gemini API密钥</label>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="gemini-api-key" name="gemini_api_key" placeholder="AIza...">
+                        </div>
+                    </div>
+                    
+                    <!-- 高级配置 -->
+                    <div class="mt-4">
+                        <h5 class="mb-3">高级配置</h5>
+                        
+                        <div class="mb-3">
+                            <label for="openai-model" class="form-label">OpenAI默认模型</label>
+                            <input type="text" class="form-control" id="openai-model" name="openai_model" placeholder="例如: gpt-3.5-turbo">
+                            <div class="form-text">用于OpenAI兼容API的默认模型</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="deepseek-model" class="form-label">DeepSeek默认模型</label>
+                            <input type="text" class="form-control" id="deepseek-model" name="deepseek_model" placeholder="例如: deepseek-chat">
+                            <div class="form-text">用于DeepSeek API的默认模型</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="qwen-vl-model" class="form-label">千问VL默认模型</label>
+                            <input type="text" class="form-control" id="qwen-vl-model" name="qwen_vl_model" placeholder="例如: qwen-vl-plus">
+                            <div class="form-text">用于千问VL多模态的默认模型</div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="gemini-model" class="form-label">Gemini默认模型</label>
+                            <input type="text" class="form-control" id="gemini-model" name="gemini_model" placeholder="例如: gemini-pro">
+                            <div class="form-text">用于Google Gemini的默认模型</div>
+                        </div>
+                    </div>
+                    
+                    <div class="d-flex justify-content-between mt-4">
+                        <button type="button" class="btn btn-outline-primary" id="test-all-endpoints">测试所有连接</button>
+                        <button type="submit" class="btn btn-primary">保存配置</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- 默认模型设置 -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">默认模型设置</h5>
+            </div>
+            <div class="card-body">
+                <form id="models-form">
+                    <div class="mb-3">
+                        <label for="default-extraction-model" class="form-label">默认题目提取模型</label>
+                        <select class="form-select model-select" id="default-extraction-model" name="default_extraction_model">
+                            <option value="multimodal_qwen-vl">千问VL多模态</option>
+                            <option value="multimodal_gemini">Google Gemini多模态</option>
+                            <option value="openai">通用OpenAI兼容API</option>
+                        </select>
+                        <div class="form-text">用于从图片提取题目内容的默认模型</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="default-analysis-model" class="form-label">默认题目分析模型</label>
+                        <select class="form-select model-select" id="default-analysis-model" name="default_analysis_model">
+                            <option value="gemini">Google Gemini</option>
+                            <option value="deepseek">DeepSeek-Coder</option>
+                            <option value="openai">通用OpenAI兼容API</option>
+                        </select>
+                        <div class="form-text">用于题目分析和错误解析的默认模型</div>
+                    </div>
+
+                    <div class="d-flex justify-content-end mt-3">
+                        <button type="submit" class="btn btn-primary">保存设置</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 底部信息 -->
+    <footer class="mt-5 py-3 bg-light text-center text-muted">
+        <div class="container">
+            <p class="mb-0">考研数学错题管理系统 &copy; 2024</p>
+        </div>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/api_settings.js"></script>
+</body>
+</html>

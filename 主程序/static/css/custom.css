@@ -1,0 +1,29 @@
+/* 自定义样式表 */
+body {
+    font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+}
+.problem-card {
+    margin-bottom: 15px;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+}
+.tag {
+    display: inline-block;
+    background-color: #f0f0f0;
+    padding: 2px 8px;
+    margin: 2px;
+    border-radius: 4px;
+    font-size: 0.9em;
+}
+.typicality-rating span {
+    cursor: pointer;
+    font-size: 1.5rem;
+}
+.tag-badge {
+    background-color: #e9ecef;
+    color: #495057;
+    padding: 0.35em 0.65em;
+    border-radius: 0.25rem;
+    margin-right: 0.5em;
+    margin-bottom: 0.5em;
+    display: inline-block;
+}

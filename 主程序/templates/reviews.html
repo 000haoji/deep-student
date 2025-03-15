@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>回顾记录 - DeepStudent</title>
+    <!-- jQuery -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <!-- 自定义样式 -->
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .review-card {
+            transition: transform 0.2s;
+            height: 100%;
+        }
+        .review-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .card-header {
+            background-color: rgba(0,0,0,0.03);
+        }
+    </style>
+</head>
+<body>
+
+{% include 'includes/nav.html' %}
+
+<div class="container mt-4">
+    <div class="row mb-4">
+        <div class="col">
+            <h1>回顾记录</h1>
+            <p class="text-muted">查看所有回顾记录</p>
+        </div>
+        <div class="col-auto">
+            <a href="/problems" class="btn btn-outline-primary">
+                <i class="fas fa-plus me-1"></i> 创建新回顾
+            </a>
+            <button id="refreshBtn" class="btn btn-outline-secondary">
+                <i class="fas fa-sync-alt me-1"></i> 刷新
+            </button>
+        </div>
+    </div>
+
+    <div id="loadingReviews" class="text-center py-5">
+        <div class="spinner-border text-primary" role="status">
+            <span class="visually-hidden">正在加载...</span>
+        </div>
+        <p class="mt-2">正在加载回顾记录...</p>
+    </div>
+    
+    <div id="reviewsContainer" class="d-none">
+        <div class="row" id="reviewsGrid">
+            <!-- 回顾记录将在这里显示 -->
+        </div>
+    </div>
+    
+    <div id="emptyState" class="text-center py-5 d-none">
+        <i class="fas fa-file-alt fa-3x text-muted mb-3"></i>
+        <h4>暂无回顾记录</h4>
+        <p class="text-muted">您可以在错题库中选择错题，然后点击"创建新回顾"按钮创建新的回顾。</p>
+        <a href="/problems" class="btn btn-primary mt-2">
+            <i class="fas fa-plus me-1"></i> 创建新回顾
+        </a>
+    </div>
+    
+    <div id="errorState" class="alert alert-danger d-none">
+        <strong>加载失败</strong>
+        <p id="errorMessage">无法加载回顾记录。</p>
+        <button id="retryBtn" class="btn btn-outline-danger">重试</button>
+    </div>
+</div>
+
+<!-- 确认删除模态框 -->
+<div class="modal fade" id="deleteConfirmModal" tabindex="-1" aria-labelledby="deleteConfirmModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="deleteConfirmModalLabel">确认删除</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p>确定要删除这个回顾记录吗？此操作不可撤销。</p>
+                <p class="text-muted" id="deleteReviewTitle"></p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteBtn">删除</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bootstrap Bundle with Popper -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+<!-- Marked.js for Markdown rendering -->
+<script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
+<!-- 自定义JS -->
+<script src="/static/js/render_helper.js"></script>
+
+<script>
+    $(document).ready(function() {
+        // 加载所有回顾记录
+        loadReviews();
+        
+        // 刷新按钮点击事件
+        $('#refreshBtn').click(function() {
+            loadReviews();
+        });
+        
+        // 重试按钮点击事件
+        $('#retryBtn').click(function() {
+            loadReviews();
+        });
+        
+        // 加载回顾记录
+        function loadReviews() {
+            // 显示加载状态
+            $('#loadingReviews').removeClass('d-none');
+            $('#reviewsContainer').addClass('d-none');
+            $('#emptyState').addClass('d-none');
+            $('#errorState').addClass('d-none');
+            
+            $.ajax({
+                url: '/api/reviews',
+                type: 'GET',
+                success: function(response) {
+                    // 隐藏加载状态
+                    $('#loadingReviews').addClass('d-none');
+                    
+                    // 处理响应
+                    let reviews = [];
+                    if (response && Array.isArray(response)) {
+                        reviews = response;
+                    } else if (response && response.reviews && Array.isArray(response.reviews)) {
+                        reviews = response.reviews;
+                    }
+                    
+                    if (reviews.length === 0) {
+                        // 显示空状态
+                        $('#emptyState').removeClass('d-none');
+                    } else {
+                        // 显示回顾列表
+                        $('#reviewsContainer').removeClass('d-none');
+                        displayReviews(reviews);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    // 隐藏加载状态，显示错误
+                    $('#loadingReviews').addClass('d-none');
+                    $('#errorState').removeClass('d-none');
+                    $('#errorMessage').text('加载回顾记录失败: ' + (error || '未知错误'));
+                    console.error('加载回顾记录失败:', error, xhr.responseText);
+                }
+            });
+        }
+        
+        // 显示回顾记录
+        function displayReviews(reviews) {
+            const grid = $('#reviewsGrid');
+            grid.empty();
+            
+            reviews.forEach(review => {
+                // 格式化日期
+                const createdDate = new Date(review.create_time || review.created_at || Date.now()).toLocaleString('zh-CN');
+                
+                // 确定标题
+                const title = review.title || `回顾记录 #${review.id.substring(0, 8)}`;
+                
+                // 确定问题数量
+                const problemCount = review.problem_count || 
+                                    (review.problems_included ? (Array.isArray(review.problems_included) ? 
+                                    review.problems_included.length : 0) : 0);
+                
+                // 创建系统类型标识
+                const isNewSystem = review.title && review.description;
+                const systemTypeBadge = isNewSystem ? 
+                    '<span class="badge bg-success me-2">新系统</span>' : 
+                    '<span class="badge bg-secondary me-2">旧系统</span>';
+                
+                // 选择合适的图标
+                const icon = isNewSystem ? 
+                    '<i class="fas fa-clipboard-check me-1"></i>' : 
+                    '<i class="fas fa-clipboard me-1"></i>';
+                
+                // 确定描述内容
+                let description = review.description || review.summary || '无描述';
+                if (description.length > 100) {
+                    description = description.substring(0, 100) + '...';
+                }
+                
+                // 创建卡片
+                const card = `
+                    <div class="col-md-6 col-lg-4 mb-4">
+                        <div class="card review-card">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                ${systemTypeBadge}
+                                <small class="text-muted">${createdDate}</small>
+                            </div>
+                            <div class="card-body">
+                                <h5 class="card-title">${icon} ${title}</h5>
+                                <p class="card-text">${description}</p>
+                                <div class="d-flex justify-content-between align-items-center mb-2">
+                                    <span class="badge bg-primary rounded-pill">包含${problemCount}道错题</span>
+                                    ${review.has_analysis ? '<span class="badge bg-info rounded-pill">已分析</span>' : ''}
+                                </div>
+                            </div>
+                            <div class="card-footer bg-transparent d-flex justify-content-between">
+                                <a href="/review/${review.id}" class="btn btn-sm btn-outline-primary">
+                                    <i class="fas fa-book me-1"></i> 查看详情
+                                </a>
+                                <button class="btn btn-sm btn-outline-danger delete-review" data-id="${review.id}" data-title="${title}">
+                                    <i class="fas fa-trash-alt me-1"></i> 删除
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                grid.append(card);
+            });
+            
+            // 绑定删除按钮点击事件
+            $('.delete-review').click(function() {
+                const reviewId = $(this).data('id');
+                const reviewTitle = $(this).data('title');
+                
+                $('#deleteReviewTitle').text(reviewTitle);
+                $('#confirmDeleteBtn').data('id', reviewId);
+                
+                const deleteModal = new bootstrap.Modal(document.getElementById('deleteConfirmModal'));
+                deleteModal.show();
+            });
+        }
+        
+        // 确认删除按钮点击事件
+        $('#confirmDeleteBtn').click(function() {
+            const reviewId = $(this).data('id');
+            
+            $.ajax({
+                url: `/api/review/${reviewId}`,
+                type: 'DELETE',
+                success: function(response) {
+                    if (response.success) {
+                        // 重新加载列表
+                        loadReviews();
+                        // 关闭模态窗
+                        const deleteModal = bootstrap.Modal.getInstance(document.getElementById('deleteConfirmModal'));
+                        deleteModal.hide();
+                    } else {
+                        alert('删除失败: ' + (response.error || '未知错误'));
+                    }
+                },
+                error: function(xhr, status, error) {
+                    alert('删除失败: ' + (error || '未知错误'));
+                }
+            });
+        });
+    });
+</script>
+</body>
+</html>

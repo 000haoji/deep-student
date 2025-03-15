@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>学科Prompt设置 - 考研错题分析系统</title>
+    <!-- 使用本地资源替代CDN链接 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+    <!-- 使用CDN链接加载Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <script src="{{ url_for('static', filename='js/jquery.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+    <style>
+        .subject-tab {
+            cursor: pointer;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            transition: all 0.3s;
+        }
+        .subject-tab:hover {
+            background-color: rgba(13, 110, 253, 0.1);
+        }
+        .subject-tab.active {
+            background-color: #0d6efd;
+            color: white;
+        }
+        .prompt-textarea {
+            min-height: 300px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+        .save-indicator {
+            display: none;
+            margin-left: 10px;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container py-4">
+        <h1 class="mb-4">学科Prompt设置</h1>
+        
+        <!-- 说明卡片 -->
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="card-title mb-0">关于学科Prompt设置</h5>
+            </div>
+            <div class="card-body">
+                <p>学科Prompt是系统在分析错题时使用的提示词模板，针对不同学科有不同的分析要求和侧重点。您可以根据需要自定义每个学科的分析提示词，系统将使用您设置的提示词来分析上传的错题图片。</p>
+                <div class="alert alert-info">
+                    <strong>提示：</strong> 修改提示词后，系统将在下次分析中使用新的提示词。建议在修改前备份原始提示词，以便需要时恢复。
+                </div>
+            </div>
+        </div>
+        
+        <div class="row">
+            <!-- 左侧学科选择 -->
+            <div class="col-md-3">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">选择学科</h5>
+                    </div>
+                    <div class="card-body">
+                        <div id="subject-list" class="d-flex flex-column">
+                            {% for subject_key, subject_info in subjects.items() %}
+                                <div class="subject-tab {% if current_subject == subject_key %}active{% endif %}" 
+                                     data-subject="{{ subject_key }}">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <span><i class="fas {{ subject_info.icon }} me-2"></i> {{ subject_info.name }}</span>
+                                        <button class="btn btn-sm btn-outline-danger delete-subject-btn" 
+                                                data-subject="{{ subject_key }}" 
+                                                data-subject-name="{{ subject_info.name }}">
+                                            <i class="fas fa-trash"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                        <div class="mt-3">
+                            <button class="btn btn-primary w-100" data-bs-toggle="modal" data-bs-target="#newSubjectModal">
+                                <i class="fas fa-plus me-1"></i> 创建新学科
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 右侧编辑区域 -->
+            <div class="col-md-9">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">
+                            <span id="currentSubjectName">{{ subjects[current_subject].name }}</span> 分析提示词
+                        </h5>
+                        <button class="btn btn-success" id="savePrompt">
+                            <i class="fas fa-save me-1"></i>保存设置
+                            <span class="save-indicator text-white">
+                                <i class="fas fa-check-circle"></i> 已保存
+                            </span>
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <form id="promptForm">
+                            <div class="mb-3">
+                                <label for="promptType" class="form-label">提示词类型</label>
+                                <select class="form-select" id="promptType">
+                                    <option value="deepseek">Deepseek分析提示词</option>
+                                    <option value="qwen">Qwen提取提示词</option>
+                                    <option value="review">回顾分析提示词</option>
+                                </select>
+                                <small class="form-text text-muted">
+                                    Deepseek分析提示词用于深度分析错题，Qwen提取提示词用于图像文本提取和初步结构化，回顾分析提示词用于生成回顾分析报告
+                                </small>
+                            </div>
+                            <div class="mb-3">
+                                <label for="promptTextarea" class="form-label">提示词模板</label>
+                                <textarea class="form-control prompt-textarea" id="promptTextarea" rows="12"></textarea>
+                                <div class="form-text mt-2">
+                                    提示词中可以使用系统变量和描述，如"{subject_name}"将被替换为当前学科名称。
+                                </div>
+                            </div>
+                            <div class="mb-3">
+                                <button type="button" class="btn btn-outline-secondary" id="resetPrompt">
+                                    <i class="fas fa-undo me-1"></i>重置为默认值
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                
+                <!-- 变量说明卡片 -->
+                <div class="card mt-4">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">提示词模板说明</h5>
+                    </div>
+                    <div class="card-body">
+                        <p>提示词模板是向AI模型提供的指导性文本，用于引导AI如何分析错题。一个好的提示词应当明确告诉AI需要分析的内容和输出的格式。</p>
+                        <h6>建议包含的要素：</h6>
+                        <ul>
+                            <li>题目类型的判断标准</li>
+                            <li>错误类型的分类方法</li>
+                            <li>知识点提取的要求</li>
+                            <li>难度评估的标准</li>
+                            <li>输出的结构化格式</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 创建新学科模态框 -->
+    <div class="modal fade" id="newSubjectModal" tabindex="-1" aria-labelledby="newSubjectModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="newSubjectModalLabel">创建新学科</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="newSubjectForm">
+                        <div class="mb-3">
+                            <label for="subjectKey" class="form-label">学科标识符</label>
+                            <input type="text" class="form-control" id="subjectKey" placeholder="例如：physics" required>
+                            <div class="form-text">学科的唯一标识符，只能包含英文字母、数字和下划线</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="subjectName" class="form-label">学科名称</label>
+                            <input type="text" class="form-control" id="subjectName" placeholder="例如：物理" required>
+                            <div class="form-text">学科的显示名称，可以使用中文</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="subjectIcon" class="form-label">学科图标</label>
+                            <div class="input-group">
+                                <span class="input-group-text"><i id="iconPreview" class="fas fa-book"></i></span>
+                                <input type="text" class="form-control" id="subjectIcon" placeholder="例如：fa-book" value="fa-book">
+                            </div>
+                            <div class="form-text">使用Font Awesome图标类名，默认为fa-book</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="subjectPromptDeepseek" class="form-label">Deepseek分析提示词</label>
+                            <textarea class="form-control" id="subjectPromptDeepseek" rows="5" placeholder="输入该学科的Deepseek分析提示词模板"></textarea>
+                            <div class="form-text">可以留空，之后在学科设置中编辑</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="subjectPromptQwen" class="form-label">Qwen提取提示词</label>
+                            <textarea class="form-control" id="subjectPromptQwen" rows="5" placeholder="输入该学科的Qwen提取提示词模板"></textarea>
+                            <div class="form-text">可以留空，之后在学科设置中编辑</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="subjectPromptReview" class="form-label">回顾分析提示词</label>
+                            <textarea class="form-control" id="subjectPromptReview" rows="5" placeholder="输入该学科的回顾分析提示词模板"></textarea>
+                            <div class="form-text">用于生成回顾分析报告的提示词，可以留空，之后在学科设置中编辑</div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" id="createSubjectBtn">创建学科</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 删除学科确认模态框 -->
+    <div class="modal fade" id="deleteSubjectModal" tabindex="-1" aria-labelledby="deleteSubjectModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title" id="deleteSubjectModalLabel">删除学科确认</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-warning">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <span id="deleteConfirmationMessage">您即将删除学科，此操作无法撤销！</span>
+                    </div>
+                    <p>请输入 <strong id="confirmationText">删除</strong> 以确认：</p>
+                    <div class="mb-3">
+                        <input type="text" class="form-control" id="confirmationInput" placeholder="请输入确认词">
+                        <div class="form-text text-danger" id="confirmationError"></div>
+                    </div>
+                    <input type="hidden" id="subjectToDelete">
+                    <input type="hidden" id="confirmationLevel" value="1">
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-danger" id="confirmDeleteBtn" disabled>确认删除</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        $(document).ready(function() {
+            // 当前选中的学科
+            let currentSubject = "{{ current_subject }}";
+            // 当前提示词类型
+            let currentPromptType = "deepseek";
+            
+            // 初始加载提示词
+            loadPrompt(currentSubject, currentPromptType);
+            
+            // 学科选择点击事件
+            $('.subject-tab').click(function() {
+                // 移除之前的active类
+                $('.subject-tab').removeClass('active');
+                // 添加active类到当前选中的学科
+                $(this).addClass('active');
+                
+                // 更新当前学科
+                currentSubject = $(this).data('subject');
+                
+                // 更新学科名称显示
+                $('#currentSubjectName').text($(this).text().trim());
+                
+                // 加载该学科的提示词
+                loadPrompt(currentSubject, currentPromptType);
+            });
+            
+            // 提示词类型切换事件
+            $('#promptType').change(function() {
+                currentPromptType = $(this).val();
+                loadPrompt(currentSubject, currentPromptType);
+            });
+            
+            // 保存按钮点击事件
+            $('#savePrompt').click(function() {
+                savePrompt();
+            });
+            
+            // 重置按钮点击事件
+            $('#resetPrompt').click(function() {
+                if (confirm('确定要重置提示词到系统默认值吗？这将覆盖您的自定义设置。')) {
+                    resetPrompt();
+                }
+            });
+            
+            // 加载提示词函数
+            function loadPrompt(subject, promptType) {
+                $.ajax({
+                    url: `/api/get_prompt?subject=${subject}&type=${promptType}`,
+                    type: 'GET',
+                    success: function(response) {
+                        if (response.prompt) {
+                            $('#promptTextarea').val(response.prompt);
+                        } else {
+                            $('#promptTextarea').val('');
+                        }
+                    },
+                    error: function(error) {
+                        console.error('加载提示词失败:', error);
+                        alert('加载提示词失败: ' + (error.responseJSON?.error || '未知错误'));
+                    }
+                });
+            }
+            
+            // 保存提示词函数
+            function savePrompt() {
+                const prompt = $('#promptTextarea').val();
+                
+                $.ajax({
+                    url: '/api/save_prompt',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({
+                        subject: currentSubject,
+                        prompt: prompt,
+                        type: currentPromptType
+                    }),
+                    success: function(response) {
+                        // 显示保存成功指示器
+                        $('.save-indicator').fadeIn().delay(2000).fadeOut();
+                    },
+                    error: function(error) {
+                        console.error('保存提示词失败:', error);
+                        alert('保存提示词失败: ' + (error.responseJSON?.error || '未知错误'));
+                    }
+                });
+            }
+            
+            // 重置提示词函数
+            function resetPrompt() {
+                $.ajax({
+                    url: '/api/reset_prompt',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({
+                        subject: currentSubject,
+                        type: currentPromptType
+                    }),
+                    success: function(response) {
+                        if (response.default_prompt) {
+                            $('#promptTextarea').val(response.default_prompt);
+                            
+                            // 显示保存成功指示器
+                            $('.save-indicator').text(' 已重置为默认值').fadeIn().delay(2000).fadeOut();
+                        }
+                    },
+                    error: function(error) {
+                        console.error('重置提示词失败:', error);
+                        alert('重置提示词失败: ' + (error.responseJSON?.error || '未知错误'));
+                    }
+                });
+            }
+
+            // 新建学科表单提交
+            $('#newSubjectForm').submit(function(e) {
+                e.preventDefault();
+                
+                const subjectKey = $('#subjectKey').val();
+                const subjectName = $('#subjectName').val();
+                const subjectIcon = $('#subjectIcon').val();
+                const subjectPromptDeepseek = $('#subjectPromptDeepseek').val();
+                const subjectPromptQwen = $('#subjectPromptQwen').val();
+                const subjectPromptReview = $('#subjectPromptReview').val();
+                
+                $.ajax({
+                    url: '/api/create_subject',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({
+                        key: subjectKey,
+                        name: subjectName,
+                        icon: subjectIcon,
+                        prompts: {
+                            deepseek: subjectPromptDeepseek,
+                            qwen: subjectPromptQwen,
+                            review: subjectPromptReview
+                        }
+                    }),
+                    success: function(response) {
+                        alert('学科创建成功，页面将刷新');
+                        location.reload();
+                    },
+                    error: function(error) {
+                        console.error('创建学科失败:', error);
+                        alert('创建学科失败: ' + (error.responseJSON?.error || '未知错误'));
+                    }
+                });
+            });
+            
+            // 绑定创建学科按钮点击事件
+            $('#createSubjectBtn').click(function() {
+                $('#newSubjectForm').submit();
+            });
+
+            // 删除学科按钮点击事件
+            $('.delete-subject-btn').click(function(e) {
+                e.stopPropagation(); // 防止点击事件传播到学科选项卡
+                const subjectKey = $(this).data('subject');
+                const subjectName = $(this).data('subject-name');
+                
+                // 设置要删除的学科和确认级别
+                $('#subjectToDelete').val(subjectKey);
+                $('#confirmationLevel').val(1);
+                
+                // 根据确认级别设置不同的确认词和消息
+                updateDeleteConfirmation(1, subjectName);
+                
+                // 显示确认模态框
+                $('#deleteSubjectModal').modal('show');
+            });
+            
+            // 监听确认输入
+            $('#confirmationInput').on('input', function() {
+                const confirmationText = $('#confirmationText').text();
+                const inputText = $(this).val();
+                
+                if (inputText === confirmationText) {
+                    $('#confirmDeleteBtn').prop('disabled', false);
+                    $('#confirmationError').text('');
+                } else {
+                    $('#confirmDeleteBtn').prop('disabled', true);
+                    $('#confirmationError').text('请输入正确的确认词');
+                }
+            });
+            
+            // 确认删除按钮点击事件
+            $('#confirmDeleteBtn').click(function() {
+                const subjectKey = $('#subjectToDelete').val();
+                const confirmationLevel = parseInt($('#confirmationLevel').val());
+                const subjectTab = $(`.subject-tab[data-subject="${subjectKey}"]`);
+                const subjectName = subjectTab.find('span').text().trim();
+                
+                // 清空确认输入
+                $('#confirmationInput').val('');
+                $('#confirmDeleteBtn').prop('disabled', true);
+                
+                // 根据当前确认级别决定下一步
+                if (confirmationLevel < 3) {
+                    // 增加确认级别
+                    const nextLevel = confirmationLevel + 1;
+                    $('#confirmationLevel').val(nextLevel);
+                    
+                    // 更新确认提示
+                    updateDeleteConfirmation(nextLevel, subjectName);
+                } else {
+                    // 已确认三次，执行删除
+                    $.ajax({
+                        url: '/api/delete_subject',
+                        type: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify({
+                            key: subjectKey,
+                            confirmation_level: 3
+                        }),
+                        success: function(response) {
+                            $('#deleteSubjectModal').modal('hide');
+                            alert('学科删除成功，页面将刷新');
+                            location.reload();
+                        },
+                        error: function(error) {
+                            console.error('删除学科失败:', error);
+                            $('#deleteSubjectModal').modal('hide');
+                            alert('删除学科失败: ' + (error.responseJSON?.error || '未知错误'));
+                        }
+                    });
+                }
+            });
+            
+            // 更新删除确认提示
+            function updateDeleteConfirmation(level, subjectName) {
+                let confirmationWord, message;
+                
+                switch(level) {
+                    case 1:
+                        confirmationWord = "删除";
+                        message = `您即将删除学科 "${subjectName}"，此操作无法撤销！`;
+                        break;
+                    case 2:
+                        confirmationWord = "确认删除";
+                        message = `再次确认：您确定要删除学科 "${subjectName}" 吗？删除后该学科的所有设置将丢失！`;
+                        break;
+                    case 3:
+                        confirmationWord = "我确认删除此学科";
+                        message = `最终确认：删除学科 "${subjectName}" 将永久移除该学科及其所有配置，请慎重操作！`;
+                        break;
+                }
+                
+                $('#confirmationText').text(confirmationWord);
+                $('#deleteConfirmationMessage').text(message);
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek 知识库查询系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Microsoft YaHei', sans-serif;
+        }
+        .container {
+            max-width: 1000px;
+            margin-top: 30px;
+        }
+        .card {
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+        .nav-tabs .nav-item .nav-link {
+            color: #495057;
+        }
+        .nav-tabs .nav-item .nav-link.active {
+            font-weight: bold;
+        }
+        .query-box, .result-box {
+            border-radius: 8px;
+            border: 1px solid #dee2e6;
+            padding: 15px;
+            background-color: white;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            display: none;
+        }
+        #chatMessages {
+            height: 400px;
+            overflow-y: auto;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            margin-bottom: 15px;
+        }
+        .user-message, .system-message {
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            max-width: 80%;
+        }
+        .user-message {
+            background-color: #007bff;
+            color: white;
+            margin-left: auto;
+        }
+        .system-message {
+            background-color: #e9ecef;
+        }
+        .context-box {
+            background-color: #f1f3f5;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9rem;
+        }
+        .drop-zone {
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            padding: 25px;
+            text-align: center;
+            transition: all 0.3s;
+            background-color: #f8f9fa;
+            margin-bottom: 15px;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            background-color: #e9ecef;
+            border-color: #adb5bd;
+        }
+        .drop-zone-prompt {
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            color: #6c757d;
+        }
+        .file-input {
+            display: none;
+        }
+        .browse-btn {
+            display: inline-block;
+            padding: 6px 12px;
+            background-color: #007bff;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .file-info {
+            margin-top: 15px;
+            font-size: 0.9rem;
+        }
+        .document-preview {
+            max-height: 200px;
+            overflow: auto;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 10px;
+            display: none;
+        }
+        #documentsList {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        #documentsList li {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid #dee2e6;
+        }
+        .delete-btn {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 0.8rem;
+        }
+        .document-meta {
+            font-size: 0.8rem;
+            color: #6c757d;
+            margin-top: 2px;
+        }
+        .source {
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #f1f3f5;
+            border-radius: 5px;
+        }
+        .source h4 {
+            font-size: 1rem;
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">DeepSeek 知识库查询系统</h1>
+        
+        <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="query-tab" data-bs-toggle="tab" data-bs-target="#query" type="button" role="tab" aria-controls="query" aria-selected="true">知识库查询</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="upload-tab" data-bs-toggle="tab" data-bs-target="#upload" type="button" role="tab" aria-controls="upload" aria-selected="false">上传文档</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="documents-tab" data-bs-toggle="tab" data-bs-target="#documents" type="button" role="tab" aria-controls="documents" aria-selected="false">文档管理</button>
+            </li>
+        </ul>
+        
+        <div class="tab-content" id="myTabContent">
+            <!-- 查询标签页 -->
+            <div class="tab-pane fade show active" id="query" role="tabpanel" aria-labelledby="query-tab">
+                <div class="card">
+                    <div class="card-body">
+                        <div id="chatMessages"></div>
+                        <div id="loadingIndicator" class="loading d-none">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">正在思考中...</p>
+                        </div>
+                        <div class="input-group">
+                            <input type="text" class="form-control" id="queryInput" placeholder="输入您的问题...">
+                            <button class="btn btn-primary" type="button" id="sendButton">发送</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 上传文档标签页 -->
+            <div class="tab-pane fade" id="upload" role="tabpanel" aria-labelledby="upload-tab">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">上传文档到知识库</h5>
+                        <div class="alert alert-info">
+                            支持的文件类型: TXT, MD, PDF, DOC, DOCX
+                        </div>
+                        
+                        <div class="drop-zone" id="dropZone">
+                            <div class="drop-zone-prompt">拖放文件到这里上传</div>
+                            <span class="browse-btn">浏览文件</span>
+                            <input type="file" class="file-input" id="fileInput" accept=".txt,.md,.pdf,.doc,.docx">
+                            <div class="file-info" id="fileInfo"></div>
+                            <div class="document-preview" id="documentPreview"></div>
+                        </div>
+                        
+                        <button type="button" class="btn btn-success w-100" id="uploadButton" disabled>上传到知识库</button>
+                        
+                        <div class="alert alert-success mt-3 d-none" id="uploadSuccess"></div>
+                        <div class="alert alert-danger mt-3 d-none" id="uploadError"></div>
+                    </div>
+                </div>
+                
+                <div class="card mt-4">
+                    <div class="card-body">
+                        <h5 class="card-title">手动输入文档</h5>
+                        <div class="mb-3">
+                            <label for="documentText" class="form-label">文档内容</label>
+                            <textarea class="form-control" id="documentText" rows="10" placeholder="请输入文档内容..."></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label for="documentTitle" class="form-label">文档标题</label>
+                            <input type="text" class="form-control" id="documentTitle" placeholder="给文档起个标题">
+                        </div>
+                        <div class="mb-3">
+                            <label for="documentSource" class="form-label">文档来源</label>
+                            <input type="text" class="form-control" id="documentSource" placeholder="文档来源（可选）">
+                        </div>
+                        <button type="button" class="btn btn-success" id="textUploadButton">上传到知识库</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 文档管理标签页 -->
+            <div class="tab-pane fade" id="documents" role="tabpanel" aria-labelledby="documents-tab">
+                <div class="card">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center mb-3">
+                            <h5 class="card-title mb-0">文档列表</h5>
+                            <button class="btn btn-sm btn-primary" id="refreshDocuments">刷新</button>
+                        </div>
+                        <div id="documentsLoading" class="loading">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <p class="mt-2">加载文档中...</p>
+                        </div>
+                        <ul id="documentsList"></ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // 查询相关元素
+            const queryInput = document.getElementById('queryInput');
+            const sendButton = document.getElementById('sendButton');
+            const chatMessages = document.getElementById('chatMessages');
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            
+            // 文件上传相关元素
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+            const fileInfo = document.getElementById('fileInfo');
+            const documentPreview = document.getElementById('documentPreview');
+            const uploadButton = document.getElementById('uploadButton');
+            const uploadSuccess = document.getElementById('uploadSuccess');
+            const uploadError = document.getElementById('uploadError');
+            
+            // 手动输入文档相关元素
+            const documentText = document.getElementById('documentText');
+            const documentTitle = document.getElementById('documentTitle');
+            const documentSource = document.getElementById('documentSource');
+            const textUploadButton = document.getElementById('textUploadButton');
+            
+            // 文档列表相关元素
+            const documentsList = document.getElementById('documentsList');
+            const documentsLoading = document.getElementById('documentsLoading');
+            const refreshDocuments = document.getElementById('refreshDocuments');
+            
+            // 查询处理
+            async function sendQuery() {
+                const query = queryInput.value.trim();
+                if (!query) return;
+                
+                // 添加用户消息
+                const userMessageDiv = document.createElement('div');
+                userMessageDiv.className = 'user-message';
+                userMessageDiv.textContent = query;
+                chatMessages.appendChild(userMessageDiv);
+                
+                // 清空输入框并滚动到底部
+                queryInput.value = '';
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                
+                // 显示加载指示器
+                loadingIndicator.classList.remove('d-none');
+                
+                // 创建系统回复框架
+                const systemMessageDiv = document.createElement('div');
+                systemMessageDiv.className = 'system-message';
+                const answerElement = document.createElement('div');
+                answerElement.className = 'answer-content';
+                systemMessageDiv.appendChild(answerElement);
+                chatMessages.appendChild(systemMessageDiv);
+                
+                // 添加来源容器，但暂时保持为空
+                const sourcesElement = document.createElement('div');
+                sourcesElement.className = 'sources mt-3';
+                
+                try {
+                    // 使用流式API
+                    const response = await fetch('/query/stream', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ query: query }),
+                    });
+                    
+                    if (!response.ok) {
+                        // 处理错误
+                        const errorData = await response.json();
+                        answerElement.textContent = `错误: ${errorData.error || '查询处理失败'}`;
+                        loadingIndicator.classList.add('d-none');
+                        return;
+                    }
+                    
+                    // 隐藏加载指示器
+                    loadingIndicator.classList.add('d-none');
+                    
+                    // 处理流式响应
+                    await processStreamResponse(response, answerElement);
+                } catch (error) {
+                    // 处理网络错误
+                    console.error('查询处理过程出错:', error);
+                    answerElement.textContent = `查询处理失败: ${error.message || '未知错误'}`;
+                    loadingIndicator.classList.add('d-none');
+                }
+                
+                // 滚动到最新消息
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+            
+            // 新的流式响应处理函数
+            async function processStreamResponse(response, answerElement) {
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let incompleteData = '';
+                
+                try {
+                    while (true) {
+                        const { value, done } = await reader.read();
+                        if (done) break;
+                        
+                        const chunk = decoder.decode(value, { stream: true });
+                        incompleteData += chunk;
+                        
+                        // 处理完整的行
+                        let lines = incompleteData.split('\n');
+                        // 保留最后一个可能不完整的行
+                        incompleteData = lines.pop() || '';
+                        
+                        for (const line of lines) {
+                            if (!line.trim() || !line.startsWith('data: ')) continue;
+                            
+                            const data = line.substring(6); // 移除 "data: " 前缀
+                            if (data === '[DONE]') continue;
+                            
+                            try {
+                                const jsonData = JSON.parse(data);
+                                
+                                // 处理不同类型的响应
+                                if (jsonData.type === 'sources') {
+                                    // 处理来源信息
+                                    handleSources(jsonData.sources);
+                                } else if (jsonData.type === 'error') {
+                                    // 处理错误信息
+                                    handleError(jsonData.content);
+                                } else if (jsonData.type === 'start') {
+                                    // 处理开始标记
+                                    console.log("开始生成回答");
+                                } else if (jsonData.choices && jsonData.choices.length > 0) {
+                                    // 处理DeepSeek API格式的响应
+                                    const delta = jsonData.choices[0].delta;
+                                    if (delta && delta.content) {
+                                        appendToAnswerElement(answerElement, delta.content);
+                                    }
+                                } else if (jsonData.content !== undefined) {
+                                    // 处理自定义格式的响应
+                                    appendToAnswerElement(answerElement, jsonData.content);
+                                }
+                            } catch (e) {
+                                console.error('JSON解析错误:', e, line);
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('读取流时出错:', error);
+                    handleError(`读取流时出错: ${error.message}`);
+                }
+            }
+            
+            // 逐字将文本添加到回答元素
+            function appendToAnswerElement(answerElement, content) {
+                if (!content) return;
+                
+                // 如果是第一次添加内容，清空占位符
+                if (answerElement.classList.contains('placeholder')) {
+                    answerElement.textContent = '';
+                    answerElement.classList.remove('placeholder');
+                }
+                
+                // 添加内容
+                answerElement.textContent += content;
+                
+                // 滚动到底部确保最新内容可见
+                const chatContainer = document.getElementById('chatMessages');
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+            
+            // 文件拖放处理
+            ['dragover', 'dragenter'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    dropZone.classList.add('dragover');
+                });
+            });
+            
+            ['dragleave', 'dragend', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    dropZone.classList.remove('dragover');
+                });
+            });
+            
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                if (e.dataTransfer.files.length) {
+                    fileInput.files = e.dataTransfer.files;
+                    updateFileInfo();
+                }
+            });
+            
+            dropZone.querySelector('.browse-btn').addEventListener('click', () => {
+                fileInput.click();
+            });
+            
+            fileInput.addEventListener('change', updateFileInfo);
+            
+            function updateFileInfo() {
+                if (fileInput.files.length > 0) {
+                    const file = fileInput.files[0];
+                    const fileSizeKB = Math.round(file.size / 1024);
+                    const fileExtension = file.name.split('.').pop().toUpperCase();
+                    
+                    fileInfo.innerHTML = `
+                        <div>
+                            <strong>文件名:</strong> ${file.name}<br>
+                            <strong>大小:</strong> ${fileSizeKB} KB<br>
+                            <strong>类型:</strong> ${fileExtension}
+                        </div>
+                    `;
+                    
+                    // 如果是文本文件，预览内容
+                    if (['TXT', 'MD'].includes(fileExtension)) {
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            documentPreview.textContent = e.target.result.substring(0, 500) + 
+                                (e.target.result.length > 500 ? '...' : '');
+                            documentPreview.style.display = 'block';
+                        };
+                        reader.readAsText(file);
+                    } else {
+                        documentPreview.style.display = 'none';
+                    }
+                    
+                    uploadButton.disabled = false;
+                } else {
+                    fileInfo.textContent = '';
+                    documentPreview.style.display = 'none';
+                    uploadButton.disabled = true;
+                }
+            }
+            
+            // 上传文件
+            uploadButton.addEventListener('click', async () => {
+                if (fileInput.files.length === 0) return;
+                
+                const file = fileInput.files[0];
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                uploadSuccess.classList.add('d-none');
+                uploadError.classList.add('d-none');
+                uploadButton.disabled = true;
+                uploadButton.textContent = '上传中...';
+                
+                try {
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.success) {
+                        uploadSuccess.textContent = result.message;
+                        uploadSuccess.classList.remove('d-none');
+                        // 重置表单
+                        fileInput.value = '';
+                        fileInfo.textContent = '';
+                        documentPreview.style.display = 'none';
+                    } else {
+                        uploadError.textContent = result.error || '上传失败';
+                        uploadError.classList.remove('d-none');
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    uploadError.textContent = '上传过程中发生错误: ' + error.message;
+                    uploadError.classList.remove('d-none');
+                } finally {
+                    uploadButton.disabled = false;
+                    uploadButton.textContent = '上传到知识库';
+                }
+            });
+            
+            // 上传文本
+            textUploadButton.addEventListener('click', async () => {
+                const text = documentText.value.trim();
+                const title = documentTitle.value.trim();
+                const source = documentSource.value.trim();
+                
+                if (!text || !title) {
+                    alert('文档内容和标题不能为空！');
+                    return;
+                }
+                
+                textUploadButton.disabled = true;
+                textUploadButton.textContent = '上传中...';
+                
+                try {
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            text: text,
+                            metadata: {
+                                title: title,
+                                source: source,
+                                type: 'text'
+                            }
+                        }),
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.success) {
+                        alert(result.message);
+                        // 重置表单
+                        documentText.value = '';
+                        documentTitle.value = '';
+                        documentSource.value = '';
+                    } else {
+                        alert('上传失败: ' + (result.error || '未知错误'));
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert('上传过程中发生错误: ' + error.message);
+                } finally {
+                    textUploadButton.disabled = false;
+                    textUploadButton.textContent = '上传到知识库';
+                }
+            });
+            
+            // 加载文档列表
+            async function loadDocuments() {
+                documentsList.innerHTML = '';
+                documentsLoading.style.display = 'block';
+                
+                try {
+                    const response = await fetch('/documents');
+                    const data = await response.json();
+                    
+                    documentsLoading.style.display = 'none';
+                    
+                    if (response.ok) {
+                        if (data.documents.length === 0) {
+                            documentsList.innerHTML = '<li class="text-center py-3">暂无文档</li>';
+                        } else {
+                            data.documents.forEach(doc => {
+                                const li = document.createElement('li');
+                                li.classList.add('py-2');
+                                
+                                // 创建文档信息
+                                const docInfo = document.createElement('div');
+                                docInfo.innerHTML = `
+                                    <div><strong>${doc.name}</strong></div>
+                                    <div class="document-meta">
+                                        类型: ${doc.type || '未知'} | 
+                                        ${doc.source ? `来源: ${doc.source} | ` : ''}
+                                        ID: ${doc.id.substring(0, 8)}...
+                                    </div>
+                                    <div class="document-meta">${doc.content_preview}</div>
+                                `;
+                                
+                                // 创建删除按钮
+                                const deleteBtn = document.createElement('button');
+                                deleteBtn.className = 'delete-btn';
+                                deleteBtn.textContent = '删除';
+                                deleteBtn.dataset.id = doc.id;
+                                deleteBtn.addEventListener('click', deleteDocument);
+                                
+                                li.appendChild(docInfo);
+                                li.appendChild(deleteBtn);
+                                documentsList.appendChild(li);
+                            });
+                        }
+                    } else {
+                        documentsList.innerHTML = `<li class="text-center py-3 text-danger">加载失败: ${data.error || '未知错误'}</li>`;
+                    }
+                } catch (error) {
+                    documentsLoading.style.display = 'none';
+                    documentsList.innerHTML = `<li class="text-center py-3 text-danger">加载失败: ${error.message}</li>`;
+                }
+            }
+            
+            // 删除文档
+            async function deleteDocument(e) {
+                const docId = e.target.dataset.id;
+                if (confirm('确定要删除这个文档吗?')) {
+                    try {
+                        const response = await fetch(`/documents/${docId}`, {
+                            method: 'DELETE'
+                        });
+                        
+                        const result = await response.json();
+                        
+                        if (response.ok && result.success) {
+                            alert(result.message);
+                            loadDocuments();
+                        } else {
+                            alert('删除失败: ' + (result.error || '未知错误'));
+                        }
+                    } catch (error) {
+                        console.error('Error:', error);
+                        alert('删除过程中发生错误: ' + error.message);
+                    }
+                }
+            }
+            
+            // 事件监听器
+            sendButton.addEventListener('click', sendQuery);
+            queryInput.addEventListener('keydown', function(event) {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    sendQuery();
+                }
+            });
+            
+            refreshDocuments.addEventListener('click', loadDocuments);
+            
+            // 页面加载时自动加载文档列表
+            loadDocuments();
+        });
+
+        // 处理来源信息
+        function handleSources(sources) {
+            if (!sources || !Array.isArray(sources) || sources.length === 0) {
+                console.log("没有来源信息或格式不正确");
+                return;
+            }
+            
+            console.log("处理来源信息:", sources);
+            
+            // 创建来源容器（如果不存在）
+            let sourcesContainer = document.querySelector('.sources');
+            if (!sourcesContainer) {
+                // 获取最后一个系统消息
+                const systemMessage = document.querySelector('.system-message:last-child');
+                if (systemMessage) {
+                    sourcesContainer = document.createElement('div');
+                    sourcesContainer.className = 'sources mt-3';
+                    systemMessage.appendChild(sourcesContainer);
+                } else {
+                    console.error("找不到系统消息元素");
+                    return;
+                }
+            }
+            
+            // 清空现有来源
+            sourcesContainer.innerHTML = '';
+            
+            // 添加标题
+            const sourcesTitle = document.createElement('h6');
+            sourcesTitle.textContent = '参考来源';
+            sourcesTitle.className = 'sources-title';
+            sourcesContainer.appendChild(sourcesTitle);
+            
+            // 添加来源列表
+            const sourcesList = document.createElement('ul');
+            sourcesList.className = 'sources-list';
+            
+            sources.forEach((source, index) => {
+                const sourceItem = document.createElement('li');
+                sourceItem.className = 'source-item';
+                
+                // 创建来源标题
+                const sourceTitle = document.createElement('div');
+                sourceTitle.className = 'source-title';
+                sourceTitle.innerHTML = `<strong>${index + 1}. ${escapeHtml(source.title || '未知文档')}</strong>`;
+                sourceItem.appendChild(sourceTitle);
+                
+                // 创建来源内容预览
+                const sourcePreview = document.createElement('div');
+                sourcePreview.className = 'source-content';
+                sourcePreview.textContent = source.content || '无内容预览';
+                sourceItem.appendChild(sourcePreview);
+                
+                // 添加到列表
+                sourcesList.appendChild(sourceItem);
+            });
+            
+            sourcesContainer.appendChild(sourcesList);
+        }
+
+        // 处理错误信息
+        function handleError(errorMessage) {
+            console.error("处理错误:", errorMessage);
+            
+            // 修正选择器，确保正确获取答案元素
+            const answerElement = document.querySelector('.answer-content');
+            if (answerElement) {
+                answerElement.textContent = `错误: ${errorMessage}`;
+                answerElement.classList.add('error');
+            } else {
+                console.error("找不到答案元素");
+            }
+            
+            // 隐藏加载指示器
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            if (loadingIndicator) {
+                loadingIndicator.classList.add('d-none');
+            }
+        }
+
+        // HTML转义函数
+        function escapeHtml(unsafe) {
+            return unsafe
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+    </script>
+</body>
+</html> 

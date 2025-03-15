@@ -1,0 +1,95 @@
+{
+    "vision_api": {
+        "api_key": "YOUR_VISION_API_KEY",
+        "api_url": "",
+        "model_name": "qwen-vl-plus"
+    },
+    "gemini_api": {
+        "api_key": "YOUR_GEMINI_API_KEY",
+        "api_url": "",
+        "model_name": "gemini-pro"
+    },
+    "text_api": {
+        "api_key": "YOUR_TEXT_API_KEY",
+        "api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "model_name": "deepseek-r1-250120"
+    },
+    "aliyun_ocr": {
+        "access_key_id": "YOUR_ALIYUN_ACCESS_KEY_ID",
+        "access_key_secret": "YOUR_ALIYUN_ACCESS_KEY_SECRET",
+        "region_id": "cn-shanghai",
+        "region": ""
+    },
+    "multimodal_models": {
+        "gpt4v": {
+            "api_key": "YOUR_GPT4V_API_KEY",
+            "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "model_name": "gpt-4-vision-preview"
+        },
+        "claude3": {
+            "api_key": "YOUR_CLAUDE3_API_KEY",
+            "api_url": "",
+            "model_name": "claude-3-opus-20240229"
+        },
+        "qwen-vl": {
+            "api_key": "YOUR_QWEN-VL_API_KEY",
+            "api_url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            "model_name": "qwen2.5-vl-72b-instruct"
+        },
+        "gemini": {
+            "api_key": "YOUR_GEMINI_API_KEY",
+            "api_url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+            "model_name": "gemini-2.0-flash"
+        },
+        "qwen_vl": {
+            "api_key": "YOUR_QWEN_VL_API_KEY",
+            "api_url": "",
+            "model_name": "qwen-vl-plus"
+        }
+    },
+    "api_alternatives": {
+        "deepseek": {
+            "api_1": {
+                "api_key": "YOUR_DEEPSEEK_ALTERNATIVE_API_KEY",
+                "api_url": "https://api.deepseek.com/v1/chat/completions",
+                "name": "官方API",
+                "model": "deepseek-reasoner",
+                "priority": 1,
+                "model_name": "deepseek-reasoner"
+            },
+            "api_m7slf01r_zg9mbx": {
+                "api_key": "YOUR_DEEPSEEK_ALTERNATIVE_API_KEY",
+                "api_url": "https://api.siliconflow.cn/v1/chat/completions",
+                "name": "硅基流动",
+                "model": "Pro/deepseek-ai/DeepSeek-R1",
+                "priority": 2,
+                "model_name": "Pro/deepseek-ai/DeepSeek-R1"
+            },
+            "main": {
+                "api_key": "YOUR_DEEPSEEK_ALTERNATIVE_API_KEY",
+                "api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+                "name": "火山",
+                "model": "deepseek-r1-250120",
+                "priority": 3,
+                "model_name": "deepseek-r1-250120"
+            }
+        }
+    },
+    "openai": {
+        "api_url": "",
+        "api_key": "YOUR_OPENAI_API_KEY",
+        "model": ""
+    },
+    "deepseek": {
+        "api_url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        "api_key": "YOUR_DEEPSEEK_API_KEY",
+        "model": "deepseek-r1-250120",
+        "name": "火山",
+        "priority": 1,
+        "original_id": "main"
+    },
+    "default_models": {
+        "extraction": "multimodal_qwen-vl",
+        "analysis": "deepseek"
+    }
+}

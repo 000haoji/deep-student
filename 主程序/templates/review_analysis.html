@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>错题回顾分析</title>
+    <!-- Bootstrap CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.0/dist/css/bootstrap.min.css">
+    <!-- Font Awesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <!-- 自定义样式 -->
+    <link rel="stylesheet" href="/static/css/styles.css">
+    <style>
+        .analysis-section {
+            margin-bottom: 2rem;
+        }
+        .analysis-section h3 {
+            border-bottom: 1px solid #eee;
+            padding-bottom: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        .card-header {
+            cursor: pointer;
+        }
+        .problem-card {
+            margin-bottom: 1rem;
+        }
+        @media print {
+            .no-print {
+                display: none !important;
+            }
+            .container {
+                width: 100%;
+                max-width: 100%;
+            }
+            body {
+                font-size: 12pt;
+            }
+            .card {
+                break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1>错题回顾分析</h1>
+            <div>
+                <button id="printBtn" class="btn btn-outline-secondary no-print">
+                    <i class="fas fa-print"></i> 打印分析结果
+                </button>
+            </div>
+        </div>
+        
+        <div id="loadingState" class="text-center py-5">
+            <div class="spinner-border text-primary" role="status"></div>
+            <p class="mt-3">正在加载分析结果，请稍候...</p>
+        </div>
+        
+        <div id="errorState" class="alert alert-danger" style="display: none;">
+            <h4 class="alert-heading">加载失败</h4>
+            <p id="errorMessage">无法加载分析结果，请返回重试。</p>
+        </div>
+        
+        <div id="analysisContent" style="display: none;">
+            <div class="card mb-4">
+                <div class="card-body">
+                    <h2 id="analysisTitle" class="card-title">错题回顾分析</h2>
+                    <p id="analysisDescription" class="card-text text-muted"></p>
+                    <div class="d-flex justify-content-between">
+                        <span id="problemCount" class="badge badge-primary"></span>
+                        <span id="createdAt" class="text-muted"></span>
+                    </div>
+                </div>
+            </div>
+            
+            <div id="aiAnalysisResult" class="mb-4">
+                <!-- AI分析结果将在这里显示 -->
+            </div>
+            
+            <div id="problemsList">
+                <h3>包含的错题</h3>
+                <div id="problemsContainer" class="row">
+                    <!-- 错题卡片将在这里显示 -->
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- jQuery and Bootstrap JS -->
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.0/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        $(document).ready(function() {
+            // 获取分析ID
+            const urlParts = window.location.pathname.split('/');
+            const analysisId = urlParts[urlParts.length - 1];
+            
+            console.log("加载分析ID:", analysisId);
+            
+            // 打印按钮事件
+            $('#printBtn').click(function() {
+                window.print();
+            });
+            
+            // 根据ID类型加载分析结果
+            if (analysisId === 'local') {
+                // 从localStorage加载
+                loadFromLocalStorage();
+            } else {
+                // 从API加载
+                loadFromAPI(analysisId);
+            }
+            
+            // 从localStorage加载分析结果
+            function loadFromLocalStorage() {
+                console.log("从localStorage加载分析结果");
+                try {
+                    const analysisData = JSON.parse(localStorage.getItem('currentAnalysis') || '{}');
+                    
+                    if (!analysisData || !analysisData.analysis_result) {
+                        showError("本地存储中没有找到分析结果");
+                        return;
+                    }
+                    
+                    console.log("从localStorage加载的分析数据:", analysisData);
+                    
+                    // 检查是否已保存到数据库
+                    if (analysisData.database_id) {
+                        console.log("分析已保存到数据库，ID:", analysisData.database_id);
+                        // 更新URL，但不刷新页面
+                        window.history.replaceState(null, '', `/review-analysis/${analysisData.database_id}`);
+                    } else {
+                        console.log("分析尚未保存到数据库，尝试保存");
+                        // 尝试保存到数据库
+                        saveAnalysisToDatabase(analysisData);
+                    }
+                    
+                    // 显示分析结果
+                    displayAnalysisResult(analysisData);
+                    
+                } catch (e) {
+                    console.error("解析localStorage中的分析数据时出错:", e);
+                    showError("解析本地存储的分析数据时出错: " + e.message);
+                }
+            }
+            
+            // 从API加载分析结果
+            function loadFromAPI(id) {
+                console.log("从API加载分析结果，ID:", id);
+                
+                $.ajax({
+                    url: `/api/review-analysis/${id}`,
+                    type: 'GET',
+                    success: function(response) {
+                        if (response.success) {
+                            console.log("从API加载分析成功:", response);
+                            
+                            const analysisData = response.analysis;
+                            
+                            // 更新localStorage
+                            analysisData.database_id = id;
+                            localStorage.setItem('currentAnalysis', JSON.stringify(analysisData));
+                            
+                            // 显示分析结果
+                            displayAnalysisResult(analysisData);
+                        } else {
+                            console.error("加载分析失败:", response.error);
+                            showError("加载分析失败: " + response.error);
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("API请求失败:", status, error);
+                        
+                        // 尝试从localStorage加载
+                        const localData = JSON.parse(localStorage.getItem('currentAnalysis') || '{}');
+                        if (localData && localData.analysis_result) {
+                            console.log("API请求失败，尝试从localStorage加载");
+                            displayAnalysisResult(localData);
+                        } else {
+                            showError("无法从API加载分析结果: " + error);
+                        }
+                    }
+                });
+            }
+            
+            // 保存分析到数据库
+            function saveAnalysisToDatabase(analysisData) {
+                // 确保有必要的字段
+                if (!analysisData.analysis_id) {
+                    analysisData.analysis_id = generateUUID();
+                }
+                
+                if (!analysisData.title) {
+                    analysisData.title = `错题分析 (${new Date().toLocaleString('zh-CN')})`;
+                }
+                
+                if (!analysisData.created_at) {
+                    analysisData.created_at = new Date().toISOString();
+                }
+                
+                const postData = {
+                    analysis_id: analysisData.analysis_id,
+                    title: analysisData.title,
+                    description: analysisData.description || `包含${analysisData.problems.length}道错题的分析`,
+                    problems: analysisData.problems,
+                    analysis_result: analysisData.analysis_result,
+                    created_at: analysisData.created_at
+                };
+                
+                console.log("保存分析到数据库:", postData);
+                
+                $.ajax({
+                    url: '/api/review-analysis',
+                    type: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify(postData),
+                    success: function(response) {
+                        if (response.success) {
+                            console.log("分析保存成功:", response);
+                            
+                            // 更新URL和localStorage
+                            window.history.replaceState(null, '', `/review-analysis/${response.analysis_id}`);
+                            
+                            analysisData.database_id = response.analysis_id;
+                            localStorage.setItem('currentAnalysis', JSON.stringify(analysisData));
+                        } else {
+                            console.error("保存分析失败:", response.error);
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("保存分析请求失败:", status, error);
+                    }
+                });
+            }
+            
+            // 生成UUID
+            function generateUUID() {
+                return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+                    return v.toString(16);
+                });
+            }
+            
+            // 显示分析结果
+            function displayAnalysisResult(data) {
+                // 隐藏加载状态
+                $('#loadingState').hide();
+                
+                // 设置基本信息
+                $('#analysisTitle').text(data.title || '错题回顾分析');
+                $('#analysisDescription').text(data.description || '');
+                $('#problemCount').text(`包含 ${data.problems.length} 道错题`);
+                
+                // 格式化创建时间
+                if (data.created_at) {
+                    const date = new Date(data.created_at);
+                    $('#createdAt').text(`创建于 ${date.toLocaleString('zh-CN')}`);
+                }
+                
+                // 显示AI分析结果
+                displayAIAnalysisResult(data.analysis_result);
+                
+                // 显示错题列表
+                displayProblems(data.problems);
+                
+                // 显示内容区域
+                $('#analysisContent').show();
+            }
+            
+            // 显示AI分析结果
+            function displayAIAnalysisResult(analysisResult) {
+                const container = $('#aiAnalysisResult');
+                container.empty();
+                
+                // 创建手风琴组件
+                const accordion = $('<div class="accordion" id="analysisAccordion"></div>');
+                
+                // 添加综合分析部分
+                if (analysisResult.comprehensive_analysis) {
+                    addAccordionItem(
+                        accordion, 
+                        'comprehensive', 
+                        '综合分析', 
+                        analysisResult.comprehensive_analysis,
+                        true // 默认展开
+                    );
+                }
+                
+                // 添加错误模式识别部分
+                if (analysisResult.error_pattern_recognition) {
+                    addAccordionItem(
+                        accordion, 
+                        'errorPatterns', 
+                        '错误模式识别', 
+                        analysisResult.error_pattern_recognition
+                    );
+                }
+                
+                // 添加针对性学习建议部分
+                if (analysisResult.targeted_learning_suggestions) {
+                    addAccordionItem(
+                        accordion, 
+                        'suggestions', 
+                        '针对性学习建议', 
+                        analysisResult.targeted_learning_suggestions
+                    );
+                }
+                
+                // 添加其他可能的分析部分
+                for (const key in analysisResult) {
+                    if (!['comprehensive_analysis', 'error_pattern_recognition', 'targeted_learning_suggestions'].includes(key)) {
+                        // 格式化标题
+                        const title = key
+                            .replace(/_/g, ' ')
+                            .split(' ')
+                            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                            .join(' ');
+                            
+                        addAccordionItem(accordion, key, title, analysisResult[key]);
+                    }
+                }
+                
+                container.append(accordion);
+            }
+            
+            // 添加手风琴项
+            function addAccordionItem(accordion, id, title, content, isExpanded = false) {
+                const itemHtml = `
+                    <div class="card">
+                        <div class="card-header" id="heading${id}">
+                            <h2 class="mb-0">
+                                <button class="btn btn-link btn-block text-left ${isExpanded ? '' : 'collapsed'}" 
+                                        type="button" 
+                                        data-toggle="collapse" 
+                                        data-target="#collapse${id}" 
+                                        aria-expanded="${isExpanded ? 'true' : 'false'}" 
+                                        aria-controls="collapse${id}">
+                                    ${title}
+                                </button>
+                            </h2>
+                        </div>
+                        <div id="collapse${id}" 
+                             class="collapse ${isExpanded ? 'show' : ''}" 
+                             aria-labelledby="heading${id}" 
+                             data-parent="#analysisAccordion">
+                            <div class="card-body">
+                                ${formatContent(content)}
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                accordion.append(itemHtml);
+            }
+            
+            // 格式化内容，处理换行等
+            function formatContent(content) {
+                if (typeof content !== 'string') {
+                    return JSON.stringify(content, null, 2);
+                }
+                
+                // 替换换行符为<br>
+                return content.replace(/\n/g, '<br>');
+            }
+            
+            // 显示错题列表
+            function displayProblems(problems) {
+                const container = $('#problemsContainer');
+                container.empty();
+                
+                if (!problems || problems.length === 0) {
+                    container.html('<div class="col-12"><div class="alert alert-info">没有包含任何错题</div></div>');
+                    return;
+                }
+                
+                problems.forEach((problem, index) => {
+                    const card = $(`
+                        <div class="col-md-6 col-lg-4 mb-3">
+                            <div class="card problem-card h-100">
+                                <div class="card-header">
+                                    <h5 class="card-title mb-0">错题 #${index + 1}</h5>
+                                </div>
+                                <div class="card-body">
+                                    <h6>${problem.title || problem.question_title || '未命名错题'}</h6>
+                                    <p class="card-text">${problem.content || problem.question_content || '无内容'}</p>
+                                    ${problem.tags && problem.tags.length > 0 ? 
+                                        `<div class="mt-2">
+                                            ${problem.tags.map(tag => `<span class="badge badge-info mr-1">${tag}</span>`).join('')}
+                                        </div>` : ''}
+                                </div>
+                                ${problem.id ? 
+                                    `<div class="card-footer">
+                                        <a href="/problem/${problem.id}" class="btn btn-sm btn-outline-primary" target="_blank">
+                                            查看详情
+                                        </a>
+                                    </div>` : ''}
+                            </div>
+                        </div>
+                    `);
+                    
+                    container.append(card);
+                });
+            }
+            
+            // 显示错误信息
+            function showError(message) {
+                $('#loadingState').hide();
+                $('#errorMessage').text(message);
+                $('#errorState').show();
+            }
+        });
+    </script>
+</body>
+</html>

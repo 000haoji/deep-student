@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>编辑错题 - 考研{{ subject_info.name|default('数学') }}错题管理</title>
+    <!-- 使用CDN链接替代本地资源 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <style>
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+        }
+        .tag-badge {
+            display: inline-block;
+            background-color: #e9ecef;
+            color: #495057;
+            padding: 0.25em 0.65em;
+            border-radius: 0.25rem;
+            margin-right: 0.25em;
+            margin-bottom: 0.25em;
+            font-size: 0.85em;
+        }
+        .tag-input-container {
+            display: flex;
+            flex-wrap: wrap;
+            padding: 0.375rem 0.75rem;
+            border: 1px solid #ced4da;
+            border-radius: 0.25rem;
+            min-height: 38px;
+        }
+        .tag-input-container:focus-within {
+            border-color: #86b7fe;
+            box-shadow: 0 0 0 0.25rem rgba(13, 110, 253, 0.25);
+        }
+        .tag-item {
+            display: inline-flex;
+            align-items: center;
+            background-color: #e9ecef;
+            color: #495057;
+            padding: 0.25em 0.65em;
+            border-radius: 0.25rem;
+            margin-right: 0.25em;
+            margin-bottom: 0.25em;
+        }
+        .tag-item .remove-tag {
+            margin-left: 5px;
+            cursor: pointer;
+        }
+        .tag-input {
+            flex: 1;
+            border: none;
+            outline: none;
+            padding: 0.25em;
+            min-width: 60px;
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <div class="container mt-4">
+        <div class="row mb-3">
+            <div class="col">
+                <h1>编辑错题</h1>
+            </div>
+            <div class="col-auto">
+                <a href="/problem/{{ problem_id }}" class="btn btn-outline-secondary">
+                    <i class="fas fa-arrow-left me-1"></i> 返回详情
+                </a>
+            </div>
+        </div>
+        
+        <div id="loading" class="text-center py-5">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">正在加载...</span>
+            </div>
+            <p class="mt-2">正在加载错题数据...</p>
+        </div>
+        
+        <div id="error-alert" class="alert alert-danger" style="display: none;">
+            <h4 class="alert-heading">加载失败</h4>
+            <p id="error-message"></p>
+            <button class="btn btn-outline-danger" onclick="window.location.reload()">重试</button>
+        </div>
+        
+        <form id="edit-problem-form" style="display: none;">
+            <div class="card mb-4">
+                <div class="card-body">
+                    <div class="mb-3">
+                        <label for="problem-title" class="form-label">错题标题</label>
+                        <input type="text" class="form-control" id="problem-title" name="title" required>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="problem-content" class="form-label">题目内容</label>
+                        <textarea class="form-control" id="problem-content" name="content" rows="5" required></textarea>
+                    </div>
+                    
+                    <!-- 添加学科选择字段 -->
+                    <div class="mb-3">
+                        <label for="problem-subject" class="form-label">学科</label>
+                        <select class="form-select" id="problem-subject" name="subject">
+                            <option value="math" {% if current_subject == 'math' %}selected{% endif %}>数学</option>
+                            <option value="english" {% if current_subject == 'english' %}selected{% endif %}>英语</option>
+                            <option value="politics" {% if current_subject == 'politics' %}selected{% endif %}>政治</option>
+                            <option value="professional" {% if current_subject == 'professional' %}selected{% endif %}>专业课</option>
+                        </select>
+                    </div>
+                    
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="problem-category" class="form-label">分类</label>
+                            <select class="form-select" id="problem-category" name="category">
+                                <option value="">选择分类</option>
+                                <option value="高等数学">高等数学</option>
+                                <option value="线性代数">线性代数</option>
+                                <option value="概率论">概率论</option>
+                                <option value="其他">其他</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="problem-subcategory" class="form-label">子分类</label>
+                            <select class="form-select" id="problem-subcategory" name="subcategory">
+                                <option value="">选择子分类</option>
+                                <!-- 子分类选项将由JavaScript动态填充 -->
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="row mb-3">
+                        <div class="col-md-6">
+                            <label for="problem-difficulty" class="form-label">难度</label>
+                            <select class="form-select" id="problem-difficulty" name="difficulty">
+                                <option value="1">1 - 非常简单</option>
+                                <option value="2">2 - 简单</option>
+                                <option value="3">3 - 中等</option>
+                                <option value="4">4 - 困难</option>
+                                <option value="5">5 - 非常困难</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="problem-typicality" class="form-label">典型度</label>
+                            <select class="form-select" id="problem-typicality" name="typicality">
+                                <option value="1">1 - 非常少见</option>
+                                <option value="2">2 - 少见</option>
+                                <option value="3">3 - 一般</option>
+                                <option value="4">4 - 典型</option>
+                                <option value="5">5 - 非常典型</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="form-label">知识点标签</label>
+                        <div class="tag-input-container" id="tags-container">
+                            <!-- 标签将在这里显示 -->
+                            <input type="text" class="tag-input" id="tag-input" placeholder="输入标签并按回车">
+                        </div>
+                        <div class="form-text">输入标签并按回车添加，点击标签上的 × 删除</div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="problem-solution" class="form-label">解题思路</label>
+                        <textarea class="form-control" id="problem-solution" name="solution" rows="4"></textarea>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="problem-analysis" class="form-label">错因分析</label>
+                        <textarea class="form-control" id="problem-analysis" name="analysis" rows="4"></textarea>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="problem-comments" class="form-label">补充说明</label>
+                        <textarea class="form-control" id="problem-comments" name="comments" rows="3"></textarea>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label for="problem-image" class="form-label">题目图片</label>
+                        <div class="input-group">
+                            <input type="file" class="form-control" id="problem-image" name="image" accept="image/*">
+                            <button class="btn btn-outline-secondary" type="button" id="clear-image">清除</button>
+                        </div>
+                        <div class="form-text">可选，上传题目相关的图片</div>
+                        <div id="image-preview" class="mt-2" style="display: none;">
+                            <img id="preview-img" src="" alt="题目图片预览" class="img-fluid" style="max-height: 200px;">
+                        </div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button type="submit" class="btn btn-primary">保存修改</button>
+                    <a href="/problem/{{ problem_id }}" class="btn btn-outline-secondary ms-2">取消</a>
+                </div>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        $(document).ready(function() {
+            // 获取错题ID
+            const problemId = '{{ problem_id }}';
+            
+            // 标签数组
+            let tags = [];
+            
+            // 子分类映射
+            const subcategories = {
+                '高等数学': ['微分', '积分', '级数', '微分方程', '多元函数', '向量代数', '其他'],
+                '线性代数': ['矩阵', '行列式', '向量空间', '线性变换', '特征值', '二次型', '其他'],
+                '概率论': ['随机变量', '概率分布', '数字特征', '大数定律', '中心极限定理', '随机过程', '其他'],
+                '其他': ['数学分析', '复变函数', '实变函数', '泛函分析', '其他']
+            };
+            
+            // 加载错题数据
+            loadProblemData();
+            
+            // 绑定分类变化事件
+            $('#problem-category').change(function() {
+                updateSubcategories();
+            });
+            
+            // 绑定标签输入事件
+            $('#tag-input').keydown(function(e) {
+                if (e.key === 'Enter' || e.key === ',') {
+                    e.preventDefault();
+                    addTag($(this).val().trim());
+                    $(this).val('');
+                }
+            });
+            
+            // 绑定图片上传事件
+            $('#problem-image').change(function() {
+                previewImage(this);
+            });
+            
+            // 绑定清除图片按钮
+            $('#clear-image').click(function() {
+                $('#problem-image').val('');
+                $('#image-preview').hide();
+            });
+            
+            // 绑定表单提交事件
+            $('#edit-problem-form').submit(function(e) {
+                e.preventDefault();
+                saveProblem();
+            });
+            
+            // 函数：加载错题数据
+            function loadProblemData() {
+                $('#loading').show();
+                $('#edit-problem-form').hide();
+                $('#error-alert').hide();
+                
+                $.ajax({
+                    url: `/api/problem/${problemId}`,
+                    type: 'GET',
+                    success: function(data) {
+                        console.log("成功获取错题数据:", data);
+                        
+                        // 填充表单
+                        $('#problem-title').val(data.problem_title || data.title || '');
+                        $('#problem-content').val(data.problem_content || data.content || '');
+                        $('#problem-subject').val(data.subject || 'math'); // 设置学科
+                        $('#problem-category').val(data.problem_category || '');
+                        updateSubcategories();
+                        $('#problem-subcategory').val(data.problem_subcategory || '');
+                        $('#problem-difficulty').val(data.difficulty || 3);
+                        $('#problem-typicality').val(data.typicality || 3);
+                        $('#problem-solution').val(data.solution || '');
+                        $('#problem-analysis').val(data.analysis || '');
+                        $('#problem-comments').val(data.user_comments || '');
+                        
+                        // 处理标签
+                        tags = data.tags || data.knowledge_tags || [];
+                        renderTags();
+                        
+                        // 处理图片路径 - 复用错题详情页的逻辑
+                        if (data.image_path) {
+                            try {
+                                let imageUrl = 'https://via.placeholder.com/400x300?text=无图片';
+                                let filename = data.image_path;
+                                
+                                // 处理完整URL的情况
+                                if (filename.includes('://')) {
+                                    // 如果是完整URL，直接使用
+                                    imageUrl = filename;
+                                } else {
+                                    // 如果包含多个路径分隔符，确保只取最后一部分
+                                    if (filename.includes('/') || filename.includes('\\')) {
+                                        filename = filename.replace(/\\/g, '/'); // 统一使用正斜杠
+                                        filename = filename.split('/').pop(); // 获取最后一部分
+                                    }
+                                    
+                                    // 构建图片URL
+                                    imageUrl = `/uploads/${filename}`;
+                                }
+                                
+                                console.log(`处理图片路径: ${data.image_path} -> ${imageUrl}`);
+                                
+                                // 显示图片预览
+                                $('#image-preview').show();
+                                $('#preview-img').attr('src', imageUrl)
+                                    .on('error', function() {
+                                        // 图片加载失败时显示默认图片
+                                        $(this).attr('src', 'https://via.placeholder.com/400x300?text=图片加载失败');
+                                        console.log('图片加载失败，使用默认图片替代');
+                                    });
+                            } catch (e) {
+                                console.error("处理图片路径时出错:", e);
+                                $('#image-preview').show();
+                                $('#preview-img').attr('src', "https://via.placeholder.com/400x300?text=图片处理错误");
+                            }
+                        } else {
+                            $('#image-preview').hide();
+                        }
+                        
+                        // 显示表单
+                        $('#loading').hide();
+                        $('#edit-problem-form').show();
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("加载错题数据失败:", error);
+                        $('#loading').hide();
+                        $('#error-message').text(xhr.responseJSON?.error || error || "未知错误");
+                        $('#error-alert').show();
+                    }
+                });
+            }
+            
+            // 函数：更新子分类选项
+            function updateSubcategories() {
+                const category = $('#problem-category').val();
+                const subcategorySelect = $('#problem-subcategory');
+                
+                // 清空现有选项（保留第一个默认选项）
+                subcategorySelect.find('option:not(:first)').remove();
+                
+                // 如果选择了分类，添加对应的子分类选项
+                if (category && subcategories[category]) {
+                    subcategories[category].forEach(subcategory => {
+                        subcategorySelect.append(`<option value="${subcategory}">${subcategory}</option>`);
+                    });
+                }
+            }
+            
+            // 函数：添加标签
+            function addTag(tagText) {
+                if (!tagText) return;
+                
+                // 检查是否已存在
+                if (tags.includes(tagText)) return;
+                
+                // 添加到数组
+                tags.push(tagText);
+                
+                // 重新渲染标签
+                renderTags();
+            }
+            
+            // 函数：删除标签
+            function removeTag(index) {
+                tags.splice(index, 1);
+                renderTags();
+            }
+            
+            // 函数：渲染标签
+            function renderTags() {
+                const container = $('#tags-container');
+                
+                // 清空现有标签（保留输入框）
+                container.find('.tag-item').remove();
+                
+                // 添加标签
+                tags.forEach((tag, index) => {
+                    const tagElement = $(`
+                        <div class="tag-item">
+                            ${tag}
+                            <span class="remove-tag" data-index="${index}">&times;</span>
+                        </div>
+                    `);
+                    
+                    // 插入到输入框前面
+                    container.find('.tag-input').before(tagElement);
+                });
+                
+                // 绑定删除事件
+                $('.remove-tag').click(function() {
+                    const index = $(this).data('index');
+                    removeTag(index);
+                });
+            }
+            
+            // 函数：预览图片
+            function previewImage(input) {
+                if (input.files && input.files[0]) {
+                    const reader = new FileReader();
+                    
+                    reader.onload = function(e) {
+                        $('#preview-img').attr('src', e.target.result);
+                        $('#image-preview').show();
+                    }
+                    
+                    reader.readAsDataURL(input.files[0]);
+                }
+            }
+            
+            // 函数：保存错题
+            function saveProblem() {
+                // 准备要发送的数据对象
+                const problemData = {
+                    problem_title: $('#problem-title').val(),
+                    problem_content: $('#problem-content').val(),
+                    subject: $('#problem-subject').val(), // 添加学科字段
+                    problem_category: $('#problem-category').val(),
+                    problem_subcategory: $('#problem-subcategory').val(),
+                    difficulty: parseInt($('#problem-difficulty').val()),
+                    typicality: parseInt($('#problem-typicality').val()),
+                    solution: $('#problem-solution').val(),
+                    analysis: $('#problem-analysis').val(),
+                    user_comments: $('#problem-comments').val(),
+                    tags: tags
+                };
+                
+                // 显示加载状态
+                const submitBtn = $('#edit-problem-form button[type="submit"]');
+                const originalText = submitBtn.text();
+                submitBtn.prop('disabled', true).html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> 保存中...');
+                
+                // 检查是否有图片需要上传
+                const imageInput = $('#problem-image')[0];
+                const hasNewImage = imageInput.files && imageInput.files[0];
+                
+                // 发送JSON请求保存基本数据
+                $.ajax({
+                    url: `/api/problem/${problemId}`,
+                    type: 'PUT',
+                    contentType: 'application/json',
+                    data: JSON.stringify(problemData),
+                    success: function(response) {
+                        console.log("基本数据保存成功:", response);
+                        
+                        if (hasNewImage) {
+                            // 如果有新图片，使用FormData上传图片
+                            console.log("开始上传图片...");
+                            
+                            // 创建FormData对象
+                            const formData = new FormData();
+                            
+                            // 添加图片文件
+                            formData.append('image', imageInput.files[0]);
+                            
+                            // 添加问题ID，以便后端知道这是更新哪个问题的图片
+                            formData.append('problem_id', problemId);
+                            
+                            // 添加一个标志，表明这是图片更新请求
+                            formData.append('update_image_only', 'true');
+                            
+                            // 发送请求
+                            $.ajax({
+                                url: `/api/problem/${problemId}/update_image`,
+                                type: 'POST',
+                                data: formData,
+                                processData: false,
+                                contentType: false,
+                                success: function(imgResponse) {
+                                    console.log("图片上传成功:", imgResponse);
+                                    alert('错题修改成功！图片已更新。');
+                                    window.location.href = `/problem/${problemId}`;
+                                },
+                                error: function(xhr, status, error) {
+                                    console.error("图片上传失败:", error);
+                                    alert('错题基本信息已保存，但图片上传失败: ' + (xhr.responseJSON?.error || error || "未知错误"));
+                                    window.location.href = `/problem/${problemId}`;
+                                }
+                            });
+                        } else {
+                            // 没有图片直接跳转
+                            alert('错题修改成功！');
+                            window.location.href = `/problem/${problemId}`;
+                        }
+                    },
+                    error: function(xhr, status, error) {
+                        console.error("保存失败:", error);
+                        console.error("错误详情:", xhr.responseText);
+                        
+                        // 恢复按钮状态
+                        submitBtn.prop('disabled', false).text(originalText);
+                        
+                        // 显示错误消息
+                        alert('保存失败: ' + (xhr.responseJSON?.error || error || "未知错误"));
+                    }
+                });
+            }
+        });
+    </script>
+</body>
+</html>

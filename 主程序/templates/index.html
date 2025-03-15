@@ -1,0 +1,887 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepStudent</title>
+    <!-- 使用本地资源替代CDN链接 -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/bootstrap.min.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/custom.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/stream_analysis.css') }}">
+    <script src="{{ url_for('static', filename='js/jquery.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/bootstrap.bundle.min.js') }}"></script>
+    <!-- 添加Markdown和LaTeX渲染所需的库 -->
+    <script src="{{ url_for('static', filename='js/marked.min.js') }}"></script>
+    <!-- 只有在本地库存在时才尝试加载CDN资源 -->
+    <script>
+        // 只在marked未定义时尝试加载CDN资源
+        if (typeof marked === 'undefined') {
+            try {
+                document.write('<script src="https://cdn.jsdelivr.net/npm/markdown-it@13.0.1/dist/markdown-it.min.js"><\/script>');
+                document.write('<script src="https://cdn.jsdelivr.net/npm/katex@0.16.7/dist/katex.min.js"><\/script>');
+                document.write('<script src="https://cdn.jsdelivr.net/npm/markdown-it-katex@2.0.3/index.min.js"><\/script>');
+                document.write('<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.7/dist/katex.min.css">');
+            } catch (e) {
+                console.warn("CDN资源加载失败，使用本地渲染功能");
+            }
+        }
+    </script>
+    <!-- 使用本地MathJax替代CDN -->
+    <script>
+    MathJax = {
+        tex: {
+            inlineMath: [['$', '$'], ['\\(', '\\)']],
+            displayMath: [['$$', '$$'], ['\\[', '\\]']],
+            processEscapes: true,
+            processEnvironments: true
+        },
+        options: {
+            skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'code']
+        }
+    };
+    </script>
+    <script id="MathJax-script" src="{{ url_for('static', filename='js/tex-mml-svg.js') }}"></script>
+    <style>
+        /* 内联custom.css的内容 */
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', Arial, sans-serif;
+        }
+        .model-group {
+            border-bottom: 1px solid #dee2e6;
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        .model-group-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #495057;
+        }
+        .problem-item {
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        .tag {
+            display: inline-block;
+            background-color: #f0f0f0;
+            padding: 2px 8px;
+            margin: 2px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        #loadingOverlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 9999;
+            display: none;
+        }
+        
+        .problem-item .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+        
+        .problem-images {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        
+        .image-preview {
+            position: relative;
+            width: 100px;
+            height: 100px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .image-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        
+        .image-preview .remove-image {
+            position: absolute;
+            top: 3px;
+            right: 3px;
+            background-color: rgba(255, 255, 255, 0.7);
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            text-align: center;
+            line-height: 20px;
+            cursor: pointer;
+        }
+        
+        .queue-status {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+        }
+        
+        .queue-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 10px;
+            border-bottom: 1px solid #dee2e6;
+            align-items: center;
+        }
+        
+        .queue-item:last-child {
+            border-bottom: none;
+        }
+        
+        .queue-item .status {
+            display: flex;
+            align-items: center;
+        }
+        
+        .queue-item.processing {
+            background-color: rgba(13, 110, 253, 0.05);
+        }
+        
+        .queue-item.completed {
+            background-color: rgba(25, 135, 84, 0.05);
+        }
+        
+        .queue-item.error {
+            background-color: rgba(220, 53, 69, 0.05);
+        }
+        
+        .progress-container {
+            margin-top: 10px;
+        }
+        
+        .step-indicator {
+            font-size: 0.85rem;
+            color: #6c757d;
+            margin-top: 3px;
+        }
+        
+        /* 拖放区域样式 */
+        .upload-dropzone {
+            border: 2px dashed #ddd;
+            border-radius: 4px;
+            padding: 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        .upload-dropzone:hover, .upload-dropzone.dragover {
+            border-color: #0d6efd;
+            background-color: rgba(13, 110, 253, 0.05);
+        }
+    </style>
+</head>
+<body>
+    <!-- 导入共享导航栏 -->
+    {% include 'includes/nav.html' %}
+
+    <!-- 加载中遮罩 -->
+    <div id="loadingOverlay" style="display: none;">
+        <div class="spinner-border text-light" role="status">
+            <span class="visually-hidden">加载中...</span>
+        </div>
+        <div class="mt-2 text-light" id="loadingMessage">正在分析中，请稍候...</div>
+    </div>
+
+    <div class="container py-4">
+        <h1 class="text-center mb-4">{{ subject_info.name|default('数学') }}错题分析系统</h1>
+        
+        <div class="row">
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title">批量上传错题</h5>
+                    </div>
+                    <div class="card-body">
+                        <!-- 模型选择 -->
+                        <div class="mb-4">
+                            <label for="modelTypeSelect" class="form-label">选择分析模型</label>
+                            <select class="form-select" id="modelTypeSelect" name="model_type">
+                                <optgroup label="单一模型分析">
+                                    <option value="openai" selected>通义千问 (默认)</option>
+                                    <option value="gemini">Google Gemini</option>
+                                </optgroup>
+                                <optgroup label="组合模型分析">
+                                    <option value="ocr_r1">阿里云OCR + DeepseekR1</option>
+                                    <option value="multimodal_gpt4v">GPT-4V + DeepseekR1</option>
+                                    <option value="multimodal_claude3">Claude-3 + DeepseekR1</option>
+                                    <option value="multimodal_qwen-vl">通义千问VL + DeepseekR1</option>
+                                    <option value="multimodal_gemini">Gemini + DeepseekR1</option>
+                                </optgroup>
+                            </select>
+                            <div class="form-text">选择用于图像分析的AI模型，组合模式可能有更高精度</div>
+                        </div>
+                        
+                        <!-- 题目列表 -->
+                        <div id="problemsList">
+                            <!-- 题目项模板 - 默认会生成一个题目 -->
+                            <div class="problem-item" data-problem-id="problem-1">
+                                <div class="header">
+                                    <h5>题目 1</h5>
+                                    <button type="button" class="btn btn-sm btn-outline-danger remove-problem" title="移除此题目">
+                                        <i class="bi bi-x-lg"></i> 移除
+                                    </button>
+                                </div>
+                                
+                                <!-- 图片上传区域 -->
+                                <div class="mb-3">
+                                    <label class="form-label">上传图片</label>
+                                    <div class="upload-dropzone" data-problem-id="problem-1">
+                                        <input type="file" class="problem-images-input" multiple accept="image/*" style="display: none;">
+                                        <div class="upload-icon">
+                                            <i class="bi bi-cloud-arrow-up fs-3"></i>
+                                        </div>
+                                        <p class="mb-0 mt-2">拖放图片到此处或点击上传</p>
+                                        <p class="text-muted small">支持多张图片，包含题目和答案</p>
+                                    </div>
+                                    <div class="problem-images mt-2" id="images-problem-1"></div>
+                                </div>
+                                
+                                <!-- 文字补充 -->
+                                <div class="mb-0">
+                                    <label class="form-label">文字补充说明（可选，但强烈推荐）</label>
+                                    <textarea class="form-control problem-notes" rows="2" 
+                                        placeholder="请添加重要的补充信息，如错误原因、困惑点、具体问题（例如：'此题应选A而非B，请解释原因'）。这将优先被AI分析。"></textarea>
+                                    <small class="form-text text-muted">具体的问题描述将获得更精准的分析结果</small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- 添加题目和开始分析按钮 -->
+                        <div class="d-flex justify-content-between mt-3">
+                            <button type="button" class="btn btn-outline-primary" id="addProblemBtn">
+                                <i class="bi bi-plus-lg"></i> 添加题目
+                            </button>
+                            <button type="button" class="btn btn-primary" id="startAnalysisBtn">
+                                <i class="bi bi-lightning-charge"></i> 开始批量分析
+                            </button>
+                        </div>
+                        
+                        <!-- 队列状态 -->
+                        <div class="queue-status mt-4" id="queueStatus" style="display: none;">
+                            <h6 class="d-flex justify-content-between align-items-center mb-3">
+                                <span>处理队列 <span class="badge bg-info" id="queueCount">0</span></span>
+                                <span class="text-muted" id="queueSummary">正在处理中...</span>
+                            </h6>
+                            <div class="queue-items mb-3" id="queueItems"></div>
+                            <div class="progress-container">
+                                <div class="progress">
+                                    <div class="progress-bar" role="progressbar" style="width: 0%;" id="queueProgress"></div>
+                                </div>
+                                <small class="text-muted mt-1 d-block" id="queueProgressText">准备处理...</small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 快速链接卡片 -->
+                <div class="card mt-4">
+                    <div class="card-header">
+                        <h5 class="card-title">快速导航</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-grid gap-2">
+                            <a href="/problems" class="btn btn-outline-primary">查看错题库</a>
+                            <a href="/reviews" class="btn btn-outline-secondary">查看回顾记录</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 分析结果区域 -->
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">分析结果</h5>
+                        <button class="btn btn-sm btn-outline-secondary" id="collapseAllBtn">折叠全部</button>
+                    </div>
+                    <div class="card-body">
+                        <div id="analysisResults">
+                            <!-- 结果将在这里动态添加 -->
+                            <div class="text-center text-muted p-5" id="noResultsMessage">
+                                <i class="bi bi-info-circle fs-3"></i>
+                                <p class="mt-2">尚未进行分析，请上传题目并点击"开始批量分析"</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量
+        const problemQueue = []; // 题目队列
+        let isProcessing = false; // 是否正在处理队列
+        let nextProblemId = 2; // 下一个题目ID序号
+        let currentProblemIndex = 0; // 当前处理的题目索引
+        let totalProblems = 0; // 总题目数
+        
+        // 在页面加载完成后绑定事件
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('页面已加载，准备绑定事件');
+            
+            // 绑定添加题目按钮事件
+            document.getElementById('addProblemBtn').addEventListener('click', addNewProblem);
+            
+            // 绑定开始分析按钮事件
+            document.getElementById('startAnalysisBtn').addEventListener('click', startBatchAnalysis);
+            
+            // 绑定折叠全部按钮事件
+            document.getElementById('collapseAllBtn').addEventListener('click', toggleAllResults);
+            
+            // 绑定第一个题目的事件
+            setupProblemItemEvents('problem-1');
+        });
+
+        // 添加新题目
+        function addNewProblem() {
+            const problemId = `problem-${nextProblemId++}`;
+            const problemItem = document.createElement('div');
+            problemItem.className = 'problem-item';
+            problemItem.dataset.problemId = problemId;
+            
+            problemItem.innerHTML = `
+                <div class="header">
+                    <h5>题目 ${nextProblemId - 1}</h5>
+                    <button type="button" class="btn btn-sm btn-outline-danger remove-problem" title="移除此题目">
+                        <i class="bi bi-x-lg"></i> 移除
+                    </button>
+                </div>
+                
+                <!-- 图片上传区域 -->
+                <div class="mb-3">
+                    <label class="form-label">上传图片</label>
+                    <div class="upload-dropzone" data-problem-id="${problemId}">
+                        <input type="file" class="problem-images-input" multiple accept="image/*" style="display: none;">
+                        <div class="upload-icon">
+                            <i class="bi bi-cloud-arrow-up fs-3"></i>
+                        </div>
+                        <p class="mb-0 mt-2">拖放图片到此处或点击上传</p>
+                        <p class="text-muted small">支持多张图片，包含题目和答案</p>
+                    </div>
+                    <div class="problem-images mt-2" id="images-${problemId}"></div>
+                </div>
+                
+                <!-- 文字补充 -->
+                <div class="mb-0">
+                    <label class="form-label">文字补充说明（可选，但强烈推荐）</label>
+                    <textarea class="form-control problem-notes" rows="2" 
+                        placeholder="请添加重要的补充信息，如错误原因、困惑点、具体问题（例如：'此题应选A而非B，请解释原因'）。这将优先被AI分析。"></textarea>
+                    <small class="form-text text-muted">具体的问题描述将获得更精准的分析结果</small>
+                </div>
+            `;
+            
+            document.getElementById('problemsList').appendChild(problemItem);
+            
+            // 绑定新题目的事件
+            setupProblemItemEvents(problemId);
+        }
+
+        // 设置题目项的事件
+        function setupProblemItemEvents(problemId) {
+            const problemItem = document.querySelector(`.problem-item[data-problem-id="${problemId}"]`);
+            
+            // 移除题目按钮事件
+            const removeBtn = problemItem.querySelector('.remove-problem');
+            if (removeBtn) {
+                removeBtn.addEventListener('click', function() {
+                    problemItem.remove();
+                });
+            }
+            
+            // 图片上传区域事件
+            const dropzone = problemItem.querySelector('.upload-dropzone');
+            const fileInput = dropzone.querySelector('.problem-images-input');
+            
+            // 点击上传区域打开文件选择器
+            dropzone.addEventListener('click', function() {
+                fileInput.click();
+            });
+            
+            // 文件选择事件
+            fileInput.addEventListener('change', function(e) {
+                handleSelectedFiles(e.target.files, problemId);
+            });
+            
+            // 拖放事件
+            dropzone.addEventListener('dragover', function(e) {
+                e.preventDefault();
+                dropzone.classList.add('dragover');
+            });
+            
+            dropzone.addEventListener('dragleave', function() {
+                dropzone.classList.remove('dragover');
+            });
+            
+            dropzone.addEventListener('drop', function(e) {
+                e.preventDefault();
+                dropzone.classList.remove('dragover');
+                handleSelectedFiles(e.dataTransfer.files, problemId);
+            });
+        }
+
+        // 处理选择的文件
+        function handleSelectedFiles(files, problemId) {
+            const imagesContainer = document.getElementById(`images-${problemId}`);
+            
+            // 遍历文件并创建预览
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                
+                // 检查是否为图片
+                if (!file.type.startsWith('image/')) {
+                    console.warn(`跳过非图片文件: ${file.name}`);
+                    continue;
+                }
+                
+                // 创建预览容器
+                const previewDiv = document.createElement('div');
+                previewDiv.className = 'image-preview';
+                
+                // 创建图片元素
+                const img = document.createElement('img');
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+                
+                // 创建删除按钮
+                const removeBtn = document.createElement('div');
+                removeBtn.className = 'remove-image';
+                removeBtn.innerHTML = '×';
+                removeBtn.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    previewDiv.remove();
+                });
+                
+                // 保存文件引用
+                previewDiv.dataset.file = file.name;
+                previewDiv._file = file;
+                
+                // 添加到预览区域
+                previewDiv.appendChild(img);
+                previewDiv.appendChild(removeBtn);
+                imagesContainer.appendChild(previewDiv);
+            }
+        }
+
+        // 开始批量分析
+        function startBatchAnalysis() {
+            // 检查是否有题目
+            const problemItems = document.querySelectorAll('.problem-item');
+            if (problemItems.length === 0) {
+                alert('请至少添加一道题目');
+                return;
+            }
+            
+            // 清空队列
+            problemQueue.length = 0;
+            currentProblemIndex = 0;
+            totalProblems = problemItems.length;
+            
+            // 检查每个题目并添加到队列
+            for (const item of problemItems) {
+                const problemId = item.dataset.problemId;
+                const problemNumber = problemId.replace('problem-', '');
+                const imageElements = item.querySelectorAll('.image-preview');
+                const notes = item.querySelector('.problem-notes').value;
+                
+                // 检查是否有图片
+                if (imageElements.length === 0) {
+                    alert(`题目 ${problemNumber} 没有上传图片，请上传至少一张图片`);
+                    return;
+                }
+                
+                // 收集图片文件
+                const images = Array.from(imageElements).map(el => el._file);
+                
+                // 添加到队列
+                problemQueue.push({
+                    id: problemId,
+                    number: problemNumber,
+                    images: images,
+                    notes: notes,
+                    status: 'pending' // 待处理
+                });
+            }
+            
+            // 显示队列状态
+            document.getElementById('queueStatus').style.display = 'block';
+            document.getElementById('queueCount').textContent = problemQueue.length;
+            document.getElementById('queueSummary').textContent = `总共 ${problemQueue.length} 道题目`;
+            
+            // 更新队列项
+            updateQueueItems();
+            
+            // 开始处理队列
+            isProcessing = true;
+            processNextProblem();
+        }
+
+        // 更新队列项显示
+        function updateQueueItems() {
+            const queueItemsContainer = document.getElementById('queueItems');
+            queueItemsContainer.innerHTML = '';
+            
+            problemQueue.forEach((problem, index) => {
+                const item = document.createElement('div');
+                item.className = `queue-item ${problem.status === 'processing' ? 'processing' : problem.status === 'completed' ? 'completed' : problem.status === 'error' ? 'error' : ''}`;
+                item.id = `queue-item-${problem.id}`;
+                
+                let statusHtml = '';
+                if (problem.status === 'processing') {
+                    statusHtml = `<span class="spinner-border spinner-border-sm text-primary" role="status"></span> 处理中...`;
+                    if (problem.step) {
+                        statusHtml += `<div class="step-indicator">${problem.step}</div>`;
+                    }
+                } else if (problem.status === 'completed') {
+                    statusHtml = `<span class="text-success"><i class="fas fa-check-circle"></i> 已完成</span>`;
+                } else if (problem.status === 'error') {
+                    statusHtml = `<span class="text-danger"><i class="fas fa-exclamation-circle"></i> 失败</span>`;
+                } else {
+                    statusHtml = `<span class="text-muted">排队中</span>`;
+                }
+                
+                item.innerHTML = `
+                    <span>题目 ${problem.number}</span>
+                    <span class="status">${statusHtml}</span>
+                `;
+                queueItemsContainer.appendChild(item);
+            });
+        }
+
+        // 更新单个队列项状态
+        function updateQueueItemStatus(problemId, status, step = null) {
+            const problemIndex = problemQueue.findIndex(p => p.id === problemId);
+            if (problemIndex !== -1) {
+                problemQueue[problemIndex].status = status;
+                if (step) {
+                    problemQueue[problemIndex].step = step;
+                }
+                
+                // 更新UI
+                updateQueueItems();
+                
+                // 更新进度条
+                updateProgressBar();
+            }
+        }
+
+        // 更新进度条
+        function updateProgressBar() {
+            const completed = problemQueue.filter(p => p.status === 'completed' || p.status === 'error').length;
+            const progress = (completed / totalProblems) * 100;
+            document.getElementById('queueProgress').style.width = `${progress}%`;
+            
+            const remaining = problemQueue.filter(p => p.status === 'pending').length;
+            const processing = problemQueue.filter(p => p.status === 'processing').length;
+            
+            if (completed === totalProblems) {
+                document.getElementById('queueProgressText').textContent = `全部处理完成 (${completed}/${totalProblems})`;
+                document.getElementById('queueSummary').textContent = `已完成所有题目`;
+            } else {
+                document.getElementById('queueProgressText').textContent = 
+                    `已完成 ${completed}/${totalProblems}，处理中 ${processing}，剩余 ${remaining}`;
+                document.getElementById('queueSummary').textContent = `处理中 (${completed}/${totalProblems})`;
+            }
+        }
+
+        // 处理队列中的下一个题目
+        async function processNextProblem() {
+            // 检查队列是否为空
+            if (problemQueue.length === 0 || currentProblemIndex >= problemQueue.length) {
+                isProcessing = false;
+                updateProgressBar();
+                return;
+            }
+            
+            // 获取当前要处理的题目
+            const problem = problemQueue[currentProblemIndex];
+            currentProblemIndex++;
+            
+            // 更新状态为处理中
+            updateQueueItemStatus(problem.id, 'processing', '准备分析...');
+            
+            try {
+                // 获取分析模型
+                const modelType = document.getElementById('modelTypeSelect').value;
+                
+                // 获取当前选中的学科
+                const urlParams = new URLSearchParams(window.location.search);
+                const currentSubject = urlParams.get('subject') || 'math';
+                
+                // 更新处理步骤
+                updateQueueItemStatus(problem.id, 'processing', '上传图片...');
+                
+                // 分析当前题目
+                const result = await analyzeProblem(problem, modelType, currentSubject);
+                
+                // 更新处理步骤
+                updateQueueItemStatus(problem.id, 'processing', '处理分析结果...');
+                
+                // 添加结果到页面
+                addResultToPage(result, problem);
+                
+                // 隐藏"无结果"消息
+                document.getElementById('noResultsMessage').style.display = 'none';
+                
+                // 更新状态为已完成
+                updateQueueItemStatus(problem.id, 'completed');
+                
+            } catch (error) {
+                console.error('分析过程中发生错误:', error);
+                
+                // 添加错误结果
+                const errorResult = {
+                    success: false,
+                    error: error.message || '分析过程中发生未知错误',
+                    problemId: problem.id
+                };
+                addResultToPage(errorResult, problem);
+                
+                // 更新状态为错误
+                updateQueueItemStatus(problem.id, 'error');
+            } finally {
+                // 处理下一个题目
+                processNextProblem();
+            }
+        }
+
+        // 分析单个题目
+        async function analyzeProblem(problem, modelType, subject) {
+            // 创建FormData对象
+            const formData = new FormData();
+            
+            // 添加图片文件
+            for (let i = 0; i < problem.images.length; i++) {
+                formData.append('files', problem.images[i]);
+            }
+            
+            // 添加模型类型
+            formData.append('model_type', modelType);
+            
+            // 添加学科
+            formData.append('subject', subject);
+            
+            // 添加文字补充
+            if (problem.notes) {
+                formData.append('notes', problem.notes);
+            }
+            
+            // 更新处理步骤
+            updateQueueItemStatus(problem.id, 'processing', '发送请求到服务器...');
+            
+            // 发送请求到服务器
+            console.log(`准备发送题目 ${problem.id} 到 /api/upload-multi，学科：${subject}`);
+            const response = await fetch('/api/upload-multi', {
+                method: 'POST',
+                body: formData
+            });
+            
+            // 更新处理步骤
+            updateQueueItemStatus(problem.id, 'processing', '接收服务器响应...');
+            
+            // 检查响应
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`服务器错误 (${response.status}): ${errorText}`);
+            }
+            
+            // 解析响应
+            const result = await response.json();
+            if (!result.success) {
+                throw new Error(result.error || '未知错误');
+            }
+            
+            // 添加题目ID到结果中
+            result.problemId = problem.id;
+            
+            return result;
+        }
+
+        // 添加结果到页面
+        function addResultToPage(result, problem) {
+            const resultsContainer = document.getElementById('analysisResults');
+            const resultId = `result-${Date.now()}`;
+            
+            // 创建结果项
+            const resultItem = document.createElement('div');
+            resultItem.className = 'result-item';
+            resultItem.id = resultId;
+            
+
+            
+            resultsContainer.appendChild(resultItem);
+            
+            // 使用 processMarkdownWithLatex 处理内容
+            const problemContent = document.getElementById(`problem-content-${resultId}`);
+            if (problemContent) {
+                problemContent.innerHTML = processMarkdownWithLatex(problemContent.textContent);
+            }
+
+            const errorAnalysis = document.getElementById(`error-analysis-${resultId}`);
+            if (errorAnalysis) {
+                errorAnalysis.innerHTML = processMarkdownWithLatex(errorAnalysis.textContent);
+            }
+
+            const correctSolution = document.getElementById(`correct-solution-${resultId}`);
+            if (correctSolution) {
+                correctSolution.innerHTML = processMarkdownWithLatex(correctSolution.textContent);
+            }
+
+            // 延迟渲染MathJax，确保内容加载完毕
+            setTimeout(function() {
+                try {
+                    if (window.MathJax) {
+                        if (typeof window.MathJax.typeset === 'function') {
+                            window.MathJax.typeset();
+                            console.log("LaTeX渲染完成 (typeset)");
+                        } else if (typeof window.MathJax.typesetPromise === 'function') {
+                            window.MathJax.typesetPromise()
+                                .then(function() {
+                                    console.log("LaTeX渲染完成 (typesetPromise)");
+                                })
+                                .catch(function(err) {
+                                    console.error("LaTeX渲染错误:", err);
+                                });
+                        } else {
+                            console.warn("MathJax加载但无法找到渲染方法");
+                        }
+                    } else {
+                        console.warn("MathJax未加载，无法渲染LaTeX");
+                    }
+                } catch (e) {
+                    console.error("尝试渲染LaTeX时出错:", e);
+                }
+            }, 300);
+        }
+
+        // 渲染标签
+        function renderTags(tags) {
+            if (!Array.isArray(tags) || tags.length === 0) {
+                return '<span class="badge bg-secondary">无标签</span>';
+            }
+            
+            return tags.map(tag => `<span class="badge bg-info me-1">${tag}</span>`).join(' ');
+        }
+
+        // 切换结果显示
+        function toggleResult(resultId) {
+            const resultBody = document.querySelector(`#${resultId} .result-body`);
+            if (resultBody) {
+                resultBody.classList.toggle('active');
+            }
+        }
+
+        // 折叠或展开所有结果
+        function toggleAllResults() {
+            const resultBodies = document.querySelectorAll('.result-body');
+            const allCollapsed = Array.from(resultBodies).every(body => !body.classList.contains('active'));
+            
+            resultBodies.forEach(body => {
+                if (allCollapsed) {
+                    body.classList.add('active');
+                } else {
+                    body.classList.remove('active');
+                }
+            });
+        }
+
+        // 添加Markdown处理函数
+        function processMarkdownWithLatex(text) {
+            if (!text) return '';
+            
+            // 步骤1: 暂时"保护"LaTeX公式，避免被Markdown解析器修改
+            const latexPlaceholders = [];
+            
+            // 保护行内公式: $...$
+            let processedText = text.replace(/\$([^\$]+)\$/g, function(match) {
+                latexPlaceholders.push(match);
+                return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+            });
+            
+            // 保护块级公式: $$...$$
+            processedText = processedText.replace(/\$\$([\s\S]+?)\$\$/g, function(match) {
+                latexPlaceholders.push(match);
+                return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+            });
+            
+            // 保护 \( ... \) 格式的公式
+            processedText = processedText.replace(/\\\(([\s\S]+?)\\\)/g, function(match) {
+                latexPlaceholders.push(match);
+                return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+            });
+            
+            // 保护 \[ ... \] 格式的公式
+            processedText = processedText.replace(/\\\[([\s\S]+?)\\\]/g, function(match) {
+                latexPlaceholders.push(match);
+                return `LATEXPLACEHOLDER${latexPlaceholders.length - 1}`;
+            });
+
+            // 步骤2: 使用marked解析Markdown，但忽略我们的占位符
+            marked.use({
+                extensions: [{
+                    name: 'latex-placeholder',
+                    level: 'inline',
+                    start(src) { return src.match(/LATEXPLACEHOLDER\d+/)?.index; },
+                    tokenizer(src) {
+                        const match = src.match(/^(LATEXPLACEHOLDER\d+)/);
+                        if (match) {
+                            return {
+                                type: 'latex-placeholder',
+                                raw: match[0],
+                                text: match[1],
+                                tokens: []
+                            };
+                        }
+                        return false;
+                    },
+                    renderer(token) {
+                        return token.text;
+                    }
+                }]
+            });
+            
+            // 配置基本选项
+            marked.setOptions({
+                breaks: true,      // 将回车转换为<br>
+                gfm: true,         // 启用GitHub风格的Markdown
+                headerIds: true,   // 为标题添加ID
+                mangle: false      // 不转义autolink和标题
+            });
+            
+            // 解析Markdown
+            const htmlContent = marked.parse(processedText);
+            
+            // 步骤3: 恢复LaTeX公式
+            const finalContent = htmlContent.replace(/LATEXPLACEHOLDER(\d+)/g, function(match, index) {
+                return latexPlaceholders[parseInt(index)];
+            });
+            
+            return finalContent;
+        }
+    </script>
+    <script src="{{ url_for('static', filename='js/stream_analysis.js') }}"></script>
+</body>
+</html>
