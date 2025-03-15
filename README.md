@@ -4,6 +4,9 @@ deep-student致力于使用LLM与RAG对错题进行分析与管理，
 减少学习者在错题整理与复习上的无效努力，提高学习效率。
 项目仍然处于早期阶段，BUG可能会非常多。
 
+BILIBILI 演示视频
+【Deep-Student 开源AI错题管理软件】 
+https://www.bilibili.com/video/BV1rcQVY3EDo/?share_source=copy_web&vd_source=1c0ff08e122edb92a89179c0a64878aa
 
 ## 目前已经实现的功能有：
 
