@@ -16,7 +16,7 @@ https://www.bilibili.com/video/BV1rcQVY3EDo/?share_source=copy_web&vd_source=1c0
    - 提供错题录入、分析和回顾功能
    - 支持多种AI模型分析错题
 
-2. **RAG2025** - 知识库查询系统(端口: 5002)
+2. **RAG2025** - 知识库查询系统(端口: 5000)
    - 提供知识文档管理和检索功能
    - 基于RAG (检索增强生成) 技术
 
