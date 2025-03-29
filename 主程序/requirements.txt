@@ -1,0 +1,27 @@
+flask>=2.0.0
+requests>=2.25.0
+pillow>=8.0.0
+werkzeug==2.3.6
+flask-cors==3.0.10
+python-dotenv>=0.19.0
+google-generativeai>=0.2.0
+numpy>=1.20.0
+pandas>=1.2.0
+matplotlib>=3.4.0
+scikit-learn>=0.24.0
+opencv-python>=4.5.0
+tensorflow>=2.5.0
+torch>=1.8.0
+openai>=1.0.0  # 添加OpenAI客户端库，用于处理流式响应
+
+# LangChain相关依赖
+langchain>=0.1.0
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+langchain-community>=0.0.10
+langchain-text-splitters>=0.0.1
+faiss-cpu>=1.7.4  # 向量搜索库
+chromadb>=0.4.22  # 持久化向量存储
+unstructured>=0.10.30  # 文档解析
+pypdf>=3.17.1  # PDF处理
+docx2txt>=0.8  # Word文档处理
