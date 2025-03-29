@@ -1,0 +1,38 @@
+# 核心依赖 - 使用Haystack 2.0
+flask==2.3.3
+requests==2.31.0
+python-dotenv==1.0.0
+transformers>=4.49.0
+numpy>=1.24.0
+haystack-ai>=2.0.0  # 使用Haystack 2.0
+huggingface-hub>=0.20.0
+tokenizers>=0.15.2
+pydantic==1.10.21
+
+# 嵌入模型依赖
+sentence-transformers>=3.0.0
+
+# FastRAG依赖
+# 如果使用本地安装，可以注释掉下面这行
+# git+https://github.com/IntelLabs/fastRAG.git
+
+# protobuf版本限制 - 解决多个包的兼容性问题
+protobuf<4.22.0
+
+# 其他可能需要的依赖
+tqdm>=4.66.0
+typing-extensions>=4.8.0
+dataclasses-json>=0.6.2
+
+# 文件处理相关依赖
+PyPDF2>=3.0.0  # PDF文件处理
+python-docx>=1.0.0  # DOCX文件处理
+textract>=1.6.0  # 通用文本提取，包括DOC文件处理
+
+# 持久化存储相关依赖
+sqlitedict>=2.1.0  # SQLite字典存储
+diskcache>=5.6.1   # 磁盘缓存
+
+# 其他可选依赖
+# docx2txt>=0.8  # 另一个Word文档处理库
+# pdfplumber>=0.10.0  # 另一个PDF处理库 
