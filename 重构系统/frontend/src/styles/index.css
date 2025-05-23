@@ -1,0 +1,101 @@
+/* 全局样式重置 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif, 'Apple Color Emoji',
+    'Segoe UI Emoji', 'Segoe UI Symbol';
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条样式 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #888;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* 链接样式 */
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* 列表样式 */
+ul,
+ol {
+  list-style: none;
+}
+
+/* 表单样式 */
+input,
+button,
+select,
+textarea {
+  font-family: inherit;
+}
+
+/* Element Plus 覆盖样式 */
+.el-menu-item.is-active {
+  font-weight: 600;
+}
+
+/* 卡片间距 */
+.el-card + .el-card {
+  margin-top: 20px;
+}
+
+/* 页面标题 */
+h1 {
+  font-size: 24px;
+  font-weight: 600;
+  color: #303133;
+}
+
+h2 {
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+}
+
+h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #303133;
+}
+
+/* 工具类 */
+.text-center {
+  text-align: center;
+}
+
+.mt-20 {
+  margin-top: 20px;
+}
+
+.mb-20 {
+  margin-bottom: 20px;
+}
+
+.p-20 {
+  padding: 20px;
+} 

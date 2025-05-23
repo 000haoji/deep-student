@@ -1,0 +1,9 @@
+{
+  "timestamp": "20250305_104746",
+  "created_at": "2025-03-05T10:47:46.073489",
+  "files": [
+    "vectors.sqlite",
+    "documents.sqlite",
+    "metadata.json"
+  ]
+}

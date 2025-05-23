@@ -1,0 +1,89 @@
+{
+    "math": {
+        "name": "考研数学",
+        "description": "考研数学错题管理",
+        "icon": "fa-square-root-alt",
+        "enabled": true,
+        "default_categories": [
+            "高等数学",
+            "线性代数",
+            "概率论"
+        ],
+        "default_tags": [
+            "极限",
+            "微分",
+            "积分",
+            "级数",
+            "矩阵",
+            "行列式",
+            "概率分布",
+            "数理统计"
+        ],
+        "analysis_prompt": "这是一道考研数学题，请分析错误原因并给出正确解法。"
+    },
+    "english": {
+        "name": "考研英语",
+        "description": "考研英语错题管理",
+        "icon": "fa-language",
+        "enabled": true,
+        "default_categories": [
+            "阅读理解",
+            "翻译",
+            "写作",
+            "完形填空"
+        ],
+        "default_tags": [
+            "词汇",
+            "语法",
+            "长难句",
+            "逻辑关系",
+            "主旨大意",
+            "细节题",
+            "推断题"
+        ],
+        "analysis_prompt": "这是一道考研英语题，请分析错误原因并给出正确答案与解析。"
+    },
+    "politics": {
+        "name": "考研政治",
+        "description": "考研政治错题管理",
+        "icon": "fa-landmark",
+        "enabled": true,
+        "default_categories": [
+            "马原",
+            "毛中特",
+            "史纲",
+            "思修法基"
+        ],
+        "default_tags": [
+            "原理题",
+            "分析题",
+            "辨析题",
+            "多选题",
+            "材料分析题"
+        ],
+        "analysis_prompt": "这是一道考研政治题，请分析错误原因并给出正确答案与解析。"
+    },
+    "professional": {
+        "name": "专业课",
+        "description": "考研专业课错题管理",
+        "icon": "fa-book",
+        "enabled": true,
+        "default_categories": [
+            "专业基础课",
+            "专业核心课"
+        ],
+        "default_tags": [
+            "概念",
+            "原理",
+            "方法",
+            "计算",
+            "应用"
+        ],
+        "analysis_prompt": "这是一道考研专业课题，请分析错误原因并给出正确答案与解析。"
+    },
+    "test": {
+        "name": "测试学",
+        "icon": "fa-book",
+        "enabled": true
+    }
+}

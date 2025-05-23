@@ -1,0 +1,29 @@
+{
+  "document_count": 1,
+  "documents": [
+    {
+      "id": "4d2c4f29-4af1-4391-a9b2-96e46e9481f9",
+      "title": "（25社概小课堂）名词解释.docx",
+      "type": "docx",
+      "upload_time": "2025-03-05 00:18:50",
+      "chunk_count": 8
+    }
+  ],
+  "libraries": {
+    "default_library": {
+      "name": "默认文档库",
+      "created_at": "2025-03-06 15:48:11"
+    },
+    "lib_1741248913": {
+      "name": "408",
+      "created_at": "2025-03-06 16:15:13"
+    },
+    "408": {
+      "id": "408",
+      "name": "408",
+      "created_at": "2025-03-06 19:36:12",
+      "document_count": 0
+    }
+  },
+  "last_document_update_time": "2025-03-06 17:21:34"
+}

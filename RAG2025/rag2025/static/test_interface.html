@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek API性能测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        .description {
+            text-align: center;
+            margin-bottom: 25px;
+            color: #666;
+            padding: 0 15%;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        .buttons {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        button {
+            flex: 1;
+            padding: 12px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button.direct {
+            background-color: #2196F3;
+        }
+        button.direct:hover {
+            background-color: #0b7dda;
+        }
+        .results {
+            display: flex;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .result-box {
+            flex: 1;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            background-color: #f9f9f9;
+        }
+        .metrics {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #e9e9e9;
+            border-radius: 4px;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(255,255,255,.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 1s linear infinite;
+            margin-right: 5px;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .status {
+            font-size: 14px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .elapsed-time {
+            font-size: 14px;
+            color: #ff5722;
+            margin-top: 5px;
+            font-weight: bold;
+        }
+        .comparison {
+            margin-top: 30px;
+            padding: 15px;
+            background-color: #e0f7fa;
+            border-radius: 4px;
+            border-left: 4px solid #00bcd4;
+        }
+        .result-content {
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 10px;
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+        .url-section {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+            border-left: 4px solid #9e9e9e;
+        }
+        .collapsible {
+            background-color: #eee;
+            color: #444;
+            cursor: pointer;
+            padding: 10px;
+            width: 100%;
+            border: none;
+            text-align: left;
+            outline: none;
+            font-size: 15px;
+            margin-bottom: 5px;
+            border-radius: 4px;
+        }
+        .active, .collapsible:hover {
+            background-color: #ccc;
+        }
+        .content {
+            padding: 0 10px;
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.2s ease-out;
+            background-color: #f9f9f9;
+            border-radius: 0 0 4px 4px;
+        }
+        .nav-bar {
+            background-color: #333;
+            color: white;
+            padding: 10px 0;
+            margin-bottom: 20px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .sources-container {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 15px;
+            background-color: #f5f5f5;
+        }
+        .source-item {
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #fff;
+            border-radius: 4px;
+            border-left: 3px solid #2196F3;
+        }
+        .source-title {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .source-content {
+            color: #666;
+            font-size: 14px;
+        }
+        .source-score {
+            color: #ff5722;
+            font-size: 12px;
+            margin-top: 5px;
+        }
+        .chat-container {
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        .chat-messages {
+            flex-grow: 1;
+            overflow-y: auto;
+            padding: 10px;
+            background-color: #f9f9f9;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            max-height: 300px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            align-self: flex-end;
+            max-width: 80%;
+        }
+        .system-message {
+            background-color: #f1f1f1;
+            padding: 10px;
+            border-radius: 10px;
+            margin-bottom: 10px;
+            align-self: flex-start;
+            max-width: 80%;
+        }
+    </style>
+</head>
+<body>
+    <div class="nav-bar">
+        DeepSeek知识库查询系统 - API性能测试工具
+    </div>
+    
+    <div class="container">
+        <h1>DeepSeek API性能测试</h1>
+        <p class="description">
+            此工具用于测试使用Go代理与直接API调用的性能差异，特别关注"首个token延迟"指标，
+            该指标表示从发送请求到收到第一个实际内容token所需的时间。
+        </p>
+        
+        <div class="chat-container">
+            <div class="chat-messages" id="chatMessages">
+                <!-- 消息将在这里动态添加 -->
+            </div>
+            
+            <div class="form-group">
+                <label for="query">查询内容:</label>
+                <textarea id="query" placeholder="输入您的查询内容"></textarea>
+            </div>
+            
+            <button id="queryBtn" onclick="prepareQuery()">
+                发送查询
+            </button>
+        </div>
+        
+        <div id="sourcesContainer" class="sources-container" style="display: none;">
+            <h3>参考来源</h3>
+            <div id="sourcesList">
+                <!-- 来源将在这里动态添加 -->
+            </div>
+        </div>
+        
+        <button type="button" class="collapsible">高级设置（API URL配置）</button>
+        <div class="content">
+            <div class="form-group">
+                <label for="directApiUrl">直接API URL:</label>
+                <input type="text" id="directApiUrl" value="https://api.siliconflow.cn/v1/chat/completions" placeholder="输入直接API URL">
+                <small style="display: block; margin-top: 5px; color: #666;">例如: https://api.siliconflow.cn/v1/chat/completions 或 https://api.deepseek.com/v1/chat/completions</small>
+            </div>
+            
+            <div class="form-group">
+                <label for="proxyUrl">代理API URL:</label>
+                <input type="text" id="proxyUrl" value="http://localhost:8000/proxy/stream" placeholder="输入代理API URL">
+                <small style="display: block; margin-top: 5px; color: #666;">默认为 http://localhost:8000/proxy/stream</small>
+            </div>
+        </div>
+        
+        <div class="buttons" id="apiButtons" style="display: none;">
+            <button id="proxyBtn" onclick="runTest('proxy')">
+                通过Go代理发送请求
+            </button>
+            <button id="directBtn" class="direct" onclick="runTest('direct')">
+                直接调用DeepSeek API
+            </button>
+        </div>
+        
+        <div class="results">
+            <div class="result-box">
+                <h3>Go代理请求结果</h3>
+                <div id="proxyStatus" class="status">未开始</div>
+                <div id="proxyElapsedTime" class="elapsed-time" style="display: none;">计时: 0.00秒</div>
+                <div id="proxyContent" class="result-content"></div>
+                <div id="proxyMetrics" class="metrics">
+                    <div>首个token延迟: <span id="proxyFirstToken">-</span></div>
+                    <div>总响应时间: <span id="proxyTotalTime">-</span></div>
+                </div>
+            </div>
+            
+            <div class="result-box">
+                <h3>直接API请求结果</h3>
+                <div id="directStatus" class="status">未开始</div>
+                <div id="directElapsedTime" class="elapsed-time" style="display: none;">计时: 0.00秒</div>
+                <div id="directContent" class="result-content"></div>
+                <div id="directMetrics" class="metrics">
+                    <div>首个token延迟: <span id="directFirstToken">-</span></div>
+                    <div>总响应时间: <span id="directTotalTime">-</span></div>
+                </div>
+            </div>
+        </div>
+        
+        <div id="comparison" class="comparison" style="display: none;">
+            <h3>性能比较</h3>
+            <div id="comparisonContent"></div>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量
+        let directApiUrl = document.getElementById('directApiUrl').value;
+        let proxyUrl = document.getElementById('proxyUrl').value;
+        let preparedRequestData = null;
+        let apiKey = null;
+        let apiUrl = null;
+
+        // 存储结果
+        let results = {
+            proxy: null,
+            direct: null
+        };
+
+        // 准备查询
+        async function prepareQuery() {
+            const queryInput = document.getElementById('query');
+            const query = queryInput.value.trim();
+            
+            if (!query) {
+                alert('请输入查询内容');
+                return;
+            }
+            
+            // 设置按钮加载状态
+            const queryBtn = document.getElementById('queryBtn');
+            queryBtn.innerHTML = '<span class="spinner"></span> 处理中...';
+            queryBtn.disabled = true;
+            
+            // 添加用户消息
+            const chatMessages = document.getElementById('chatMessages');
+            const userMessageDiv = document.createElement('div');
+            userMessageDiv.className = 'user-message';
+            userMessageDiv.textContent = query;
+            chatMessages.appendChild(userMessageDiv);
+            
+            // 清空输入框并滚动到底部
+            queryInput.value = '';
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            
+            try {
+                // 调用后端准备查询接口
+                const response = await fetch('/prepare_query', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ query: query }),
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || '查询处理失败');
+                }
+                
+                const data = await response.json();
+                
+                if (!data.success) {
+                    throw new Error(data.error || '准备查询失败');
+                }
+                
+                // 保存请求数据
+                preparedRequestData = data.request_data;
+                apiKey = data.api_key;
+                apiUrl = data.api_url;
+                
+                // 显示来源信息
+                displaySources(data.sources);
+                
+                // 显示API按钮
+                document.getElementById('apiButtons').style.display = 'flex';
+                
+                // 创建系统回复框架
+                const systemMessageDiv = document.createElement('div');
+                systemMessageDiv.className = 'system-message';
+                const answerElement = document.createElement('div');
+                answerElement.className = 'answer-content';
+                answerElement.textContent = '请选择使用Go代理或直接调用API来获取回答...';
+                
+                // 将回复添加到消息列表
+                systemMessageDiv.appendChild(answerElement);
+                chatMessages.appendChild(systemMessageDiv);
+                
+                // 滚动到最新消息
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+                
+            } catch (error) {
+                console.error('准备查询过程出错:', error);
+                
+                // 添加错误消息
+                const systemMessageDiv = document.createElement('div');
+                systemMessageDiv.className = 'system-message';
+                systemMessageDiv.textContent = `错误: ${error.message || '未知错误'}`;
+                chatMessages.appendChild(systemMessageDiv);
+                
+                // 滚动到最新消息
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            } finally {
+                // 恢复按钮状态
+                queryBtn.innerHTML = '发送查询';
+                queryBtn.disabled = false;
+            }
+        }
+        
+        // 显示来源信息
+        function displaySources(sources) {
+            if (!sources || sources.length === 0) {
+                document.getElementById('sourcesContainer').style.display = 'none';
+                return;
+            }
+            
+            const sourcesList = document.getElementById('sourcesList');
+            sourcesList.innerHTML = '';
+            
+            sources.forEach(source => {
+                const sourceItem = document.createElement('div');
+                sourceItem.className = 'source-item';
+                
+                const sourceTitle = document.createElement('div');
+                sourceTitle.className = 'source-title';
+                sourceTitle.textContent = source.title;
+                
+                const sourceContent = document.createElement('div');
+                sourceContent.className = 'source-content';
+                sourceContent.textContent = source.content;
+                
+                const sourceScore = document.createElement('div');
+                sourceScore.className = 'source-score';
+                sourceScore.textContent = `相关度: ${source.score ? source.score.toFixed(2) : 'N/A'}`;
+                
+                sourceItem.appendChild(sourceTitle);
+                sourceItem.appendChild(sourceContent);
+                sourceItem.appendChild(sourceScore);
+                
+                sourcesList.appendChild(sourceItem);
+            });
+            
+            document.getElementById('sourcesContainer').style.display = 'block';
+        }
+
+        // 设置按钮加载状态
+        function setButtonLoading(id, isLoading) {
+            const button = document.getElementById(id);
+            if (isLoading) {
+                button.innerHTML = '<span class="spinner"></span> 请求中...';
+                button.disabled = true;
+            } else {
+                button.innerHTML = id === 'proxyBtn' ? '通过Go代理发送请求' : '直接调用DeepSeek API';
+                button.disabled = false;
+            }
+        }
+
+        // 设置状态信息
+        function setStatus(type, message) {
+            document.getElementById(`${type}Status`).textContent = message;
+        }
+
+        // 更新指标
+        function updateMetrics(type, firstToken, totalTime) {
+            document.getElementById(`${type}FirstToken`).textContent = `${firstToken.toFixed(2)}秒`;
+            document.getElementById(`${type}TotalTime`).textContent = `${totalTime.toFixed(2)}秒`;
+        }
+
+        // 添加响应内容
+        function appendContent(type, content) {
+            const contentEl = document.getElementById(`${type}Content`);
+            contentEl.textContent += content;
+            contentEl.scrollTop = contentEl.scrollHeight;
+        }
+
+        // 清除响应内容
+        function clearContent(type) {
+            document.getElementById(`${type}Content`).textContent = '';
+        }
+
+        // 比较结果
+        function compareResults() {
+            if (!results.proxy || !results.direct) return;
+            
+            const comparisonDiv = document.getElementById('comparison');
+            const comparisonContent = document.getElementById('comparisonContent');
+            
+            const firstTokenDiff = results.direct.firstTokenLatency - results.proxy.firstTokenLatency;
+            const firstTokenPercent = (firstTokenDiff / results.direct.firstTokenLatency) * 100;
+            
+            const totalTimeDiff = results.direct.totalTime - results.proxy.totalTime;
+            const totalTimePercent = (totalTimeDiff / results.direct.totalTime) * 100;
+            
+            let comparisonHTML = `
+                <div>首个token延迟差异: ${firstTokenDiff.toFixed(2)}秒 
+                    (${Math.abs(firstTokenPercent).toFixed(1)}% ${firstTokenDiff > 0 ? '减少' : '增加'})</div>
+                <div>总响应时间差异: ${totalTimeDiff.toFixed(2)}秒 
+                    (${Math.abs(totalTimePercent).toFixed(1)}% ${totalTimeDiff > 0 ? '减少' : '增加'})</div>
+            `;
+            
+            comparisonContent.innerHTML = comparisonHTML;
+            comparisonDiv.style.display = 'block';
+        }
+
+        // 发送请求测试
+        async function runTest(type) {
+            // 检查是否已准备好请求数据
+            if (!preparedRequestData || !apiKey || !apiUrl) {
+                alert('请先发送查询以准备请求数据');
+                return;
+            }
+            
+            // 记录请求开始时间（按下按钮的时刻）
+            const requestStartTime = Date.now();
+            
+            // 获取最新的URL值
+            directApiUrl = document.getElementById('directApiUrl').value.trim();
+            proxyUrl = document.getElementById('proxyUrl').value.trim();
+            
+            // 验证URL格式
+            if (type === 'direct' && !isValidUrl(directApiUrl)) {
+                alert('请输入有效的直接API URL');
+                return;
+            }
+            
+            if (type === 'proxy' && !isValidUrl(proxyUrl)) {
+                alert('请输入有效的代理API URL');
+                return;
+            }
+            
+            // 清除之前的结果
+            clearContent(type);
+            setButtonLoading(`${type}Btn`, true);
+            setStatus(type, '准备发送请求...');
+            
+            // 清除之前的指标
+            document.getElementById(`${type}FirstToken`).textContent = '-';
+            document.getElementById(`${type}TotalTime`).textContent = '-';
+            
+            // 显示计时器并开始更新
+            const elapsedTimeEl = document.getElementById(`${type}ElapsedTime`);
+            elapsedTimeEl.style.display = 'block';
+            
+            // 启动计时器
+            const timerInterval = setInterval(() => {
+                const elapsedSecs = (Date.now() - requestStartTime) / 1000;
+                elapsedTimeEl.textContent = `计时: ${elapsedSecs.toFixed(2)}秒`;
+            }, 100);
+            
+            try {
+                if (type === 'direct') {
+                    // 直接调用DeepSeek API
+                    setStatus(type, '正在发送到直接API...');
+                    const response = await fetch(directApiUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Authorization': `Bearer ${apiKey}`
+                        },
+                        body: JSON.stringify(preparedRequestData)
+                    });
+                    
+                    if (!response.ok) {
+                        const error = await response.text();
+                        clearInterval(timerInterval); // 清除计时器
+                        throw new Error(`API错误 (${response.status}): ${error}`);
+                    }
+                    
+                    await handleStreamResponse(response, type, requestStartTime, timerInterval);
+                    
+                } else {
+                    // 通过Go代理调用
+                    setStatus(type, '正在发送到Go代理...');
+                    const response = await fetch(proxyUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            model: preparedRequestData.model,
+                            api_key: apiKey,
+                            messages: preparedRequestData.messages,
+                            temperature: preparedRequestData.temperature,
+                            top_p: preparedRequestData.top_p,
+                            max_tokens: preparedRequestData.max_tokens,
+                            stream: true,
+                            api_url: apiUrl
+                        })
+                    });
+                    
+                    if (!response.ok) {
+                        const error = await response.text();
+                        clearInterval(timerInterval); // 清除计时器
+                        throw new Error(`代理错误 (${response.status}): ${error}`);
+                    }
+                    
+                    await handleStreamResponse(response, type, requestStartTime, timerInterval);
+                }
+                
+            } catch (error) {
+                console.error(`${type}请求错误:`, error);
+                setStatus(type, `错误: ${error.message}`);
+                document.getElementById(`${type}ElapsedTime`).style.display = 'none';
+                setButtonLoading(`${type}Btn`, false);
+            }
+        }
+        
+        // 验证URL格式
+        function isValidUrl(string) {
+            try {
+                new URL(string);
+                return true;
+            } catch (_) {
+                return false;
+            }
+        }
+        
+        // 处理API响应
+        async function handleStreamResponse(response, type, requestStartTime, timerInterval) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let firstTokenTime = null;
+            let fullResponse = '';
+            
+            setStatus(type, `请求已发送，正在等待首个响应...`);
+            
+            try {
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n');
+                    
+                    for (const line of lines) {
+                        if (!line.trim() || !line.startsWith('data: ')) continue;
+                        
+                        try {
+                            const data = line.substring(6); // 移除 "data: " 前缀
+                            if (data === '[DONE]') continue;
+                            
+                            const parsed = JSON.parse(data);
+                            
+                            if (parsed.choices && parsed.choices.length > 0) {
+                                const delta = parsed.choices[0].delta || {};
+                                if (delta.content) {
+                                    // 记录首个有实际内容的token时间
+                                    if (!firstTokenTime) {
+                                        firstTokenTime = Date.now();
+                                        const firstTokenLatency = (firstTokenTime - requestStartTime) / 1000;
+                                        setStatus(type, `已收到首个token (延迟: ${firstTokenLatency.toFixed(2)}秒)`);
+                                        
+                                        // 实时更新首个token延迟指标
+                                        document.getElementById(`${type}FirstToken`).textContent = `${firstTokenLatency.toFixed(2)}秒`;
+                                    }
+                                    
+                                    appendContent(type, delta.content);
+                                    fullResponse += delta.content;
+                                    
+                                    // 同时更新聊天界面中的回答
+                                    updateChatAnswer(type, delta.content);
+                                }
+                            }
+                        } catch (e) {
+                            console.error('解析错误:', e, line);
+                        }
+                    }
+                }
+                
+                const endTime = Date.now();
+                const totalTime = (endTime - requestStartTime) / 1000;
+                const firstTokenLatency = firstTokenTime ? (firstTokenTime - requestStartTime) / 1000 : 0;
+                
+                // 停止计时器
+                clearInterval(timerInterval);
+                
+                updateMetrics(type, firstTokenLatency, totalTime);
+                setStatus(type, `完成 (总耗时: ${totalTime.toFixed(2)}秒)`);
+                
+                // 隐藏计时器
+                document.getElementById(`${type}ElapsedTime`).style.display = 'none';
+                
+                // 保存结果用于比较
+                results[type] = {
+                    totalTime,
+                    firstTokenLatency,
+                    responseLength: fullResponse.length
+                };
+                
+                // 尝试比较结果
+                compareResults();
+                
+            } catch (error) {
+                console.error(`${type}请求错误:`, error);
+                setStatus(type, `错误: ${error.message}`);
+                
+                // 出错时也停止计时器
+                clearInterval(timerInterval);
+                document.getElementById(`${type}ElapsedTime`).style.display = 'none';
+            } finally {
+                setButtonLoading(`${type}Btn`, false);
+            }
+        }
+        
+        // 更新聊天界面中的回答
+        function updateChatAnswer(type, content) {
+            const chatMessages = document.getElementById('chatMessages');
+            const systemMessage = chatMessages.querySelector('.system-message:last-child');
+            
+            if (systemMessage) {
+                const answerElement = systemMessage.querySelector('.answer-content');
+                
+                // 如果是第一次添加内容，清空占位符
+                if (answerElement.textContent === '请选择使用Go代理或直接调用API来获取回答...') {
+                    answerElement.textContent = '';
+                }
+                
+                answerElement.textContent += content;
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        }
+        
+        // 初始化折叠面板
+        var coll = document.getElementsByClassName("collapsible");
+        for (var i = 0; i < coll.length; i++) {
+            coll[i].addEventListener("click", function() {
+                this.classList.toggle("active");
+                var content = this.nextElementSibling;
+                if (content.style.maxHeight) {
+                    content.style.maxHeight = null;
+                } else {
+                    content.style.maxHeight = content.scrollHeight + "px";
+                }
+            });
+        }
+        
+        // 监听回车键提交查询
+        document.getElementById('query').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                prepareQuery();
+            }
+        });
+    </script>
+</body>
+</html> 

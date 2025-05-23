@@ -1,0 +1,72 @@
+[
+  {
+    "id": "doc_1741012089_0",
+    "filename": "（25社概小课堂）简答论述背诵.docx",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\_25社概小课堂_简答论述背诵_1.docx",
+    "size": 45676,
+    "uploaded_at": "2025-03-03T22:28:09.369085",
+    "type": "docx",
+    "status": "error_processing",
+    "chunks": 0
+  },
+  {
+    "id": "doc_1741012499_1",
+    "filename": "（25社概小课堂）简答论述背诵.docx",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\_25社概小课堂_简答论述背诵_2.docx",
+    "size": 45676,
+    "uploaded_at": "2025-03-03T22:34:59.906222",
+    "type": "docx",
+    "status": "error_processing",
+    "chunks": 0
+  },
+  {
+    "id": "doc_1741012959_2",
+    "filename": "test_document.txt",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\test_document.txt",
+    "size": 182,
+    "uploaded_at": "2025-03-03T22:42:39.180241",
+    "type": "txt",
+    "status": "error_processing",
+    "chunks": 0
+  },
+  {
+    "id": "doc_1741013008_3",
+    "filename": "test_document.txt",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\test_document_1.txt",
+    "size": 182,
+    "uploaded_at": "2025-03-03T22:43:28.218779",
+    "type": "txt",
+    "status": "error_processing",
+    "chunks": 0
+  },
+  {
+    "id": "doc_1741013062_4",
+    "filename": "test_document.txt",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\test_document_2.txt",
+    "size": 182,
+    "uploaded_at": "2025-03-03T22:44:22.103099",
+    "type": "txt",
+    "status": "error_processing",
+    "chunks": 0
+  },
+  {
+    "id": "doc_1741015668_5",
+    "filename": "（25社概小课堂）名词解释.docx",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\_25社概小课堂_名词解释.docx",
+    "size": 20218,
+    "uploaded_at": "2025-03-03T23:27:48.881910",
+    "type": "docx",
+    "status": "error_processing",
+    "chunks": 0
+  },
+  {
+    "id": "doc_1741018234_6",
+    "filename": "（25社概小课堂）简答论述背诵.docx",
+    "path": "H:\\新建文件夹 (9) - 副本 - 副本\\data\\rag_documents\\_25社概小课堂_简答论述背诵_3.docx",
+    "size": 45676,
+    "uploaded_at": "2025-03-04T00:10:34.520176",
+    "type": "docx",
+    "status": "error_processing",
+    "chunks": 0
+  }
+]

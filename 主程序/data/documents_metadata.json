@@ -1,0 +1,12 @@
+[
+  {
+    "id": "doc_1741013904_test",
+    "filename": "test_document.txt",
+    "path": "data\\rag_documents\\test_document.txt",
+    "size": 411,
+    "type": "txt",
+    "status": "pending_processing",
+    "uploaded_at": "2025-03-03T22:58:24.244005",
+    "chunks": 0
+  }
+]

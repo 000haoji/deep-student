@@ -1,0 +1,2580 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek 知识库查询系统</title>
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <!-- 修改Bootstrap Icons引用为本地文件 -->
+    <link rel="stylesheet" href="/static/css/bootstrap-icons.css">
+    <!-- 添加Markdown渲染库 - 改为本地文件 -->
+    <script src="/static/js/marked.min.js"></script>
+    <!-- 添加代码高亮库 - 改为本地文件 -->
+    <link rel="stylesheet" href="/static/css/github.min.css">
+    <script src="/static/js/highlight.min.js"></script>
+    <style>
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        body {
+            background-color: #f8f9fa;
+            font-family: 'Microsoft YaHei', sans-serif;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* Markdown样式 */
+        .system-message {
+            line-height: 1.6;
+        }
+        .system-message h1 {
+            font-size: 1.8rem;
+            margin-top: 1.5rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.3rem;
+            border-bottom: 1px solid #eaecef;
+        }
+        .system-message h2 {
+            font-size: 1.5rem;
+            margin-top: 1.2rem;
+            margin-bottom: 0.8rem;
+            padding-bottom: 0.3rem;
+            border-bottom: 1px solid #eaecef;
+        }
+        .system-message h3 {
+            font-size: 1.3rem;
+            margin-top: 1rem;
+            margin-bottom: 0.6rem;
+        }
+        .system-message h4 {
+            font-size: 1.1rem;
+            margin-top: 0.8rem;
+            margin-bottom: 0.5rem;
+        }
+        .system-message p {
+            margin-bottom: 1rem;
+        }
+        .system-message ul, .system-message ol {
+            margin-top: 0.5rem;
+            margin-bottom: 1rem;
+            padding-left: 2rem;
+        }
+        .system-message li {
+            margin-bottom: 0.3rem;
+        }
+        .system-message blockquote {
+            border-left: 4px solid #dfe2e5;
+            padding-left: 1rem;
+            color: #6a737d;
+            margin: 0.8rem 0;
+            background-color: #f6f8fa;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+        }
+        .system-message pre {
+            background-color: #f6f8fa;
+            border-radius: 6px;
+            padding: 1rem;
+            overflow: auto;
+            margin: 0.8rem 0;
+        }
+        .system-message code {
+            background-color: rgba(175, 184, 193, 0.2);
+            padding: 0.2em 0.4em;
+            border-radius: 3px;
+            font-family: Consolas, Monaco, 'Andale Mono', monospace;
+            font-size: 0.9em;
+        }
+        .system-message pre code {
+            background-color: transparent;
+            padding: 0;
+            border-radius: 0;
+            font-size: 0.9em;
+            display: block;
+            overflow-x: auto;
+        }
+        .system-message table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        .system-message table th, .system-message table td {
+            border: 1px solid #dfe2e5;
+            padding: 0.5rem 1rem;
+            text-align: left;
+        }
+        .system-message table th {
+            background-color: #f6f8fa;
+            font-weight: 600;
+        }
+        .system-message table tr:nth-child(even) {
+            background-color: #f6f8fa;
+        }
+        .system-message img {
+            max-width: 100%;
+            display: block;
+            margin: 1rem auto;
+        }
+        .system-message a {
+            color: #0366d6;
+            text-decoration: none;
+        }
+        .system-message a:hover {
+            text-decoration: underline;
+        }
+        
+        .system-message h5,
+        .system-message h6 {
+            margin-top: 1.5em;
+            margin-bottom: 0.75em;
+            font-weight: 600;
+            line-height: 1.25;
+        }
+        
+        .system-message h5 {
+            font-size: 1.3em;
+        }
+        
+        .system-message h6 {
+            font-size: 1.1em;
+        }
+        
+        .system-message p, 
+        .system-message ul, 
+        .system-message ol {
+            margin-bottom: 1em;
+        }
+        
+        .system-message hr {
+            height: 0.25em;
+            padding: 0;
+            margin: 24px 0;
+            background-color: #e1e4e8;
+            border: 0;
+        }
+        
+        .container {
+            max-width: 1000px;
+            margin: 20px auto;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            height: calc(100vh - 40px); /* 减去上下margin */
+        }
+        .card {
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .card-body {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            padding: 1.25rem;
+        }
+        .nav-tabs .nav-item .nav-link {
+            color: #495057;
+        }
+        .nav-tabs .nav-item .nav-link.active {
+            font-weight: bold;
+        }
+        .query-box, .result-box {
+            border-radius: 10px;
+            padding: 15px 20px;
+            margin-bottom: 15px;
+            background-color: #fff;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            display: none;
+        }
+        .chat-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            position: relative;
+        }
+        .user-message, .system-message {
+            margin-bottom: 20px;
+            max-width: 85%;
+            word-wrap: break-word;
+        }
+        .user-message {
+            background-color: #007bff;
+            color: white;
+            padding: 12px 18px;
+            border-radius: 18px 18px 0 18px;
+            margin-left: auto;
+            align-self: flex-end;
+            font-size: 15px;
+            line-height: 1.5;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        }
+        .system-message {
+            background-color: #f0f2f5;
+            padding: 12px 18px;
+            border-radius: 18px 18px 18px 0;
+            margin-right: auto;
+            align-self: flex-start;
+            font-size: 15px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
+        }
+
+        /* 更新Markdown在系统消息中的样式 */
+        .system-message .answer-content code {
+            background-color: rgba(0, 0, 0, 0.06);
+            color: #333;
+        }
+        .system-message .answer-content pre {
+            margin: 10px 0;
+        }
+        
+        .system-message .answer-content a {
+            color: #0366d6;
+            text-decoration: none;
+        }
+        
+        .system-message .answer-content a:hover {
+            text-decoration: underline;
+        }
+        
+        .system-message .sources {
+            font-size: 0.9em;
+            border-top: 1px solid #e1e4e8;
+            padding-top: 10px;
+            margin-top: 15px;
+        }
+        .context-box {
+            background-color: #f1f3f5;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9rem;
+        }
+        .drop-zone {
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            padding: 25px;
+            text-align: center;
+            transition: all 0.3s;
+            background-color: #f8f9fa;
+            margin-bottom: 15px;
+            min-height: 150px;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            overflow: auto;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            background-color: #e9ecef;
+            border-color: #adb5bd;
+        }
+        .drop-zone-prompt {
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+            color: #6c757d;
+        }
+        .file-input {
+            display: none;
+        }
+        .browse-btn {
+            display: inline-block;
+            padding: 6px 12px;
+            background-color: #007bff;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 10px;
+        }
+        .file-info {
+            margin-top: 15px;
+            width: 100%;
+            word-break: break-word;
+            overflow-wrap: break-word;
+        }
+        .document-preview {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: #f1f3f5;
+            border-radius: 5px;
+            display: none;
+            max-height: 200px;
+            overflow: auto;
+            width: 100%;
+            text-align: left;
+            font-size: 0.9rem;
+        }
+        #documentsList {
+            list-style-type: none;
+            padding-left: 0;
+            overflow-y: auto;
+            max-height: calc(100% - 60px);
+        }
+        #documentsList li {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            padding: 10px;
+            border-bottom: 1px solid #dee2e6;
+            transition: background-color 0.2s ease;
+            border-radius: 4px;
+            margin-bottom: 4px;
+        }
+        #documentsList li:hover {
+            background-color: #f8f9fa;
+        }
+        .delete-btn {
+            background-color: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 5px 10px;
+            font-size: 0.85rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            opacity: 0.9;
+            margin-left: 10px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .delete-btn:hover {
+            opacity: 1;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+        }
+        .delete-btn:active {
+            transform: translateY(0px);
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+        }
+        .document-meta {
+            font-size: 0.85rem;
+            color: #6c757d;
+            margin-top: 4px;
+            line-height: 1.4;
+        }
+        .doc-title {
+            font-size: 1rem;
+            margin-bottom: 3px;
+        }
+        .preview-text {
+            max-height: 60px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+        }
+        .badge {
+            font-weight: normal;
+        }
+        .source {
+            margin-bottom: 10px;
+            padding: 10px;
+            background-color: #f1f3f5;
+            border-radius: 5px;
+        }
+        .source h4 {
+            font-size: 1rem;
+            margin-bottom: 5px;
+        }
+        .tab-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .tab-pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        .tab-pane.active {
+            display: flex !important;
+        }
+        .input-group {
+            margin-top: auto;
+            flex-shrink: 0;
+        }
+        h1 {
+            flex-shrink: 0;
+        }
+        .nav-tabs {
+            flex-shrink: 0;
+        }
+        
+        /* 增强的Markdown样式 */
+        .system-message table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+            overflow-x: auto;
+            display: block;
+        }
+
+        .system-message table th {
+            background-color: #f0f2f5;
+            color: #333;
+            font-weight: bold;
+            padding: 10px;
+            text-align: left;
+            border: 1px solid #ddd;
+        }
+
+        .system-message table td {
+            padding: 10px;
+            border: 1px solid #ddd;
+            vertical-align: top;
+        }
+
+        .system-message table tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+
+        .system-message table tr:hover {
+            background-color: #f0f0f0;
+        }
+
+        .system-message pre {
+            background-color: #282c34;
+            color: #abb2bf;
+            border-radius: 6px;
+            padding: 15px;
+            overflow-x: auto;
+            margin: 15px 0;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        .system-message code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            padding: 2px 5px;
+            border-radius: 3px;
+            background-color: rgba(0, 0, 0, 0.05);
+            color: #e83e8c;
+            font-size: 0.9em;
+        }
+
+        .system-message pre code {
+            background-color: transparent;
+            color: inherit;
+            padding: 0;
+            border-radius: 0;
+            font-size: 14px;
+        }
+
+        /* 列表样式优化 */
+        .system-message ul, 
+        .system-message ol {
+            padding-left: 25px;
+            margin: 12px 0;
+        }
+
+        .system-message li {
+            margin-bottom: 8px;
+        }
+
+        /* 引用块样式美化 */
+        .system-message blockquote {
+            border-left: 4px solid #007bff;
+            padding: 10px 15px;
+            margin: 15px 0;
+            background-color: #f8f9fa;
+            color: #6c757d;
+            font-style: italic;
+        }
+
+        /* 图片响应式处理 */
+        .system-message img {
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 15px auto;
+            border-radius: 5px;
+        }
+
+        .source-link {
+            color: #007bff;
+            text-decoration: none;
+        }
+        
+        /* 确认对话框样式 */
+        .confirm-dialog-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+        }
+        
+        .confirm-dialog-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+        
+        .confirm-dialog {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            width: 90%;
+            max-width: 500px;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+            transform: translateY(-20px);
+            transition: transform 0.3s;
+        }
+        
+        .confirm-dialog-overlay.active .confirm-dialog {
+            transform: translateY(0);
+        }
+        
+        .confirm-dialog-title {
+            font-size: 1.25rem;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #dc3545;
+        }
+        
+        .confirm-dialog-content {
+            margin-bottom: 20px;
+            color: #212529;
+        }
+        
+        .confirm-dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+        
+        .confirm-dialog-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+        
+        .confirm-dialog-btn-cancel {
+            background-color: #6c757d;
+            color: white;
+        }
+        
+        .confirm-dialog-btn-cancel:hover {
+            background-color: #5a6268;
+        }
+        
+        .confirm-dialog-btn-confirm {
+            background-color: #dc3545;
+            color: white;
+        }
+        
+        .confirm-dialog-btn-confirm:hover {
+            background-color: #c82333;
+        }
+
+        /* Toast容器样式 */
+        #toast-container {
+            z-index: 1060;
+        }
+        
+        /* 刷新按钮旋转动画样式 */
+        .spin {
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* 上传文档页面样式优化 */
+        .upload-controls-area {
+            position: sticky;
+            bottom: 0;
+            background-color: #fff;
+            padding-top: 10px;
+            border-top: 1px solid #f0f0f0;
+            z-index: 10;
+        }
+        
+        .flex-grow-1 {
+            flex-grow: 1;
+        }
+        
+        .overflow-auto {
+            overflow: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="text-center mb-4">DeepSeek 知识库查询系统</h1>
+        
+        <ul class="nav nav-tabs mb-4" id="myTab" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="search-tab" data-bs-toggle="tab" data-bs-target="#search" type="button" role="tab" aria-controls="search" aria-selected="true">知识库查询</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="upload-tab" data-bs-toggle="tab" data-bs-target="#upload" type="button" role="tab" aria-controls="upload" aria-selected="false">上传文档</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="documents-tab" data-bs-toggle="tab" data-bs-target="#documents" type="button" role="tab" aria-controls="documents" aria-selected="false">文档管理</button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="system-tab" data-bs-toggle="tab" data-bs-target="#system" type="button" role="tab" aria-controls="system" aria-selected="false">
+                    <i class="bi bi-gear me-1"></i>系统管理
+                </button>
+            </li>
+        </ul>
+        
+        <div class="tab-content" id="myTabContent">
+            <!-- 查询标签页 -->
+            <div class="tab-pane fade show active" id="search" role="tabpanel" aria-labelledby="search-tab">
+                <div class="chat-container">
+                    <div class="chat-messages" id="chatMessages">
+                        <!-- 消息会动态添加到这里 -->
+                    </div>
+                    
+                    <div class="loading" id="loadingIndicator">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">加载中...</span>
+                        </div>
+                        <div class="mt-2">正在处理您的查询...</div>
+                    </div>
+                    
+                    <div class="input-group">
+                        <!-- 添加文档库选择下拉框 -->
+                        <select class="form-select" id="librarySelect" style="max-width: 150px;">
+                            <option value="all" selected>所有文档库</option>
+                            <option value="default">默认库</option>
+                            <!-- 其他文档库选项将动态添加 -->
+                        </select>
+                        <input type="text" class="form-control" id="queryInput" placeholder="输入您的问题...">
+                        <button class="btn btn-primary" type="button" id="sendButton">发送</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 上传文档标签页 -->
+            <div class="tab-pane fade" id="upload" role="tabpanel" aria-labelledby="upload-tab">
+                <div class="card">
+                    <div class="card-body d-flex flex-column">
+                        <h5 class="card-title">上传文档到知识库</h5>
+                        <div class="alert alert-info">
+                            支持的文件类型: TXT, MD, PDF, DOC, DOCX
+                        </div>
+                        
+                        <div class="flex-grow-1 overflow-auto">
+                            <div class="drop-zone" id="dropZone">
+                                <div class="drop-zone-prompt">拖放文件到这里上传</div>
+                                <span class="browse-btn">浏览文件</span>
+                                <input type="file" class="file-input" id="fileInput" accept=".txt,.md,.pdf,.doc,.docx">
+                                <div class="file-info" id="fileInfo"></div>
+                                <div class="document-preview" id="documentPreview"></div>
+                            </div>
+                        </div>
+                        
+                        <!-- 底部固定区域 -->
+                        <div class="upload-controls-area">
+                            <!-- 添加文档库选择 -->
+                            <div class="mb-3">
+                                <label for="uploadLibrarySelect" class="form-label">选择目标文档库</label>
+                                <select class="form-select" id="uploadLibrarySelect">
+                                    <option value="default" selected>默认库</option>
+                                    <!-- 其他文档库选项将动态添加 -->
+                                </select>
+                            </div>
+                            
+                            <button type="button" class="btn btn-success w-100" id="uploadButton" disabled>上传到知识库</button>
+                            
+                            <div class="alert alert-success mt-3 d-none" id="uploadSuccess"></div>
+                            <div class="alert alert-danger mt-3 d-none" id="uploadError"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 手动输入文档卡片 - 已弃用，设置为不显示 -->
+                <div class="card mt-4" style="display: none;">
+                    <div class="card-body">
+                        <h5 class="card-title">手动输入文档</h5>
+                        <div class="mb-3">
+                            <label for="documentText" class="form-label">文档内容</label>
+                            <textarea class="form-control" id="documentText" rows="10" placeholder="请输入文档内容..."></textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label for="documentTitle" class="form-label">文档标题</label>
+                            <input type="text" class="form-control" id="documentTitle" placeholder="给文档起个标题">
+                        </div>
+                        <div class="mb-3">
+                            <label for="documentSource" class="form-label">文档来源</label>
+                            <input type="text" class="form-control" id="documentSource" placeholder="文档来源（可选）">
+                        </div>
+                        <!-- 添加文档库选择 -->
+                        <div class="mb-3">
+                            <label for="textUploadLibrarySelect" class="form-label">选择目标文档库</label>
+                            <select class="form-select" id="textUploadLibrarySelect">
+                                <option value="default" selected>默认库</option>
+                                <!-- 其他文档库选项将动态添加 -->
+                            </select>
+                        </div>
+                        <button type="button" class="btn btn-success" id="textUploadButton">上传到知识库</button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 文档管理标签页 -->
+            <div class="tab-pane fade" id="documents" role="tabpanel" aria-labelledby="documents-tab">
+                <div class="card">
+                    <div class="card-body p-0">
+                        <div class="d-flex justify-content-between align-items-center mb-3 px-3 pt-3">
+                            <h5 class="card-title mb-0 d-flex align-items-center">
+                                <i class="bi bi-file-earmark-text me-2"></i>
+                                文档管理
+                            </h5>
+                            <div class="d-flex align-items-center">
+                                <div class="me-2 d-flex align-items-center">
+                                    <select class="form-select form-select-sm" id="documentFilterLibrary">
+                                        <option value="all">全部文档库</option>
+                                    </select>
+                                    <button class="btn btn-sm btn-outline-primary ms-2" id="createLibraryBtn" title="创建新文档库">
+                                        <i class="bi bi-plus-circle"></i>
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger ms-2" id="deleteLibraryBtn" disabled title="删除当前选中的文档库">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                    <div class="spinner-border spinner-border-sm text-primary" role="status" id="libraryLoading" style="display: none;">
+                                        <span class="visually-hidden">加载中...</span>
+                                    </div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-primary" id="refreshDocuments">
+                                    <i class="bi bi-arrow-clockwise"></i> 刷新
+                                </button>
+                            </div>
+                        </div>
+                        <div id="documentsLoading" class="loading">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">加载中...</span>
+                            </div>
+                            <p class="mt-2">加载文档中...</p>
+                        </div>
+                        <ul id="documentsList" class="list-unstyled px-3 pb-3"></ul>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 系统管理标签页 -->
+            <div class="tab-pane fade" id="system" role="tabpanel" aria-labelledby="system-tab">
+                <!-- 系统管理内容 -->
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title mb-4">
+                            <i class="bi bi-gear-fill me-2"></i>系统管理
+                        </h5>
+                        
+                        <!-- 备份和恢复功能卡片 -->
+                        <div class="mb-4">
+                            <h6 class="card-subtitle mb-3">数据备份与恢复</h6>
+                            
+                            <!-- 创建备份按钮 -->
+                            <div class="mb-3">
+                                <button id="createBackupBtn" class="btn btn-primary">
+                                    <i class="bi bi-download me-1"></i>创建备份
+                                </button>
+                                <div class="spinner-border spinner-border-sm text-primary ms-2" role="status" id="backupLoading" style="display: none;">
+                                    <span class="visually-hidden">备份中...</span>
+                                </div>
+                            </div>
+                            
+                            <!-- 备份列表 -->
+                            <div class="mb-3">
+                                <h6>可用备份</h6>
+                                <div class="table-responsive">
+                                    <table class="table table-hover">
+                                        <thead>
+                                            <tr>
+                                                <th>备份ID</th>
+                                                <th>创建时间</th>
+                                                <th>大小</th>
+                                                <th>操作</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="backupsList">
+                                            <tr>
+                                                <td colspan="4" class="text-center">加载备份列表中...</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                                <button id="refreshBackupsBtn" class="btn btn-outline-secondary btn-sm">
+                                    <i class="bi bi-arrow-clockwise me-1"></i>刷新列表
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 删除确认对话框 -->
+    <div id="deleteConfirmDialog" class="confirm-dialog-overlay">
+        <div class="confirm-dialog">
+            <div class="confirm-dialog-title">确认删除</div>
+            <div class="confirm-dialog-content">您确定要删除这个文档吗？此操作无法撤销。</div>
+            <div class="confirm-dialog-actions">
+                <button id="cancelDeleteBtn" class="confirm-dialog-btn confirm-dialog-btn-cancel">取消</button>
+                <button id="confirmDeleteBtn" class="confirm-dialog-btn confirm-dialog-btn-confirm">删除</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 删除文档库对话框 -->
+    <div id="deleteLibraryDialog" class="confirm-dialog-overlay">
+        <div class="confirm-dialog">
+            <div class="confirm-dialog-title">确认删除文档库</div>
+            <div class="confirm-dialog-content">您确定要删除这个文档库吗？此操作将删除该库中的所有文档，且无法恢复。</div>
+            <div class="confirm-dialog-actions">
+                <button id="cancelDeleteLibraryBtn" class="confirm-dialog-btn confirm-dialog-btn-cancel">取消</button>
+                <button id="confirmDeleteLibraryBtn" class="confirm-dialog-btn confirm-dialog-btn-confirm">删除</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 创建文档库对话框 -->
+    <div id="createLibraryDialog" class="confirm-dialog-overlay">
+        <div class="confirm-dialog">
+            <div class="confirm-dialog-title">创建新文档库</div>
+            <div class="confirm-dialog-content">
+                <div class="mb-3">
+                    <label for="newLibraryId" class="form-label">文档库ID</label>
+                    <input type="text" class="form-control" id="newLibraryId" placeholder="仅允许字母、数字、下划线和连字符">
+                    <div class="form-text">ID将用于API调用，不能修改</div>
+                </div>
+                <div class="mb-3">
+                    <label for="newLibraryName" class="form-label">文档库名称</label>
+                    <input type="text" class="form-control" id="newLibraryName" placeholder="显示用的名称">
+                </div>
+            </div>
+            <div class="confirm-dialog-actions">
+                <button id="cancelCreateLibraryBtn" class="confirm-dialog-btn confirm-dialog-btn-cancel">取消</button>
+                <button id="confirmCreateLibraryBtn" class="confirm-dialog-btn confirm-dialog-btn-confirm">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 恢复备份确认对话框 -->
+    <div id="restoreBackupDialog" class="confirm-dialog-overlay">
+        <div class="confirm-dialog">
+            <div class="confirm-dialog-title">确认恢复备份</div>
+            <div class="confirm-dialog-content">您确定要恢复此备份吗？当前的所有数据将被替换，此操作无法撤销。</div>
+            <div class="confirm-dialog-actions">
+                <button id="cancelRestoreBtn" class="confirm-dialog-btn confirm-dialog-btn-cancel">取消</button>
+                <button id="confirmRestoreBtn" class="confirm-dialog-btn confirm-dialog-btn-confirm">恢复</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
+    <script src="/static/js/backup-restore.js"></script>
+    <script>
+        // 加载文档函数 - 将函数赋值给全局变量
+        let loadDocuments;
+        let loadLibraries;
+        
+        // 全局变量：当前选中的文档库ID
+        let currentLibraryId = null;
+        
+        // 显示删除文档库确认对话框
+        function showDeleteLibraryDialog(libraryId) {
+            currentLibraryId = libraryId;
+            const deleteLibraryDialog = document.getElementById('deleteLibraryDialog');
+            if (deleteLibraryDialog) {
+                deleteLibraryDialog.classList.add('active');
+                // 设置焦点到取消按钮（更安全的默认选项）
+                document.getElementById('cancelDeleteLibraryBtn').focus();
+            }
+        }
+        
+        // 隐藏删除文档库确认对话框
+        function hideDeleteLibraryDialog() {
+            const deleteLibraryDialog = document.getElementById('deleteLibraryDialog');
+            if (deleteLibraryDialog) {
+                deleteLibraryDialog.classList.remove('active');
+                currentLibraryId = null;
+            }
+        }
+        
+        // 显示创建文档库对话框
+        function showCreateLibraryDialog() {
+            const createLibraryDialog = document.getElementById('createLibraryDialog');
+            if (createLibraryDialog) {
+                // 清空输入框
+                document.getElementById('newLibraryId').value = '';
+                document.getElementById('newLibraryName').value = '';
+                
+                // 显示对话框
+                createLibraryDialog.classList.add('active');
+                
+                // 设置焦点到ID输入框
+                document.getElementById('newLibraryId').focus();
+            }
+        }
+        
+        // 隐藏创建文档库对话框
+        function hideCreateLibraryDialog() {
+            const createLibraryDialog = document.getElementById('createLibraryDialog');
+            if (createLibraryDialog) {
+                createLibraryDialog.classList.remove('active');
+            }
+        }
+        
+        // 执行创建文档库
+        async function performLibraryCreate() {
+            const libraryId = document.getElementById('newLibraryId').value.trim();
+            const libraryName = document.getElementById('newLibraryName').value.trim();
+            
+            if (!libraryId) {
+                showToast('error', '文档库ID不能为空');
+                return;
+            }
+            
+            // 检查ID是否合法（只允许字母、数字、下划线和连字符）
+            if (!/^[a-zA-Z0-9_-]+$/.test(libraryId)) {
+                showToast('error', '文档库ID只能包含字母、数字、下划线和连字符');
+                return;
+            }
+            
+            try {
+                // 显示加载状态
+                const confirmCreateBtn = document.getElementById('confirmCreateLibraryBtn');
+                const originalText = confirmCreateBtn.textContent;
+                confirmCreateBtn.disabled = true;
+                confirmCreateBtn.textContent = '创建中...';
+                
+                const response = await fetch('/libraries', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        library_id: libraryId,
+                        library_name: libraryName
+                    })
+                });
+                
+                const result = await response.json();
+                
+                // 恢复按钮状态
+                confirmCreateBtn.disabled = false;
+                confirmCreateBtn.textContent = originalText;
+                
+                if (response.ok && result.success) {
+                    hideCreateLibraryDialog();
+                    showToast('success', result.message || '文档库创建成功');
+                    
+                    // 重新加载文档库列表
+                    if (typeof loadLibraries === 'function') {
+                        loadLibraries();
+                    } else {
+                        setTimeout(() => {
+                            location.reload();
+                        }, 1000);
+                    }
+                } else {
+                    showToast('error', result.error || '创建文档库失败');
+                }
+            } catch (error) {
+                console.error('创建文档库出错:', error);
+                showToast('error', '创建文档库时发生错误');
+                
+                // 恢复按钮状态
+                const confirmCreateBtn = document.getElementById('confirmCreateLibraryBtn');
+                confirmCreateBtn.disabled = false;
+                confirmCreateBtn.textContent = '创建';
+            }
+        }
+        
+        // 执行文档库删除
+        async function performLibraryDelete() {
+            if (!currentLibraryId) return;
+            
+            try {
+                const response = await fetch(`/libraries/${currentLibraryId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (response.ok) {
+                    hideDeleteLibraryDialog();
+                    // 显示成功消息
+                    showToast('success', '文档库删除成功');
+                    
+                    // 切换到"全部"选项
+                    const filterSelect = document.getElementById('documentFilterLibrary');
+                    if (filterSelect) {
+                        filterSelect.value = 'all';
+                    }
+                    
+                    // 重新加载文档库列表和文档
+                    try {
+                        console.log("文档库删除后更新列表");
+                        // 检查loadLibraries是否已定义
+                        if (typeof loadLibraries === 'function') {
+                            loadLibraries();
+                        } else {
+                            console.error("loadLibraries函数未定义");
+                            setTimeout(() => {
+                                location.reload();
+                            }, 1000);
+                            return;
+                        }
+                        
+                        if (typeof loadDocuments === 'function') {
+                            loadDocuments();
+                        } else {
+                            console.error("loadDocuments函数未定义");
+                            setTimeout(() => {
+                                location.reload();
+                            }, 1000);
+                        }
+                    } catch (error) {
+                        console.error("更新文档库列表失败:", error);
+                        setTimeout(() => {
+                            location.reload();
+                        }, 1000);
+                    }
+                } else {
+                    const result = await response.json();
+                    hideDeleteLibraryDialog();
+                    showToast('error', `删除失败: ${result.error || '未知错误'}`);
+                }
+            } catch (error) {
+                console.error("删除文档库出错:", error);
+                hideDeleteLibraryDialog();
+                showToast('error', '删除文档库时发生错误');
+            }
+        }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+            // 查询相关元素
+            const queryInput = document.getElementById('queryInput');
+            const sendButton = document.getElementById('sendButton');
+            const chatMessages = document.getElementById('chatMessages');
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            
+            // 用户滚动标志
+            let userHasScrolled = false;
+            
+            // 监听用户滚动事件
+            chatMessages.addEventListener('scroll', function() {
+                userHasScrolled = true;
+                
+                // 如果用户滚动到底部，重置标志
+                if (isUserAtBottom(chatMessages)) {
+                    userHasScrolled = false;
+                }
+            });
+            
+            // 添加发送按钮的点击事件监听器
+            sendButton.addEventListener('click', sendQuery);
+            
+            // 添加输入框的回车键事件监听器
+            queryInput.addEventListener('keypress', function(e) {
+                if (e.key === 'Enter') {
+                    e.preventDefault();
+                    sendQuery();
+                }
+            });
+            
+            // 文件上传相关元素
+            const dropZone = document.getElementById('dropZone');
+            const fileInput = document.getElementById('fileInput');
+            const fileInfo = document.getElementById('fileInfo');
+            const documentPreview = document.getElementById('documentPreview');
+            const uploadButton = document.getElementById('uploadButton');
+            const uploadSuccess = document.getElementById('uploadSuccess');
+            const uploadError = document.getElementById('uploadError');
+            
+            // 手动输入文档相关元素
+            const documentText = document.getElementById('documentText');
+            const documentTitle = document.getElementById('documentTitle');
+            const documentSource = document.getElementById('documentSource');
+            const textUploadButton = document.getElementById('textUploadButton');
+            
+            // 文档列表相关元素
+            const documentsList = document.getElementById('documentsList');
+            const documentsLoading = document.getElementById('documentsLoading');
+            const refreshDocuments = document.getElementById('refreshDocuments');
+            
+            // 加载文档列表 - 将函数赋值给全局变量
+            loadDocuments = async function() {
+                console.log("加载文档列表...");
+                const documentsList = document.getElementById('documentsList');
+                const documentsLoading = document.getElementById('documentsLoading');
+                
+                if (!documentsList || !documentsLoading) {
+                    console.error("无法找到文档列表元素");
+                    return Promise.reject(new Error("无法找到文档列表元素"));
+                }
+                
+                // 清空文档列表，确保不会重复显示
+                documentsList.innerHTML = '';
+                documentsLoading.style.display = 'block';
+                
+                try {
+                    console.log("发送API请求获取文档列表");
+                    const response = await fetch('/documents');
+                    const data = await response.json();
+                    
+                    documentsLoading.style.display = 'none';
+                    
+                    if (response.ok && data.success) {
+                        console.log(`API返回 ${data.documents.length} 个文档`);
+                        
+                        if (data.documents.length === 0) {
+                            documentsList.innerHTML = '<li class="text-center py-3">暂无文档</li>';
+                            return Promise.resolve();
+                        }
+                        
+                        // 获取文档库筛选值
+                        const filterSelect = document.getElementById('documentFilterLibrary');
+                        const libraryFilter = filterSelect ? filterSelect.value : 'all';
+                        console.log(`当前筛选库: ${libraryFilter}`);
+                        
+                        // 筛选文档
+                        let filteredDocs = data.documents;
+                        if (libraryFilter !== 'all') {
+                            filteredDocs = data.documents.filter(doc => doc.library_id === libraryFilter);
+                            console.log(`筛选后剩余 ${filteredDocs.length} 个文档`);
+                        }
+                        
+                        if (filteredDocs.length === 0) {
+                            documentsList.innerHTML = '<li class="text-center py-3">该文档库中暂无文档</li>';
+                            return Promise.resolve();
+                        }
+                        
+                        // 记录已添加的文档ID，防止重复添加
+                        const addedDocIds = new Set();
+                        
+                        // 先对文档进行排序，确保显示顺序一致
+                        filteredDocs.sort((a, b) => {
+                            // 按ID排序，确保稳定性
+                            return a.id.localeCompare(b.id);
+                        });
+                        
+                        // 渲染文档列表
+                        filteredDocs.forEach(doc => {
+                            // 如果文档ID已经添加过，则跳过
+                            if (addedDocIds.has(doc.id)) {
+                                console.log(`跳过重复文档: ${doc.id}`);
+                                return;
+                            }
+                            
+                            // 记录已添加的文档ID
+                            addedDocIds.add(doc.id);
+                            
+                            const li = document.createElement('li');
+                            li.classList.add('py-2', 'px-2', 'mb-2', 'border-bottom');
+                            li.dataset.docId = doc.id; // 添加数据属性，方便后续操作
+                            
+                            // 创建文档信息
+                            const docInfo = document.createElement('div');
+                            docInfo.className = 'doc-info';
+                            docInfo.style.flex = '1';
+                            
+                            const title = doc.title || doc.filename || '未命名文档';
+                            const fileType = doc.file_type || '未知类型';
+                            const libId = doc.library_id || 'default';
+                            const fragmentCount = doc.fragment_count || 0;
+                            
+                            docInfo.innerHTML = `
+                                <div class="doc-title"><strong>${title}</strong></div>
+                                <div class="document-meta">
+                                    <span class="badge bg-light text-dark me-2">${fileType}</span>
+                                    <span class="badge bg-info text-white me-2">库: ${libId}</span>
+                                    <span class="badge bg-secondary text-white">ID: ${doc.id.substring(0, 8)}...</span>
+                                    <span class="badge bg-primary text-white">分段: ${fragmentCount}</span>
+                                </div>
+                            `;
+                            
+                            // 创建删除按钮
+                            const deleteBtn = document.createElement('button');
+                            deleteBtn.className = 'btn btn-danger btn-sm';
+                            deleteBtn.innerHTML = '<i class="bi bi-trash"></i> 删除';
+                            deleteBtn.dataset.id = doc.id;
+                            deleteBtn.addEventListener('click', deleteDocument);
+                            
+                            li.appendChild(docInfo);
+                            li.appendChild(deleteBtn);
+                            documentsList.appendChild(li);
+                        });
+                        
+                        console.log(`文档列表加载完成，显示了 ${addedDocIds.size} 个文档`);
+                        return Promise.resolve();
+                    } else {
+                        documentsList.innerHTML = `<li class="text-center py-3 text-danger">加载失败: ${data.error || '未知错误'}</li>`;
+                        return Promise.reject(new Error(data.error || '未知错误'));
+                    }
+                } catch (error) {
+                    documentsLoading.style.display = 'none';
+                    documentsList.innerHTML = `<li class="text-center py-3 text-danger">加载失败: ${error.message}</li>`;
+                    console.error("加载文档列表出错:", error);
+                    return Promise.reject(error);
+                }
+            }
+            
+            // 文档库相关功能 - 将函数赋值给全局变量
+            loadLibraries = async function() {
+                console.log("加载文档库列表...");
+                const librarySelect = document.getElementById('documentFilterLibrary');
+                const libraryLoading = document.getElementById('libraryLoading');
+                
+                if (!librarySelect || !libraryLoading) {
+                    console.error("无法找到文档库筛选元素");
+                    return Promise.reject(new Error("无法找到文档库筛选元素"));
+                }
+                
+                libraryLoading.style.display = 'block';
+                
+                try {
+                    console.log("发送API请求获取文档库列表");
+                    const response = await fetch('/libraries');
+                    const data = await response.json();
+                    
+                    libraryLoading.style.display = 'none';
+                    
+                    if (response.ok && data.success) {
+                        console.log(`API返回 ${data.libraries.length} 个文档库`);
+                        
+                        // 保存当前选中的值
+                        const currentValue = librarySelect.value;
+                        
+                        // 清空选项
+                        librarySelect.innerHTML = '';
+                        
+                        // 添加"全部"选项
+                        const allOption = document.createElement('option');
+                        allOption.value = 'all';
+                        allOption.textContent = '全部文档库';
+                        librarySelect.appendChild(allOption);
+                        
+                        // 添加文档库选项
+                        data.libraries.forEach(library => {
+                            const option = document.createElement('option');
+                            option.value = library.id;
+                            option.textContent = `${library.name} (${library.document_count})`;
+                            librarySelect.appendChild(option);
+                        });
+                        
+                        // 恢复选中的值
+                        if (currentValue && [...librarySelect.options].some(opt => opt.value === currentValue)) {
+                            librarySelect.value = currentValue;
+                        } else {
+                            librarySelect.value = 'all';
+                        }
+                        
+                        // 更新文档库管理列表
+                        updateLibraryManagementList(data.libraries);
+                        
+                        console.log("文档库列表加载完成");
+                        return Promise.resolve();
+                    } else {
+                        console.error("加载文档库列表失败:", data.error || '未知错误');
+                        return Promise.reject(new Error(data.error || '未知错误'));
+                    }
+                } catch (error) {
+                    libraryLoading.style.display = 'none';
+                    console.error("加载文档库列表出错:", error);
+                    return Promise.reject(error);
+                }
+            }
+            
+            // 查询处理
+            async function sendQuery() {
+                const queryText = queryInput.value.trim();
+                if (!queryText) return;
+                
+                // 获取选择的文档库ID
+                const libraryId = document.getElementById('librarySelect').value;
+                
+                // 清空输入框
+                queryInput.value = '';
+                
+                // 添加用户消息
+                const userMessageContainer = document.createElement('div');
+                userMessageContainer.className = 'message-container user-container';
+                
+                const userMessage = document.createElement('div');
+                userMessage.className = 'user-message';
+                userMessage.textContent = queryText;
+                
+                userMessageContainer.appendChild(userMessage);
+                chatMessages.appendChild(userMessageContainer);
+                
+                // 添加系统消息容器
+                const systemMessageContainer = document.createElement('div');
+                systemMessageContainer.className = 'message-container system-container';
+                
+                const systemMessage = document.createElement('div');
+                systemMessage.className = 'system-message';
+                
+                // 创建回答内容元素
+                const answerContent = document.createElement('div');
+                answerContent.className = 'answer-content';
+                // 设置初始Markdown内容属性
+                answerContent.dataset.markdownContent = '';
+                
+                systemMessage.appendChild(answerContent);
+                systemMessageContainer.appendChild(systemMessage);
+                chatMessages.appendChild(systemMessageContainer);
+                
+                // 滚动到底部确保最新内容可见
+                if (!userHasScrolled) {
+                smoothScrollToBottom(chatMessages);
+                }
+                
+                // 显示加载指示器
+                loadingIndicator.classList.remove('d-none');
+                
+                // 尝试使用流式API
+                try {
+                    const response = await fetch('/query/stream', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            query: queryText,
+                            library_id: libraryId // 添加文档库ID参数
+                        })
+                    });
+                    
+                    if (response.ok) {
+                        // 处理流式响应
+                        handleStreamResponse(response, answerContent);
+                    } else {
+                        // 如果流式API失败，回退到普通API
+                        fallbackToRegularAPI(queryText, libraryId, answerContent);
+                    }
+                } catch (error) {
+                    // 处理网络错误，回退到普通API
+                    console.error("流式API请求失败:", error);
+                    fallbackToRegularAPI(queryText, libraryId, answerContent);
+                }
+            }
+            
+            // 回退到普通API
+            async function fallbackToRegularAPI(queryText, libraryId, answerElement) {
+                try {
+                    const response = await fetch('/query', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            query: queryText,
+                            library_id: libraryId // 添加文档库ID参数
+                        })
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.success) {
+                        answerElement.textContent = result.answer || '没有找到答案';
+                        loadingIndicator.classList.add('d-none');
+                    } else {
+                        console.error('普通API请求失败:', response.statusText);
+                        answerElement.textContent = '查询失败，请稍后再试';
+                        loadingIndicator.classList.add('d-none');
+                    }
+                } catch (error) {
+                    console.error('普通API请求失败:', error);
+                    answerElement.textContent = '查询失败，请稍后再试';
+                    loadingIndicator.classList.add('d-none');
+                }
+            }
+            
+            // 文件拖放处理
+            ['dragover', 'dragenter'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    dropZone.classList.add('dragover');
+                });
+            });
+            
+            ['dragleave', 'dragend', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    dropZone.classList.remove('dragover');
+                });
+            });
+            
+            dropZone.addEventListener('drop', (e) => {
+                e.preventDefault();
+                if (e.dataTransfer.files.length) {
+                    fileInput.files = e.dataTransfer.files;
+                    updateFileInfo();
+                }
+            });
+            
+            dropZone.querySelector('.browse-btn').addEventListener('click', () => {
+                fileInput.click();
+            });
+            
+            fileInput.addEventListener('change', updateFileInfo);
+            
+            function updateFileInfo() {
+                if (fileInput.files.length > 0) {
+                    const file = fileInput.files[0];
+                    const fileSizeKB = Math.round(file.size / 1024);
+                    const fileExtension = file.name.split('.').pop().toUpperCase();
+                    
+                    fileInfo.innerHTML = `
+                        <div>
+                            <strong>文件名:</strong> ${file.name}<br>
+                            <strong>大小:</strong> ${fileSizeKB} KB<br>
+                            <strong>类型:</strong> ${fileExtension}
+                        </div>
+                    `;
+                    
+                    // 如果是文本文件，预览内容
+                    if (['TXT', 'MD'].includes(fileExtension)) {
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            documentPreview.textContent = e.target.result.substring(0, 500) + 
+                                (e.target.result.length > 500 ? '...' : '');
+                            documentPreview.style.display = 'block';
+                        };
+                        reader.readAsText(file);
+                    } else {
+                        documentPreview.style.display = 'none';
+                    }
+                    
+                    uploadButton.disabled = false;
+                } else {
+                    fileInfo.textContent = '';
+                    documentPreview.style.display = 'none';
+                    uploadButton.disabled = true;
+                }
+            }
+            
+            // 上传文件
+            uploadButton.addEventListener('click', async () => {
+                if (fileInput.files.length === 0) return;
+                
+                const file = fileInput.files[0];
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                // 添加文档库ID
+                const libraryId = document.getElementById('uploadLibrarySelect').value;
+                formData.append('library_id', libraryId);
+                
+                uploadSuccess.classList.add('d-none');
+                uploadError.classList.add('d-none');
+                uploadButton.disabled = true;
+                uploadButton.textContent = '上传中...';
+                
+                try {
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.success) {
+                        uploadSuccess.textContent = result.message;
+                        uploadSuccess.classList.remove('d-none');
+                        // 重置表单
+                        fileInput.value = '';
+                        fileInfo.textContent = '';
+                        documentPreview.style.display = 'none';
+                    } else {
+                        uploadError.textContent = result.error || '上传失败';
+                        uploadError.classList.remove('d-none');
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    uploadError.textContent = '上传过程中发生错误: ' + error.message;
+                    uploadError.classList.remove('d-none');
+                } finally {
+                    uploadButton.disabled = false;
+                    uploadButton.textContent = '上传到知识库';
+                }
+            });
+            
+            // 上传文本
+            textUploadButton.addEventListener('click', async () => {
+                const text = documentText.value.trim();
+                const title = documentTitle.value.trim();
+                const source = documentSource.value.trim();
+                
+                if (!text || !title) {
+                    alert('文档内容和标题不能为空！');
+                    return;
+                }
+                
+                // 获取文档库ID
+                const libraryId = document.getElementById('textUploadLibrarySelect').value;
+                
+                textUploadButton.disabled = true;
+                textUploadButton.textContent = '上传中...';
+                
+                try {
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            text: text,
+                            library_id: libraryId, // 添加文档库ID
+                            metadata: {
+                                title: title,
+                                source: source,
+                                type: 'text'
+                            }
+                        }),
+                    });
+                    
+                    const result = await response.json();
+                    
+                    if (response.ok && result.success) {
+                        alert(result.message);
+                        // 重置表单
+                        documentText.value = '';
+                        documentTitle.value = '';
+                        documentSource.value = '';
+                    } else {
+                        alert('上传失败: ' + (result.error || '未知错误'));
+                    }
+                } catch (error) {
+                    console.error('Error:', error);
+                    alert('上传过程中发生错误: ' + error.message);
+                } finally {
+                    textUploadButton.disabled = false;
+                    textUploadButton.textContent = '上传到知识库';
+                }
+            });
+            
+            // 删除文档
+            let currentDocId = null;
+            const deleteConfirmDialog = document.getElementById('deleteConfirmDialog');
+            const cancelDeleteBtn = document.getElementById('cancelDeleteBtn');
+            const confirmDeleteBtn = document.getElementById('confirmDeleteBtn');
+            
+            function showDeleteConfirm(docId) {
+                currentDocId = docId;
+                deleteConfirmDialog.classList.add('active');
+            }
+            
+            function hideDeleteConfirm() {
+                deleteConfirmDialog.classList.remove('active');
+                currentDocId = null;
+            }
+            
+            async function deleteDocument(e) {
+                e.preventDefault();
+                // 修复点击图标无法获取ID的问题，通过向上找到带有data-id的元素
+                let target = e.target;
+                while (target && !target.dataset.id) {
+                    target = target.parentElement;
+                }
+                
+                const docId = target ? target.dataset.id : null;
+                if (docId) {
+                    showDeleteConfirm(docId);
+                } else {
+                    console.error("无法获取要删除的文档ID");
+                }
+            }
+            
+            async function performDelete() {
+                if (!currentDocId) return;
+                
+                try {
+                    const response = await fetch(`/documents/${currentDocId}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    const result = await response.json();
+                    hideDeleteConfirm();
+                    
+                    if (response.ok && result.success) {
+                        const notificationDiv = document.createElement('div');
+                        notificationDiv.className = 'alert alert-success alert-dismissible fade show';
+                        notificationDiv.innerHTML = `
+                            ${result.message}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        `;
+                        document.querySelector('.container').prepend(notificationDiv);
+                        
+                        // 自动关闭通知
+                        setTimeout(() => {
+                            notificationDiv.classList.remove('show');
+                            setTimeout(() => notificationDiv.remove(), 300);
+                        }, 3000);
+                        
+                        loadDocuments();
+                    } else {
+                        alert('删除失败: ' + (result.error || '未知错误'));
+                    }
+                } catch (error) {
+                    hideDeleteConfirm();
+                    console.error("删除文档出错:", error);
+                    alert('删除文档时发生错误');
+                }
+            }
+            
+            // 设置删除确认对话框按钮事件
+            cancelDeleteBtn.addEventListener('click', hideDeleteConfirm);
+            confirmDeleteBtn.addEventListener('click', performDelete);
+            
+            // 添加事件监听
+            if (refreshDocuments) {
+                refreshDocuments.addEventListener('click', function() {
+                    console.log("点击刷新按钮");
+                    
+                    // 显示刷新中的状态
+                    const refreshIcon = this.querySelector('i');
+                    if (refreshIcon) {
+                        refreshIcon.classList.add('spin');
+                    }
+                    
+                    // 显示加载指示器
+                    const documentsLoading = document.getElementById('documentsLoading');
+                    if (documentsLoading) {
+                        documentsLoading.style.display = 'block';
+                    }
+                    
+                    // 清空文档列表，防止重复显示
+                    const documentsList = document.getElementById('documentsList');
+                    if (documentsList) {
+                        documentsList.innerHTML = '';
+                    }
+                    
+                    // 使用Promise.all同时加载文档和文档库
+                    Promise.all([
+                        // 加载文档列表
+                        new Promise((resolve) => {
+                            if (typeof loadDocuments === 'function') {
+                                // 使用setTimeout确保DOM更新
+                                setTimeout(() => {
+                                    loadDocuments().then(resolve).catch(resolve);
+                                }, 100);
+                            } else {
+                                console.error("loadDocuments函数未定义");
+                                showToast('error', '刷新文档列表失败，请刷新页面');
+                                resolve();
+                            }
+                        }),
+                        // 加载文档库列表
+                        new Promise((resolve) => {
+                            if (typeof loadLibraries === 'function') {
+                                setTimeout(() => {
+                                    loadLibraries().then(resolve).catch(resolve);
+                                }, 100);
+                            } else {
+                                console.error("loadLibraries函数未定义");
+                                showToast('error', '刷新文档库列表失败，请刷新页面');
+                                resolve();
+                            }
+                        })
+                    ]).finally(() => {
+                        // 无论成功失败，都停止旋转图标
+                        if (refreshIcon) {
+                            refreshIcon.classList.remove('spin');
+                        }
+                        
+                        // 隐藏加载指示器
+                        if (documentsLoading) {
+                            documentsLoading.style.display = 'none';
+                        }
+                        
+                        showToast('success', '刷新完成');
+                    });
+                });
+            }
+            
+            // 文档管理页面显示时更新数据
+            document.getElementById('documents-tab').addEventListener('shown.bs.tab', function (e) {
+                console.log("文档管理页面显示");
+                // 刷新文档库列表和文档
+                try {
+                    console.log("文档管理页面显示时刷新数据");
+                    // 检查loadLibraries是否已定义
+                    if (typeof loadLibraries === 'function') {
+                        loadLibraries();
+                    } else {
+                        console.error("loadLibraries函数未定义");
+                        showToast('error', '加载文档库列表失败，请刷新页面');
+                    }
+                    
+                    // 注意：不在这里调用loadDocuments，避免重复加载
+                    // 文档库加载后会自动触发筛选器的change事件，从而加载文档
+                } catch (error) {
+                    console.error("文档管理页面刷新数据失败:", error);
+                    showToast('error', '加载数据失败，请刷新页面重试');
+                }
+            });
+            
+            // 初始加载文档列表和文档库
+            try {
+                console.log("初始化时加载数据");
+                // 先加载文档库，文档库加载完成后会触发筛选器的change事件，从而加载文档
+                loadLibraries();
+                
+                // 确保文档也被加载（以防文档库加载没有触发筛选器事件）
+                setTimeout(() => {
+                    if (document.getElementById('documentsList').children.length === 0) {
+                        console.log("延迟加载文档列表");
+                        loadDocuments();
+                    }
+                }, 500);
+            } catch (error) {
+                console.error("初始化时加载数据失败:", error);
+                // 出错时尝试直接加载文档
+                try {
+                    loadDocuments();
+                } catch (e) {
+                    console.error("加载文档失败:", e);
+                }
+            }
+            
+            // 添加窗口大小变化监听器
+            window.addEventListener('resize', function() {
+                // 动态调整聊天容器高度
+                adjustLayout();
+            });
+            
+            // 初始调整布局
+            adjustLayout();
+            
+            function adjustLayout() {
+                // 确保整个页面填满视窗
+                document.documentElement.style.height = '100%';
+                document.body.style.height = '100%';
+                
+                // 确保聊天容器能够正确伸缩
+                const container = document.querySelector('.container');
+                const header = document.querySelector('h1');
+                const tabs = document.querySelector('.nav-tabs');
+                const inputGroup = document.querySelector('.input-group');
+                
+                if (container && header && tabs && inputGroup && chatMessages) {
+                    // 计算并设置聊天容器的高度
+                    const availableHeight = container.clientHeight - 
+                                           header.offsetHeight - 
+                                           tabs.offsetHeight - 
+                                           inputGroup.offsetHeight - 
+                                           60; // 额外边距
+                    
+                    // 确保聊天容器有足够的空间
+                    chatMessages.style.maxHeight = `${Math.max(200, availableHeight)}px`;
+                }
+            }
+            
+            // 初始化删除文档库按钮
+            initDeleteLibraryButton();
+            
+            // 绑定删除文档库对话框的按钮事件
+            const cancelDeleteLibraryBtn = document.getElementById('cancelDeleteLibraryBtn');
+            const confirmDeleteLibraryBtn = document.getElementById('confirmDeleteLibraryBtn');
+            
+            if (cancelDeleteLibraryBtn) {
+                cancelDeleteLibraryBtn.addEventListener('click', hideDeleteLibraryDialog);
+                console.log("绑定取消删除文档库按钮事件");
+            }
+            
+            if (confirmDeleteLibraryBtn) {
+                confirmDeleteLibraryBtn.addEventListener('click', performLibraryDelete);
+                console.log("绑定确认删除文档库按钮事件");
+            }
+            
+            // 初始化创建文档库按钮
+            initCreateLibraryButton();
+            
+            // 绑定创建文档库对话框的按钮事件
+            const cancelCreateLibraryBtn = document.getElementById('cancelCreateLibraryBtn');
+            const confirmCreateLibraryBtn = document.getElementById('confirmCreateLibraryBtn');
+            
+            if (cancelCreateLibraryBtn) {
+                cancelCreateLibraryBtn.addEventListener('click', hideCreateLibraryDialog);
+                console.log("绑定取消创建文档库按钮事件");
+            }
+            
+            if (confirmCreateLibraryBtn) {
+                confirmCreateLibraryBtn.addEventListener('click', performLibraryCreate);
+                console.log("绑定确认创建文档库按钮事件");
+            }
+        });
+
+        // 修改流式响应处理函数，接收特定的回答元素
+        function handleStreamResponse(response, currentAnswerElement) {
+            // 隐藏加载指示器
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            if (loadingIndicator) {
+                loadingIndicator.classList.add('d-none');
+            }
+            
+            console.log("handleStreamResponse: 开始处理流式响应");
+            
+            // 获取响应流
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let incompleteData = '';
+            
+            // 处理流式响应，逐字显示
+            function processStream() {
+                reader.read().then(({ done, value }) => {
+                    if (done) {
+                        console.log("handleStreamResponse: 流式响应完成");
+                        return;
+                    }
+                    
+                    // 解码接收到的数据
+                    const chunk = decoder.decode(value, { stream: true });
+                    console.log("handleStreamResponse: 收到数据块，长度:" + chunk.length);
+                    
+                    // 立即处理每个字符
+                    processChunk(chunk);
+                    
+                    // 继续读取
+                    processStream();
+                }).catch(error => {
+                    console.error("handleStreamResponse: 读取流时出错:", error);
+                    if (loadingIndicator) {
+                        loadingIndicator.classList.add('d-none');
+                    }
+                    
+                    // 向用户显示错误信息
+                    if (currentAnswerElement) {
+                        immediatelyAppendText("\n\n**读取响应时出错:** " + error.message, currentAnswerElement);
+                    }
+                });
+            }
+            
+            // 处理数据块，提取每个可能的数据片段并立即显示
+            function processChunk(chunk) {
+                // 将新数据添加到不完整数据缓冲区
+                incompleteData += chunk;
+                
+                // 尝试处理完整的行
+                while (incompleteData.includes('\n')) {
+                    let lineEnd = incompleteData.indexOf('\n');
+                    let line = incompleteData.substring(0, lineEnd).trim();
+                    incompleteData = incompleteData.substring(lineEnd + 1);
+                    
+                    // 如果是数据行，立即处理
+                    if (line.startsWith('data:')) {
+                        const data = line.substring(5).trim();
+                        
+                        // 检查是否是完成标记
+                        if (data === '[DONE]') {
+                            console.log("handleStreamResponse: 收到完成标记");
+                            continue;
+                        }
+                        
+                        try {
+                            // 尝试解析JSON
+                            const jsonData = JSON.parse(data);
+                            
+                            // 确保我们仍然使用正确的回答元素
+                            // 通过检查DOM中是否存在该元素
+                            if (!document.contains(currentAnswerElement)) {
+                                console.error("handleStreamResponse: 回答元素已不在DOM中");
+                                return;
+                            }
+                            
+                            // 处理不同类型的响应
+                            if (jsonData.type === 'sources') {
+                                console.log("handleStreamResponse: 处理来源信息");
+                                // 处理来源信息
+                                handleSources(jsonData.sources, currentAnswerElement);
+                            } else if (jsonData.type === 'error') {
+                                console.error("handleStreamResponse: 收到错误信息:", jsonData.content);
+                                // 处理错误信息
+                                handleError(jsonData.content, currentAnswerElement);
+                            } else if (jsonData.type === 'start') {
+                                // 处理开始标记
+                                console.log("handleStreamResponse: 开始生成回答");
+                            } else if (jsonData.choices && jsonData.choices.length > 0) {
+                                // 处理DeepSeek API格式的响应
+                                const delta = jsonData.choices[0].delta;
+                                if (delta && delta.content) {
+                                    console.log("handleStreamResponse: 处理DeepSeek API响应");
+                                    immediatelyAppendText(delta.content, currentAnswerElement);
+                                }
+                            } else if (jsonData.content !== undefined) {
+                                // 处理自定义格式的响应
+                                console.log("handleStreamResponse: 处理自定义格式响应");
+                                immediatelyAppendText(jsonData.content, currentAnswerElement);
+                            } else {
+                                console.warn("handleStreamResponse: 未知响应格式:", jsonData);
+                            }
+                        } catch (e) {
+                            // JSON解析失败，可能是非JSON数据或不完整的JSON
+                            console.error("handleStreamResponse: JSON解析错误:", e, "数据:", data);
+                        }
+                    }
+                }
+            }
+            
+            // 开始处理流
+            processStream();
+        }
+
+        // 修改文本添加函数，接收特定的回答元素
+        function immediatelyAppendText(content, answerElement) {
+            if (!content || !answerElement) {
+                console.warn("immediatelyAppendText: 内容或元素为空", {content, answerElement});
+                return;
+            }
+            
+            // 确保元素仍在DOM中
+            if (!document.contains(answerElement)) {
+                console.error("immediatelyAppendText: 回答元素已不在DOM中");
+                return;
+            }
+            
+            // 如果是第一次添加内容，清空占位符
+            if (answerElement.classList.contains('placeholder')) {
+                answerElement.textContent = '';
+                answerElement.classList.remove('placeholder');
+                // 初始化Markdown内容属性
+                answerElement.dataset.markdownContent = '';
+                console.log("immediatelyAppendText: 初始化新回答元素");
+            }
+            
+            // 累积Markdown内容
+            answerElement.dataset.markdownContent = (answerElement.dataset.markdownContent || '') + content;
+            
+            try {
+                console.log("immediatelyAppendText: 渲染Markdown，内容长度：", answerElement.dataset.markdownContent.length);
+                
+                // 配置marked选项
+                marked.setOptions({
+                    breaks: true,         // 支持GitHub风格的换行
+                    gfm: true,            // 支持GitHub风格的Markdown
+                    headerIds: true,      // 为标题生成ID
+                    mangle: false,        // 不转义HTML
+                    sanitize: false,      // 不净化HTML
+                    highlight: function(code, lang) {
+                        // 代码高亮处理
+                        if (lang && hljs.getLanguage(lang)) {
+                            try {
+                                return hljs.highlight(code, { language: lang }).value;
+                            } catch (e) {
+                                console.error('immediatelyAppendText: 高亮显示错误:', e);
+                            }
+                        }
+                        return hljs.highlightAuto(code).value;
+                    }
+                });
+                
+                // 使用marked渲染Markdown内容
+                const htmlContent = marked.parse(answerElement.dataset.markdownContent);
+                answerElement.innerHTML = htmlContent;
+                
+                // 为新添加的代码块应用语法高亮
+                answerElement.querySelectorAll('pre code').forEach((block) => {
+                    try {
+                        hljs.highlightElement(block);
+                    } catch (e) {
+                        console.error('immediatelyAppendText: 代码块高亮错误:', e);
+                    }
+                });
+                
+                // 打印调试信息
+                console.log("immediatelyAppendText: Markdown渲染成功");
+            } catch (e) {
+                console.error('immediatelyAppendText: Markdown渲染错误:', e);
+                // 出错时回退到纯文本显示，但保留换行
+                answerElement.textContent = answerElement.dataset.markdownContent;
+            }
+            
+            // 滚动到底部确保最新内容可见
+            const chatContainer = document.getElementById('chatMessages');
+            // 只有当用户没有主动滚动时才自动滚动
+            if (!window.userHasScrolled && isUserAtBottom(chatContainer)) {
+                smoothScrollToBottom(chatContainer);
+            }
+        }
+        
+        // 检查用户是否在聊天窗口底部
+        function isUserAtBottom(container) {
+            // 如果用户滚动位置接近底部（差距小于30px），认为用户在底部
+            return container.scrollHeight - container.scrollTop - container.clientHeight < 30;
+        }
+        
+        // 平滑滚动到底部
+        function smoothScrollToBottom(container) {
+            container.scrollTo({
+                top: container.scrollHeight,
+                behavior: 'smooth'
+            });
+        }
+
+        // 保留原来的appendToAnswer函数以兼容其他地方的调用
+        function appendToAnswer(content) {
+            const answerElement = document.querySelector('.answer-content:last-child');
+            if (answerElement) {
+                immediatelyAppendText(content, answerElement);
+            }
+        }
+
+        // 修改处理来源信息函数，接收特定的回答元素
+        function handleSources(sources, currentAnswerElement) {
+            if (!sources || !Array.isArray(sources) || sources.length === 0) {
+                console.log("没有来源信息或格式不正确");
+                return;
+            }
+            
+            console.log("处理来源信息:", sources);
+            
+            // 确保元素仍在DOM中
+            if (!document.contains(currentAnswerElement)) {
+                console.error("回答元素已不在DOM中");
+                return;
+            }
+            
+            // 获取当前回答元素的父元素（系统消息）
+            const systemMessage = currentAnswerElement.parentElement;
+            if (!systemMessage) {
+                console.error("找不到系统消息元素");
+                return;
+            }
+            
+            // 查找或创建来源容器
+            let sourcesContainer = systemMessage.querySelector('.sources');
+            if (!sourcesContainer) {
+                sourcesContainer = document.createElement('div');
+                sourcesContainer.className = 'sources mt-3';
+                systemMessage.appendChild(sourcesContainer);
+            }
+            
+            // 清空现有来源
+            sourcesContainer.innerHTML = '';
+            
+            // 添加标题
+            const sourcesTitle = document.createElement('h6');
+            sourcesTitle.textContent = '参考来源';
+            sourcesTitle.className = 'sources-title';
+            sourcesContainer.appendChild(sourcesTitle);
+            
+            // 添加来源列表
+            const sourcesList = document.createElement('ul');
+            sourcesList.className = 'sources-list';
+            
+            sources.forEach((source, index) => {
+                const sourceItem = document.createElement('li');
+                sourceItem.className = 'source-item';
+                
+                // 创建来源标题
+                const sourceTitle = document.createElement('div');
+                sourceTitle.className = 'source-title';
+                sourceTitle.innerHTML = `<strong>${index + 1}. ${escapeHtml(source.title || '未知文档')}</strong>`;
+                sourceItem.appendChild(sourceTitle);
+                
+                // 创建来源内容预览
+                const sourcePreview = document.createElement('div');
+                sourcePreview.className = 'source-content';
+                sourcePreview.textContent = source.content || '无内容预览';
+                sourceItem.appendChild(sourcePreview);
+                
+                // 添加到列表
+                sourcesList.appendChild(sourceItem);
+            });
+            
+            sourcesContainer.appendChild(sourcesList);
+            
+            // 滚动到底部确保最新内容可见
+            const chatContainer = document.getElementById('chatMessages');
+            if (!window.userHasScrolled && isUserAtBottom(chatContainer)) {
+                smoothScrollToBottom(chatContainer);
+            }
+        }
+
+        // 修改处理错误信息函数，接收特定的回答元素
+        function handleError(errorMessage, answerElement) {
+            console.error("处理错误:", errorMessage);
+            
+            // 确保元素仍在DOM中
+            if (!document.contains(answerElement)) {
+                console.error("回答元素已不在DOM中");
+                return;
+            }
+            
+            if (answerElement) {
+                answerElement.textContent = `错误: ${errorMessage}`;
+                answerElement.classList.add('error');
+            } else {
+                console.error("找不到答案元素");
+            }
+            
+            // 隐藏加载指示器
+            const loadingIndicator = document.getElementById('loadingIndicator');
+            if (loadingIndicator) {
+                loadingIndicator.classList.add('d-none');
+            }
+        }
+
+        // HTML转义函数
+        function escapeHtml(unsafe) {
+            return unsafe
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+        
+        // 全局函数：添加文档库管理功能
+        function addLibraryManagementFeatures() {
+            console.log("初始化文档库管理功能");
+            const createLibraryBtnTop = document.getElementById('createLibraryBtn');
+            const documents = document.getElementById('documents');
+            
+            if (!createLibraryBtnTop) {
+                console.error("未找到创建文档库按钮");
+                return;
+            }
+            
+            if (!documents) {
+                console.error("未找到documents元素");
+                return;
+            }
+            
+            // 当前选中的文档库ID
+            let currentLibraryId = null;
+            
+            // 显示删除确认对话框
+            function showDeleteConfirm(libraryId) {
+                currentLibraryId = libraryId;
+                const deleteConfirmDialog = document.getElementById('deleteConfirmDialog');
+                if (deleteConfirmDialog) {
+                    deleteConfirmDialog.classList.add('active');
+                    // 设置焦点到取消按钮（更安全的默认选项）
+                    document.getElementById('cancelDeleteBtn').focus();
+                }
+            }
+            
+            // 隐藏删除确认对话框
+            function hideDeleteConfirm() {
+                const deleteConfirmDialog = document.getElementById('deleteConfirmDialog');
+                if (deleteConfirmDialog) {
+                    deleteConfirmDialog.classList.remove('active');
+                    currentLibraryId = null;
+                }
+            }
+            
+            // 执行文档库删除
+            async function performDelete() {
+                if (!currentLibraryId) return;
+                
+                try {
+                    const response = await fetch(`/documents/${currentLibraryId}`, {
+                        method: 'DELETE'
+                    });
+                    
+                    const result = await response.json();
+                    hideDeleteConfirm();
+                    
+                    if (response.ok && result.success) {
+                        const notificationDiv = document.createElement('div');
+                        notificationDiv.className = 'alert alert-success alert-dismissible fade show';
+                        notificationDiv.innerHTML = `
+                            ${result.message}
+                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        `;
+                        document.querySelector('.container').prepend(notificationDiv);
+                        
+                        // 自动关闭通知
+                        setTimeout(() => {
+                            notificationDiv.classList.remove('show');
+                            setTimeout(() => notificationDiv.remove(), 300);
+                        }, 3000);
+                        
+                        loadDocuments();
+                    } else {
+                        alert('删除失败: ' + (result.error || '未知错误'));
+                    }
+                } catch (error) {
+                    hideDeleteConfirm();
+                    console.error("删除文档出错:", error);
+                    alert('删除文档时发生错误');
+                }
+            }
+            
+            // 添加事件监听
+            if (refreshDocuments) {
+                refreshDocuments.addEventListener('click', function() {
+                    console.log("点击刷新按钮");
+                    
+                    // 显示刷新中的状态
+                    const refreshIcon = this.querySelector('i');
+                    if (refreshIcon) {
+                        refreshIcon.classList.add('spin');
+                    }
+                    
+                    // 显示加载指示器
+                    const documentsLoading = document.getElementById('documentsLoading');
+                    if (documentsLoading) {
+                        documentsLoading.style.display = 'block';
+                    }
+                    
+                    // 清空文档列表，防止重复显示
+                    const documentsList = document.getElementById('documentsList');
+                    if (documentsList) {
+                        documentsList.innerHTML = '';
+                    }
+                    
+                    // 使用Promise.all同时加载文档和文档库
+                    Promise.all([
+                        // 加载文档列表
+                        new Promise((resolve) => {
+                            if (typeof loadDocuments === 'function') {
+                                // 使用setTimeout确保DOM更新
+                                setTimeout(() => {
+                                    loadDocuments().then(resolve).catch(resolve);
+                                }, 100);
+                            } else {
+                                console.error("loadDocuments函数未定义");
+                                showToast('error', '刷新文档列表失败，请刷新页面');
+                                resolve();
+                            }
+                        }),
+                        // 加载文档库列表
+                        new Promise((resolve) => {
+                            if (typeof loadLibraries === 'function') {
+                                setTimeout(() => {
+                                    loadLibraries().then(resolve).catch(resolve);
+                                }, 100);
+                            } else {
+                                console.error("loadLibraries函数未定义");
+                                showToast('error', '刷新文档库列表失败，请刷新页面');
+                                resolve();
+                            }
+                        })
+                    ]).finally(() => {
+                        // 无论成功失败，都停止旋转图标
+                        if (refreshIcon) {
+                            refreshIcon.classList.remove('spin');
+                        }
+                        
+                        // 隐藏加载指示器
+                        if (documentsLoading) {
+                            documentsLoading.style.display = 'none';
+                        }
+                        
+                        showToast('success', '刷新完成');
+                    });
+                });
+            }
+            
+            // 文档管理页面显示时更新数据
+            document.getElementById('documents-tab').addEventListener('shown.bs.tab', function (e) {
+                console.log("文档管理页面显示");
+                // 刷新文档库列表和文档
+                try {
+                    console.log("文档管理页面显示时刷新数据");
+                    // 检查loadLibraries是否已定义
+                    if (typeof loadLibraries === 'function') {
+                        loadLibraries();
+                    } else {
+                        console.error("loadLibraries函数未定义");
+                        showToast('error', '加载文档库列表失败，请刷新页面');
+                    }
+                    
+                    // 注意：不在这里调用loadDocuments，避免重复加载
+                    // 文档库加载后会自动触发筛选器的change事件，从而加载文档
+                } catch (error) {
+                    console.error("文档管理页面刷新数据失败:", error);
+                    showToast('error', '加载数据失败，请刷新页面重试');
+                }
+            });
+            
+            // 初始加载文档列表和文档库
+            try {
+                console.log("初始化时加载数据");
+                // 先加载文档库，文档库加载完成后会触发筛选器的change事件，从而加载文档
+                loadLibraries();
+                
+                // 确保文档也被加载（以防文档库加载没有触发筛选器事件）
+                setTimeout(() => {
+                    if (document.getElementById('documentsList').children.length === 0) {
+                        console.log("延迟加载文档列表");
+                        loadDocuments();
+                    }
+                }, 500);
+            } catch (error) {
+                console.error("初始化时加载数据失败:", error);
+                // 出错时尝试直接加载文档
+                try {
+                    loadDocuments();
+                } catch (e) {
+                    console.error("加载文档失败:", e);
+                }
+            }
+            
+            // 添加窗口大小变化监听器
+            window.addEventListener('resize', function() {
+                // 动态调整聊天容器高度
+                adjustLayout();
+            });
+            
+            // 初始调整布局
+            adjustLayout();
+            
+            function adjustLayout() {
+                // 确保整个页面填满视窗
+                document.documentElement.style.height = '100%';
+                document.body.style.height = '100%';
+                
+                // 确保聊天容器能够正确伸缩
+                const container = document.querySelector('.container');
+                const header = document.querySelector('h1');
+                const tabs = document.querySelector('.nav-tabs');
+                const inputGroup = document.querySelector('.input-group');
+                
+                if (container && header && tabs && inputGroup && chatMessages) {
+                    // 计算并设置聊天容器的高度
+                    const availableHeight = container.clientHeight - 
+                                           header.offsetHeight - 
+                                           tabs.offsetHeight - 
+                                           inputGroup.offsetHeight - 
+                                           60; // 额外边距
+                    
+                    // 确保聊天容器有足够的空间
+                    chatMessages.style.maxHeight = `${Math.max(200, availableHeight)}px`;
+                }
+            }
+        }
+        
+        // 修改筛选器，添加删除按钮
+        const docFilterSelect = document.getElementById('documentFilterLibrary');
+        if (docFilterSelect) {
+            console.log("为文档库筛选器添加change事件监听器");
+            docFilterSelect.addEventListener('change', function() {
+                const selectedLibrary = this.value;
+                console.log("选择的文档库:", selectedLibrary);
+                
+                // 更新删除库按钮状态
+                const deleteLibraryBtn = document.getElementById('deleteLibraryBtn');
+                if (deleteLibraryBtn) {
+                    console.log("更新删除按钮状态, 选中库:", selectedLibrary);
+                    // 只有在选择非"全部"和非"默认库"的情况下才启用删除按钮
+                    if (selectedLibrary !== 'all' && selectedLibrary !== 'default') {
+                        console.log("启用删除按钮");
+                        deleteLibraryBtn.disabled = false;
+                    } else {
+                        console.log("禁用删除按钮");
+                        deleteLibraryBtn.disabled = true;
+                    }
+                } else {
+                    console.error("找不到删除按钮元素");
+                }
+                
+                try {
+                    console.log("筛选器变更为: " + selectedLibrary + "，加载文档列表");
+                    // 检查loadDocuments是否已定义
+                    if (typeof loadDocuments === 'function') {
+                        // 清空当前文档列表，避免重复显示
+                        const documentsList = document.getElementById('documentsList');
+                        if (documentsList) {
+                            documentsList.innerHTML = '';
+                        }
+                        
+                        // 加载文档
+                        loadDocuments();
+                    } else {
+                        console.error("loadDocuments函数未定义");
+                        // 显示错误提示
+                        showToast('error', '加载文档失败，请刷新页面重试');
+                    }
+                } catch (error) {
+                    console.error("加载文档列表失败:", error);
+                    showToast('error', '加载文档列表出错，请刷新页面重试');
+                }
+            });
+        }
+        
+        // 显示提示消息
+        function showToast(type, message, duration = 3000) {
+            // 创建toast容器（如果不存在）
+            let toastContainer = document.getElementById('toast-container');
+            if (!toastContainer) {
+                toastContainer = document.createElement('div');
+                toastContainer.id = 'toast-container';
+                toastContainer.className = 'position-fixed bottom-0 end-0 p-3';
+                toastContainer.style.zIndex = '1050';
+                document.body.appendChild(toastContainer);
+            }
+            
+            // 生成唯一ID
+            const toastId = 'toast-' + Date.now();
+            
+            // 确定toast类型样式
+            let bgClass = 'bg-primary';
+            if (type === 'success') bgClass = 'bg-success';
+            else if (type === 'error') bgClass = 'bg-danger';
+            else if (type === 'warning') bgClass = 'bg-warning text-dark';
+            else if (type === 'info') bgClass = 'bg-info text-dark';
+            
+            // 创建toast元素
+            const toastHTML = `
+                <div id="${toastId}" class="toast ${bgClass} text-white" role="alert" aria-live="assertive" aria-atomic="true">
+                    <div class="toast-header">
+                        <strong class="me-auto">${type.charAt(0).toUpperCase() + type.slice(1)}</strong>
+                        <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="关闭"></button>
+                    </div>
+                    <div class="toast-body">
+                        ${message}
+                    </div>
+                </div>
+            `;
+            
+            toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+            
+            // 初始化并显示toast
+            const toastElement = document.getElementById(toastId);
+            const toast = new bootstrap.Toast(toastElement, {
+                delay: duration
+            });
+            toast.show();
+            
+            // 自动移除元素
+            toastElement.addEventListener('hidden.bs.toast', function() {
+                this.remove();
+            });
+        }
+        
+        // 更新文档库管理列表
+        function updateLibraryManagementList(libraries) {
+            // 这个函数会在未来的文档库管理功能中使用
+            // 目前仅作为占位符，以便与loadLibraries函数配合使用
+            console.log("更新文档库管理列表:", libraries.length);
+            
+            // 获取其他文档库下拉框并更新
+            const otherSelects = [
+                document.getElementById('librarySelect'),
+                document.getElementById('uploadLibrarySelect'),
+                document.getElementById('textUploadLibrarySelect')
+            ].filter(el => el != null); // 过滤掉可能不存在的元素
+            
+            if (otherSelects.length > 0) {
+                otherSelects.forEach(select => {
+                    // 保存当前选中的值
+                    const currentValue = select.value;
+                    
+                    // 清空选项，但保留default选项
+                    const defaultOption = Array.from(select.options).find(opt => opt.value === 'default');
+                    select.innerHTML = '';
+                    
+                    // 如果有默认选项，重新添加
+                    if (defaultOption) {
+                        // 更新默认库的文档数量
+                        const defaultLib = libraries.find(lib => lib.id === 'default');
+                        if (defaultLib) {
+                            defaultOption.textContent = `默认库 (${defaultLib.document_count})`;
+                        }
+                        select.appendChild(defaultOption);
+                    }
+                    
+                    // 添加其他文档库选项
+                    libraries.forEach(library => {
+                        // 跳过默认库，因为已经添加过了
+                        if (library.id === 'default') return;
+                        
+                        const option = document.createElement('option');
+                        option.value = library.id;
+                        option.textContent = `${library.name} (${library.document_count})`;
+                        select.appendChild(option);
+                    });
+                    
+                    // 恢复选中的值
+                    if (currentValue && [...select.options].some(opt => opt.value === currentValue)) {
+                        select.value = currentValue;
+                    } else if (defaultOption) {
+                        select.value = 'default';
+                    }
+                });
+            }
+        }
+        
+        // 初始化删除文档库按钮
+        function initDeleteLibraryButton() {
+            console.log("初始化删除文档库按钮");
+            const deleteLibraryBtn = document.getElementById('deleteLibraryBtn');
+            if (deleteLibraryBtn) {
+                // 检查当前选中的文档库，如果不是'all'或'default'，则启用删除按钮
+                const librarySelect = document.getElementById('documentFilterLibrary');
+                if (librarySelect && librarySelect.value !== 'all' && librarySelect.value !== 'default') {
+                    console.log("初始化时启用删除按钮，当前选择库:", librarySelect.value);
+                    deleteLibraryBtn.disabled = false;
+                } else {
+                    console.log("初始化时禁用删除按钮，当前选择库:", librarySelect ? librarySelect.value : "未选择");
+                    deleteLibraryBtn.disabled = true;
+                }
+                
+                // 添加点击事件监听器
+                deleteLibraryBtn.addEventListener('click', function() {
+                    console.log("删除文档库按钮被点击");
+                    const librarySelect = document.getElementById('documentFilterLibrary');
+                    if (librarySelect && librarySelect.value !== 'all' && librarySelect.value !== 'default') {
+                        console.log("显示删除对话框，库ID:", librarySelect.value);
+                        showDeleteLibraryDialog(librarySelect.value);
+                    } else {
+                        console.log("不允许删除，选择库:", librarySelect ? librarySelect.value : "未选择");
+                        showToast('warning', '您只能删除自定义文档库，默认库不能删除');
+                    }
+                });
+            } else {
+                console.error("找不到删除文档库按钮元素");
+            }
+        }
+        
+        // 初始化创建文档库按钮
+        function initCreateLibraryButton() {
+            console.log("初始化创建文档库按钮");
+            const createLibraryBtn = document.getElementById('createLibraryBtn');
+            if (createLibraryBtn) {
+                // 添加点击事件监听器
+                createLibraryBtn.addEventListener('click', function() {
+                    console.log("创建文档库按钮被点击");
+                    showCreateLibraryDialog();
+                });
+            } else {
+                console.error("找不到创建文档库按钮元素");
+            }
+        }
+    </script>
+</body>
+</html>

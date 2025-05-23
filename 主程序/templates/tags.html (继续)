@@ -1,0 +1,194 @@
+                })
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                if (result.success) {
+                    // 关闭模态框
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('createTagModal'));
+                    modal.hide();
+                    
+                    // 清空表单
+                    document.getElementById('tagName').value = '';
+                    
+                    // 显示通知
+                    showToast('标签创建成功', 'success');
+                    
+                    // 重新加载标签列表
+                    loadTags();
+                } else {
+                    showToast(result.error || '创建标签失败', 'danger');
+                }
+            } else {
+                const errorData = await response.json();
+                showToast(errorData.error || '创建标签失败', 'danger');
+            }
+        } catch (error) {
+            console.error('创建标签失败:', error);
+            showToast('创建标签失败: ' + error.message, 'danger');
+        }
+    }
+    
+    // 删除标签
+    async function deleteTag(tagId) {
+        // 确认是否删除
+        if (!confirm('确定要删除这个标签吗？此操作不可撤销。')) {
+            return;
+        }
+        
+        try {
+            const response = await fetch(`/api/tags/delete/${tagId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                if (result.success) {
+                    showToast('标签已删除', 'success');
+                    
+                    // 如果被删除的标签在已选标签列表中，则移除
+                    selectedTags = selectedTags.filter(t => t.id !== parseInt(tagId));
+                    
+                    // 更新合并按钮状态
+                    updateMergeButtonState();
+                    
+                    // 重新加载标签列表
+                    loadTags();
+                } else {
+                    showToast(result.error || '删除标签失败', 'danger');
+                }
+            } else {
+                const errorData = await response.json();
+                showToast(errorData.error || '删除标签失败', 'danger');
+            }
+        } catch (error) {
+            console.error('删除标签失败:', error);
+            showToast('删除标签失败: ' + error.message, 'danger');
+        }
+    }
+    
+    // 更新合并按钮状态
+    function updateMergeButtonState() {
+        const mergeBtn = document.getElementById('mergeTagsBtn');
+        
+        // 至少需要两个标签才能执行合并操作
+        if (selectedTags.length >= 2) {
+            mergeBtn.removeAttribute('disabled');
+        } else {
+            mergeBtn.setAttribute('disabled', 'disabled');
+        }
+    }
+    
+    // 显示合并标签模态框
+    function showMergeModal() {
+        // 填充已选标签列表
+        const selectedTagsList = document.getElementById('selectedTagsList');
+        selectedTagsList.innerHTML = '';
+        
+        selectedTags.forEach(tag => {
+            const li = document.createElement('li');
+            li.textContent = tag.name;
+            selectedTagsList.appendChild(li);
+        });
+        
+        // 填充目标标签下拉列表
+        const targetTagSelect = document.getElementById('targetTag');
+        targetTagSelect.innerHTML = '';
+        
+        selectedTags.forEach(tag => {
+            const option = document.createElement('option');
+            option.value = tag.id;
+            option.textContent = tag.name;
+            targetTagSelect.appendChild(option);
+        });
+        
+        // 显示模态框
+        const mergeModal = new bootstrap.Modal(document.getElementById('mergeTagsModal'));
+        mergeModal.show();
+    }
+    
+    // 合并标签
+    async function mergeTags() {
+        try {
+            const targetTagId = document.getElementById('targetTag').value;
+            const sourceIds = selectedTags.map(t => t.id).filter(id => id != targetTagId);
+            
+            if (sourceIds.length === 0) {
+                showToast('无效的合并操作', 'warning');
+                return;
+            }
+            
+            const response = await fetch('/api/tags/merge', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    source_ids: sourceIds,
+                    target_id: parseInt(targetTagId)
+                })
+            });
+            
+            if (response.ok) {
+                const result = await response.json();
+                
+                if (result.success) {
+                    // 关闭模态框
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('mergeTagsModal'));
+                    modal.hide();
+                    
+                    // 清空已选标签列表
+                    selectedTags = [];
+                    
+                    // 更新合并按钮状态
+                    updateMergeButtonState();
+                    
+                    // 显示通知
+                    showToast('标签合并成功', 'success');
+                    
+                    // 重新加载标签列表
+                    loadTags();
+                } else {
+                    showToast(result.error || '合并标签失败', 'danger');
+                }
+            } else {
+                const errorData = await response.json();
+                showToast(errorData.error || '合并标签失败', 'danger');
+            }
+        } catch (error) {
+            console.error('合并标签失败:', error);
+            showToast('合并标签失败: ' + error.message, 'danger');
+        }
+    }
+    
+    // 显示Toast通知
+    function showToast(message, type) {
+        const toastContainer = document.querySelector('.toast-container');
+        
+        const toastHTML = `
+            <div class="toast align-items-center text-white bg-${type} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="d-flex">
+                    <div class="toast-body">
+                        ${message}
+                    </div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+            </div>
+        `;
+        
+        toastContainer.insertAdjacentHTML('beforeend', toastHTML);
+        
+        const toastElement = toastContainer.lastElementChild;
+        const toast = new bootstrap.Toast(toastElement, { autohide: true, delay: 3000 });
+        toast.show();
+        
+        // 设置自动移除
+        toastElement.addEventListener('hidden.bs.toast', function () {
+            toastElement.remove();
+        });
+    }
+    </script>
+</body>
+</html>

@@ -1,0 +1,114 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 主数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: problem_analysis_postgres
+    environment:
+      POSTGRES_USER: problem_user
+      POSTGRES_PASSWORD: problem_pass
+      POSTGRES_DB: problem_analysis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - problem_network
+
+  # Redis 缓存和消息队列
+  redis:
+    image: redis:7-alpine
+    container_name: problem_analysis_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - problem_network
+
+  # MinIO 对象存储
+  minio:
+    image: minio/minio:latest
+    container_name: problem_analysis_minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - problem_network
+
+  # Elasticsearch 搜索引擎
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: problem_analysis_elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - problem_network
+
+  # RabbitMQ 消息队列
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: problem_analysis_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbit
+      RABBITMQ_DEFAULT_PASS: rabbit123
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - problem_network
+
+  # pgAdmin 数据库管理工具
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: problem_analysis_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - problem_network
+
+  # Flower Celery监控
+  flower:
+    image: mher/flower:latest
+    container_name: problem_analysis_flower
+    environment:
+      CELERY_BROKER_URL: amqp://rabbit:rabbit123@rabbitmq:5672//
+      FLOWER_PORT: 5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      - rabbitmq
+    networks:
+      - problem_network
+
+networks:
+  problem_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  elasticsearch_data:
+  rabbitmq_data: 
