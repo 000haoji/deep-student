@@ -369,11 +369,19 @@ const getMasteryColor = (mastery) => {
 const fetchProblems = async () => {
   loading.value = true
   try {
-    const { data } = await problemAPI.getList({
-      ...filters,
+    // 构建查询参数，过滤空字符串
+    const params = {
       page: pagination.current,
       size: pagination.pageSize
-    })
+    }
+    if (filters.subject) {
+      params.subject = filters.subject
+    }
+    if (filters.category) {
+      params.category = filters.category.trim()
+    }
+
+    const { data } = await problemAPI.getList(params)
     
     // data应该是一个响应对象，包含data和total
     if (data.success) {
