@@ -55,4 +55,22 @@ export const analysisAPI = {
 
 export const statisticsAPI = {
   getStatistics: () => api.get('/statistics')
+}
+
+// AI API方法封装
+export const aiAPI = {
+  // 模型管理
+  getModels: (params) => api.get('/v1/ai/models', { params }),
+  getModelDetail: (id) => api.get(`/v1/ai/models/${id}`),
+  createModel: (data) => api.post('/v1/ai/models', data),
+  updateModel: (id, data) => api.put(`/v1/ai/models/${id}`, data),
+  deleteModel: (id) => api.delete(`/v1/ai/models/${id}`),
+  testModel: (id) => api.post(`/v1/ai/models/${id}/test`),
+  
+  // AI调用
+  callAI: (data) => api.post('/v1/ai/call', data),
+  
+  // 统计数据
+  getStats: () => api.get('/v1/ai/stats'),
+  checkHealth: () => api.get('/v1/ai/health')
 } 

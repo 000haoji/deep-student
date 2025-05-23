@@ -40,8 +40,12 @@ class TaskType(str, Enum):
     OCR = "ocr"
     PROBLEM_ANALYSIS = "problem_analysis"
     REVIEW_ANALYSIS = "review_analysis"
+    BATCH_PROBLEM_ANALYSIS = "batch_problem_analysis"
     SUMMARIZATION = "summarization"
     TRANSLATION = "translation"
+    CODE_GENERATION = "code_generation"
+    CODE_REVIEW = "code_review"
+    MATH_SOLVING = "math_solving"
 
 
 # Pydantic模型（API请求/响应）

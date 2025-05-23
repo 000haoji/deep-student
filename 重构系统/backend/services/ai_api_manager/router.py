@@ -21,6 +21,8 @@ from .models import (
 )
 from .providers.base import BaseAIProvider
 from .providers.openai_provider import OpenAIProvider
+from .providers.gemini_provider import GeminiProvider
+from .providers.deepseek_provider import DeepSeekProvider
 # TODO: 添加其他提供商的导入
 
 
@@ -77,6 +79,8 @@ class AIRouter(LoggerMixin):
         
         provider_map = {
             AIProvider.OPENAI: OpenAIProvider,
+            AIProvider.GEMINI: GeminiProvider,
+            AIProvider.DEEPSEEK: DeepSeekProvider,
             # TODO: 添加其他提供商映射
         }
         
@@ -194,8 +198,12 @@ class AIRouter(LoggerMixin):
             TaskType.OCR: [AICapability.VISION],
             TaskType.PROBLEM_ANALYSIS: [AICapability.TEXT, AICapability.VISION],
             TaskType.REVIEW_ANALYSIS: [AICapability.TEXT],
+            TaskType.BATCH_PROBLEM_ANALYSIS: [AICapability.TEXT],
             TaskType.SUMMARIZATION: [AICapability.TEXT],
             TaskType.TRANSLATION: [AICapability.TEXT],
+            TaskType.CODE_GENERATION: [AICapability.TEXT],
+            TaskType.CODE_REVIEW: [AICapability.TEXT],
+            TaskType.MATH_SOLVING: [AICapability.TEXT],
         }
         
         required_capabilities = capability_map.get(task_type, [AICapability.TEXT])
