@@ -5,6 +5,7 @@ from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy import text
 
 from .config import settings
 from .utils.logger import get_logger
@@ -52,7 +53,7 @@ async def init_db():
     try:
         # 测试连接
         async with engine.begin() as conn:
-            await conn.run_sync(lambda conn: conn.execute("SELECT 1"))
+            await conn.execute(text("SELECT 1"))
         logger.info("Database connection initialized successfully")
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")

@@ -5,11 +5,11 @@
 
 from .models import FileRecord, FileType
 # 临时注释掉，避免导入依赖问题
-# from .service import FileService, file_service
+from .service import FileService, file_service
 
 __all__ = [
     "FileRecord",
     "FileType",
-    # "FileService",
-    # "file_service"
+    "FileService",
+    "file_service"
 ] 

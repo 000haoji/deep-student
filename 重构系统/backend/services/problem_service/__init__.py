@@ -13,7 +13,7 @@ from .schemas import (
 )
 # 临时注释掉，避免导入依赖问题
 # from .service import ProblemService
-# from .api import router as problem_router
+from .api import router as problem_router
 
 __all__ = [
     # 模型
@@ -33,5 +33,5 @@ __all__ = [
     # "ProblemService",
     
     # 路由
-    # "problem_router"
+    "problem_router"
 ] 

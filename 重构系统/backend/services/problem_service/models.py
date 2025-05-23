@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 import uuid
 
-from shared.models.base import BaseModel
+from shared.models.base import BaseModel, SoftDeleteMixin
 
 
 class Subject(str, Enum):
@@ -40,7 +40,7 @@ class DifficultyLevel(int, Enum):
     VERY_HARD = 5
 
 
-class Problem(BaseModel):
+class Problem(BaseModel, SoftDeleteMixin):
     """错题模型"""
     __tablename__ = "problems"
     

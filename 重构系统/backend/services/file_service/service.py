@@ -25,18 +25,34 @@ class FileService(LoggerMixin):
     
     def __init__(self):
         # 初始化MinIO客户端
-        self.client = Minio(
-            settings.minio_endpoint,
-            access_key=settings.minio_access_key,
-            secret_key=settings.minio_secret_key,
-            secure=settings.minio_secure
-        )
-        
-        # 确保bucket存在
-        self._ensure_bucket()
+        self.client = None
+        self.minio_available = False
+        self._init_minio_client()
+    
+    def _init_minio_client(self):
+        """初始化MinIO客户端（优雅降级）"""
+        try:
+            self.client = Minio(
+                settings.minio_endpoint,
+                access_key=settings.minio_access_key,
+                secret_key=settings.minio_secret_key,
+                secure=settings.minio_secure
+            )
+            # 测试连接
+            self.client.list_buckets()
+            self.minio_available = True
+            # 确保bucket存在
+            self._ensure_bucket()
+            self.log_info("MinIO client initialized successfully")
+        except Exception as e:
+            self.minio_available = False
+            self.log_warning(f"MinIO is not available: {e}. File service will work in degraded mode.")
     
     def _ensure_bucket(self):
         """确保存储桶存在"""
+        if not self.minio_available:
+            return
+            
         try:
             if not self.client.bucket_exists(settings.minio_bucket_name):
                 self.client.make_bucket(settings.minio_bucket_name)
@@ -73,6 +89,11 @@ class FileService(LoggerMixin):
         """计算文件哈希值"""
         return hashlib.md5(file_data).hexdigest()
     
+    def _check_minio_available(self):
+        """检查MinIO是否可用"""
+        if not self.minio_available:
+            raise Exception("MinIO service is not available. Please ensure MinIO is running.")
+    
     async def upload_file(
         self,
         file_data: Union[bytes, BinaryIO],
@@ -98,6 +119,8 @@ class FileService(LoggerMixin):
         Returns:
             文件访问URL
         """
+        self._check_minio_available()
+        
         try:
             # 如果是二进制数据，转换为BytesIO
             if isinstance(file_data, bytes):
@@ -236,6 +259,8 @@ class FileService(LoggerMixin):
         Returns:
             文件数据
         """
+        self._check_minio_available()
+        
         try:
             response = self.client.get_object(
                 bucket_name=settings.minio_bucket_name,
@@ -267,6 +292,8 @@ class FileService(LoggerMixin):
         Returns:
             是否成功
         """
+        self._check_minio_available()
+        
         try:
             # 从MinIO删除
             self.client.remove_object(
@@ -307,6 +334,8 @@ class FileService(LoggerMixin):
         Returns:
             访问URL
         """
+        self._check_minio_available()
+        
         try:
             url = self.client.presigned_get_object(
                 bucket_name=settings.minio_bucket_name,
@@ -333,6 +362,8 @@ class FileService(LoggerMixin):
         Returns:
             文件列表
         """
+        self._check_minio_available()
+        
         try:
             objects = self.client.list_objects(
                 bucket_name=settings.minio_bucket_name,
@@ -365,6 +396,8 @@ class FileService(LoggerMixin):
         Returns:
             文件信息
         """
+        self._check_minio_available()
+        
         try:
             stat = self.client.stat_object(
                 bucket_name=settings.minio_bucket_name,

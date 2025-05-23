@@ -146,8 +146,23 @@ const formatDate = (date) => {
 const fetchStatistics = async () => {
   try {
     const { data } = await statisticsAPI.getStatistics()
-    statistics.value = data
-    updateChart()
+    if (data.success) {
+      const stats = data.data
+      
+      // 转换数据格式以适配组件需求
+      statistics.value = {
+        total_problems: stats.total_problems || 0,
+        total_analyses: stats.total_review_count || 0,
+        recent_reviews: [],  // 暂时为空，后端需要返回这个数据
+        subject_statistics: Object.entries(stats.by_subject || {}).map(([subject, count]) => ({
+          subject,
+          count,
+          avg_mastery: stats.avg_mastery_level || 0
+        }))
+      }
+      
+      updateChart()
+    }
   } catch (error) {
     console.error('Failed to fetch statistics:', error)
   }
@@ -156,13 +171,13 @@ const fetchStatistics = async () => {
 const updateChart = () => {
   if (!subjectChart.value) return
   
-  const subjectStats = statistics.value.subject_statistics || []
+  const bySubject = statistics.value.subject_statistics || []
   
   const chartData = {
-    labels: subjectStats.map(item => getSubjectName(item.subject)),
+    labels: bySubject.map(item => getSubjectName(item.subject)),
     datasets: [{
       label: '错题数量',
-      data: subjectStats.map(item => item.count),
+      data: bySubject.map(item => item.count),
       backgroundColor: [
         'rgba(255, 99, 132, 0.5)',
         'rgba(54, 162, 235, 0.5)',

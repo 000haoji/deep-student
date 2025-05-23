@@ -371,19 +371,21 @@ const fetchProblems = async () => {
   try {
     const { data } = await problemAPI.getList({
       ...filters,
-      skip: (pagination.current - 1) * pagination.pageSize,
-      limit: pagination.pageSize
+      page: pagination.current,
+      size: pagination.pageSize
     })
     
-    // 为每个问题添加分析状态
-    problems.value = data.map(problem => ({
-      ...problem,
-      analyzing: false,
-      ai_analyzed: problem.ai_analyzed || false
-    }))
-    
-    // 实际应该从后端返回总数
-    pagination.total = data.length * 5 // 模拟总数
+    // data应该是一个响应对象，包含data和total
+    if (data.success) {
+      // 为每个问题添加分析状态
+      problems.value = data.data.map(problem => ({
+        ...problem,
+        analyzing: false,
+        ai_analyzed: problem.ai_analysis !== null
+      }))
+      
+      pagination.total = data.total || 0
+    }
   } catch (error) {
     ElMessage.error('获取错题列表失败')
   } finally {

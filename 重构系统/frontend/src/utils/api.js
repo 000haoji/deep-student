@@ -39,22 +39,24 @@ export default api
 
 // API方法封装
 export const problemAPI = {
-  getList: (params) => api.get('/problems', { params }),
-  getDetail: (id) => api.get(`/problems/${id}`),
-  create: (data) => api.post('/problems', data),
-  update: (id, data) => api.put(`/problems/${id}`, data),
-  delete: (id) => api.delete(`/problems/${id}`),
-  review: (id, masteryLevel) => api.post(`/problems/${id}/review`, { mastery_level: masteryLevel })
+  getList: (params) => api.get('/v1/problems', { params }),
+  getDetail: (id) => api.get(`/v1/problems/${id}`),
+  create: (data) => api.post('/v1/problems', data),
+  update: (id, data) => api.put(`/v1/problems/${id}`, data),
+  delete: (id) => api.delete(`/v1/problems/${id}`),
+  review: (id, masteryLevel) => api.post(`/v1/problems/${id}/review`, { mastery_level: masteryLevel }),
+  getStats: () => api.get('/v1/problems/stats/overview'),
+  getKnowledgeStats: () => api.get('/v1/problems/stats/knowledge-points')
 }
 
 export const analysisAPI = {
-  getList: (params) => api.get('/analyses', { params }),
-  getDetail: (id) => api.get(`/analyses/${id}`),
-  create: (data) => api.post('/analyses', data)
+  getList: (params) => api.get('/v1/reviews', { params }),
+  getDetail: (id) => api.get(`/v1/reviews/${id}`),
+  create: (data) => api.post('/v1/reviews', data)
 }
 
 export const statisticsAPI = {
-  getStatistics: () => api.get('/statistics')
+  getStatistics: () => api.get('/v1/problems/stats/overview')
 }
 
 // AI API方法封装
