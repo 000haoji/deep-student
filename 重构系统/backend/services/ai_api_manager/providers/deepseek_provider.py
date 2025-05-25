@@ -7,13 +7,14 @@ import aiohttp
 from typing import Dict, Any, Optional, AsyncGenerator
 from .base import BaseAIProvider
 from ..models import TaskType
+from shared.utils.logger import LoggerMixin
 
 
-class DeepSeekProvider(BaseAIProvider):
+class DeepSeekProvider(BaseAIProvider, LoggerMixin):
     """DeepSeek AI提供商"""
     
     def __init__(self, api_key: str, api_url: str = None, model_name: str = "deepseek-chat", 
-                 timeout: int = 30, max_retries: int = 3):
+                 timeout: int = 60, max_retries: int = 5):
         super().__init__(api_key, api_url, model_name, timeout, max_retries)
         self.api_url = api_url or "https://api.deepseek.com/v1"
         self.model_name = model_name or "deepseek-chat"
@@ -262,13 +263,15 @@ class DeepSeekProvider(BaseAIProvider):
 **学生答案：** {user_answer}
 **正确答案：** {correct_answer}
 
-请以JSON格式返回分析结果，包含以下字段：
-1. knowledge_points: 涉及的知识点列表
-2. error_analysis: 详细的错误原因分析
-3. study_suggestions: 学习建议列表
-4. difficulty_level: 难度等级(1-5)
-5. solution_steps: 解题步骤（如果适用）
-6. key_concepts: 关键概念解释
+请以JSON格式返回分析结果，确保整个输出是一个单一的、合法的JSON对象。JSON对象应包含以下键：
+1. "knowledge_points": (List[str]) 一个包含该题目所涉及的核心知识点的字符串列表。
+2. "error_analysis": (str) 对学生可能产生的常见错误进行详细分析。如果提供了学生答案，请针对性分析。如果未提供学生答案，请描述该题型的常见易错点。
+3. "solution": (str) 详细的解题步骤和思路。
+4. "difficulty_level": (int) 对题目难度的评估，范围从1（非常简单）到5（非常困难）。
+5. "tags": (List[str]) 一个与题目内容和知识点相关的标签列表，用于分类和检索 (例如: "导数应用", "几何证明", "虚拟语气")。
+6. "suggested_category": (str) 根据题目内容和所属学科，建议一个最合适的细分题目分类名称 (例如: 若学科为数学，分类可以是 "函数与极限", "解析几何", "概率统计" 等)。
+7. "key_concepts": (List[str]) 题目涉及的关键概念列表。
+8. "solution_steps": (List[str]) 详细的解题步骤列表（如果适用）。
 
 请确保分析准确、详细且有指导意义。"""
         
@@ -467,7 +470,7 @@ class DeepSeekProvider(BaseAIProvider):
                     "Authorization": f"Bearer {self.api_key}"
                 },
                 request_data,
-                10
+                self.timeout
             )
             
             return "content" in result and not result.get("error")
@@ -517,4 +520,4 @@ class DeepSeekProvider(BaseAIProvider):
             "supports_streaming": True,
             "supports_vision": False,
             "supports_function_calling": True if "chat" in self.model_name else False
-        } 
+        }

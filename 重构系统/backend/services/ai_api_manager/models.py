@@ -105,6 +105,22 @@ class AIResponse(BaseModel):
         use_enum_values = True
 
 
+# 新增错题分析请求模型
+class ProblemAnalysisRequest(BaseModel):
+    """错题分析请求模型"""
+    content: str = Field(default="") # 题目文本内容
+    image_data: Optional[str] = Field(default=None) # 图片数据 (Base64)
+    analysis_method: str # 分析方法：multimodal_large 或 multimodal_small_text
+    subject: Optional[str] = Field(default=None) # 学科
+    category: Optional[str] = Field(default=None) # 分类
+    
+    @validator('image_data', always=True)
+    def check_content_or_image(cls, v, values):
+        if not values.get('content') and not v:
+            raise ValueError('Either content or image_data must be provided')
+        return v
+
+
 # SQLAlchemy模型（数据库）
 class AIModel(SQLBaseModel):
     """AI模型数据库模型"""

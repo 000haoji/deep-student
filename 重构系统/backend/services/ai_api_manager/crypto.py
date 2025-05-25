@@ -5,20 +5,28 @@
 import os
 from cryptography.fernet import Fernet
 from shared.config import settings
+# 自动加载.env
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 # 获取或生成加密密钥
 def get_encryption_key() -> bytes:
     """获取加密密钥"""
-    # 从环境变量获取
-    key = os.environ.get("ENCRYPTION_KEY")
-    
+    # 优先从AI_ENCRYPTION_KEY环境变量获取
+    key = os.environ.get("AI_ENCRYPTION_KEY")
+    if not key:
+        # 兼容旧变量名
+        key = os.environ.get("ENCRYPTION_KEY")
     if not key:
         # 在开发环境，使用固定密钥（仅供开发使用）
-        if settings.is_development:
+        if getattr(settings, 'is_development', False):
             key = "Lz9kF8E5hG7vM3nB2xQ1aW6yU4iO0pAs="
         else:
-            raise ValueError("ENCRYPTION_KEY environment variable is required in production")
+            raise ValueError("AI_ENCRYPTION_KEY environment variable is required in production")
     
     # 确保密钥是有效的Fernet密钥
     if len(key) == 32:

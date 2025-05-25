@@ -11,10 +11,10 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, AsyncGenerator, Any
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker # Import async_sessionmaker
 
-from shared.utils.logger import LoggerMixin, log_ai_api_call
-from shared.database import get_db
+from shared.utils.logger import LoggerMixin
+# from shared.database import get_db # get_db is for FastAPI dependencies
 from .models import (
     AIModel, AICallLog, AIRequest, AIResponse,
     AIProvider, TaskType, AICapability
@@ -23,6 +23,7 @@ from .providers.base import BaseAIProvider
 from .providers.openai_provider import OpenAIProvider
 from .providers.gemini_provider import GeminiProvider
 from .providers.deepseek_provider import DeepSeekProvider
+from .crypto import decrypt_api_key
 # TODO: 添加其他提供商的导入
 
 
@@ -37,19 +38,24 @@ class AIRouter(LoggerMixin):
         self._request_count: Dict[str, int] = defaultdict(int)
         self._error_count: Dict[str, int] = defaultdict(int)
         self._lock = asyncio.Lock()
-        self._db_session: Optional[AsyncSession] = None
+        self._session_maker: Optional[async_sessionmaker[AsyncSession]] = None # Changed to session_maker
     
-    async def set_db_session(self, session: AsyncSession):
-        """设置数据库会话"""
-        self._db_session = session
+    def set_session_maker(self, session_maker: async_sessionmaker[AsyncSession]): # Renamed and changed type
+        """设置数据库会话工厂"""
+        self._session_maker = session_maker
     
-    async def initialize(self, session: AsyncSession) -> None:
+    async def initialize(self) -> None: # Removed session argument
         """初始化路由器，加载所有可用的AI模型"""
-        # 查询所有激活的AI模型
-        result = await session.execute(
-            select(AIModel).where(AIModel.is_active == True)
-        )
-        models = result.scalars().all()
+        if not self._session_maker:
+            self.log_error("Database session maker not set in AIRouter. Cannot initialize.")
+            return
+
+        async with self._session_maker() as session: # Create session from maker
+            # 查询所有激活的AI模型
+            result = await session.execute(
+                select(AIModel).where(AIModel.is_active == True)
+            )
+            models = result.scalars().all()
         
         for model in models:
             await self._register_model(model)
@@ -74,21 +80,18 @@ class AIRouter(LoggerMixin):
     
     def _create_provider(self, model: AIModel) -> Optional[BaseAIProvider]:
         """根据模型配置创建提供商实例"""
-        # TODO: 解密API密钥
-        api_key = model.api_key_encrypted  # 这里应该解密
-        
+        # 解密API密钥
+        api_key = decrypt_api_key(model.api_key_encrypted)
         provider_map = {
             AIProvider.OPENAI: OpenAIProvider,
             AIProvider.GEMINI: GeminiProvider,
             AIProvider.DEEPSEEK: DeepSeekProvider,
             # TODO: 添加其他提供商映射
         }
-        
         provider_class = provider_map.get(model.provider)
         if not provider_class:
             self.log_error(f"Unknown provider: {model.provider}")
             return None
-        
         return provider_class(
             api_key=api_key,
             api_url=model.api_url,
@@ -488,7 +491,10 @@ class AIRouter(LoggerMixin):
         cost: float
     ) -> None:
         """记录成功的调用"""
-        async with self._db_session as session:
+        if not self._session_maker:
+            self.log_error("Database session maker not set. Cannot record success.")
+            return
+        async with self._session_maker() as session: # Create session from maker
             # 创建调用日志
             log = AICallLog(
                 model_id=model.id,
@@ -531,7 +537,10 @@ class AIRouter(LoggerMixin):
         start_time: float
     ) -> None:
         """记录失败的调用"""
-        async with self._db_session as session:
+        if not self._session_maker:
+            self.log_error("Database session maker not set. Cannot record failure.")
+            return
+        async with self._session_maker() as session: # Create session from maker
             duration_ms = (time.time() - start_time) * 1000
             
             # 创建调用日志
@@ -607,4 +616,4 @@ class AIRouter(LoggerMixin):
 
 
 # 创建全局路由器实例
-ai_router = AIRouter() 
+ai_router = AIRouter()

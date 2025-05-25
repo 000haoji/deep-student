@@ -2,8 +2,8 @@
 应用配置管理
 使用pydantic-settings管理环境变量和配置
 """
-from typing import List, Optional, Union
-from pydantic import Field, validator
+from typing import List, Optional, Union, Dict, Any
+from pydantic import Field, validator, root_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 import os
@@ -22,11 +22,9 @@ class Settings(BaseSettings):
     debug: bool = Field(default=True, env="DEBUG")
     
     # 数据库配置
-    database_url: str = Field(
-        default="sqlite+aiosqlite:///./error_management.db",
-        env="DATABASE_URL"
-    )
-    database_echo: bool = Field(default=False, env="DATABASE_ECHO")
+    # Use local SQLite for development; ignore environment override
+    database_url: str = "sqlite+aiosqlite:///./dev.db"
+    database_echo: bool = False
     
     # Redis配置（可选）
     redis_url: Optional[str] = Field(default=None, env="REDIS_URL")
@@ -69,14 +67,32 @@ class Settings(BaseSettings):
     
     # Elasticsearch配置（可选）
     elasticsearch_url: Optional[str] = Field(default=None, env="ELASTICSEARCH_URL")
-    
-    @validator("database_url")
-    def validate_database_url(cls, v: str) -> str:
-        """验证并转换数据库URL"""
-        # 如果是SQLite，确保使用正确的异步驱动
-        if v.startswith("sqlite://"):
-            v = v.replace("sqlite://", "sqlite+aiosqlite://")
-        return v
+
+    # JWT 密钥
+    jwt_secret_key: str = Field(default="a_very_strong_default_secret_key_for_dev_only", env="JWT_SECRET_KEY")
+
+    @root_validator(skip_on_failure=True)
+    @classmethod
+    def _override_db_for_dev_and_validate_url(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Overrides database_url and database_echo for development environment.
+        Ensures sqlite URLs use the 'sqlite+aiosqlite://' scheme.
+        """
+        app_env = values.get("app_env")
+        
+        if app_env == "development":
+            # Force SQLite and echo for development
+            values["database_url"] = "sqlite+aiosqlite:///./dev.db"
+            values["database_echo"] = True
+        
+        # Validate/normalize database_url format for SQLite, regardless of env
+        # This handles cases where DATABASE_URL might be set to "sqlite://" for other envs
+        # or if the default is still "sqlite://"
+        db_url = values.get("database_url")
+        if db_url and db_url.startswith("sqlite://"):
+            values["database_url"] = db_url.replace("sqlite://", "sqlite+aiosqlite://")
+        
+        return values
     
     @property
     def is_development(self) -> bool:
@@ -98,6 +114,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
         # 允许从环境变量读取JSON格式的列表
         json_schema_extra={
             "env_parse_none_str": "null",
@@ -115,4 +132,4 @@ def get_settings() -> Settings:
 
 
 # 创建全局配置实例
-settings = get_settings() 
+settings = get_settings()

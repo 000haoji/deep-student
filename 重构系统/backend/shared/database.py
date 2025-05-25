@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
+from sqlalchemy.pool import NullPool
 
 from .config import settings
 from .utils.logger import get_logger
@@ -16,8 +17,8 @@ logger = get_logger(__name__)
 if settings.database_url.startswith("sqlite"):
     engine = create_async_engine(
         settings.database_url,
-        echo=settings.debug,
-        pool_pre_ping=True
+        echo=settings.database_echo,
+        poolclass=NullPool
     )
 else:
     engine = create_async_engine(
@@ -93,4 +94,4 @@ async def drop_tables():
 async def close_db():
     """关闭数据库连接"""
     await engine.dispose()
-    logger.info("Database connection closed") 
+    logger.info("Database connection closed")

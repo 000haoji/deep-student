@@ -7,9 +7,9 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from ..problem_service.schemas import ProblemAnalyzeRequest
 from shared.utils.logger import LoggerMixin
-from .models import AIModel, AIModelConfig, AIRequest, AIResponse, AICallLog
+from .models import AIModel, AIModelConfig, AIRequest, AIResponse, AICallLog, AICapability # Added AICapability
 from .crypto import encrypt_api_key, decrypt_api_key
 from .providers import create_provider
 
@@ -94,10 +94,25 @@ class AIModelService(LoggerMixin):
         if not model:
             return None
         
+        # 如果模型名称发生变化，检查是否会导致唯一约束冲突
+        if config.model_name != model.model_name:
+            existing = await self.db.execute(
+                select(AIModel).where(
+                    and_(
+                        AIModel.provider == config.provider,
+                        AIModel.model_name == config.model_name,
+                        AIModel.id != model_id  # 排除当前模型
+                    )
+                )
+            )
+            if existing.scalar_one_or_none():
+                raise ValueError(f"模型 {config.provider}:{config.model_name} 已存在")
+        
         # 更新字段
         if config.api_key:
             model.api_key_encrypted = encrypt_api_key(config.api_key)
         
+        model.model_name = config.model_name
         model.api_url = config.api_url
         model.priority = config.priority
         model.is_active = config.is_active
@@ -108,11 +123,15 @@ class AIModelService(LoggerMixin):
         model.max_retries = config.max_retries
         model.custom_headers = config.custom_headers
         
-        await self.db.commit()
-        await self.db.refresh(model)
-        
-        self.log_info(f"更新AI模型: {model_id}")
-        return model
+        try:
+            await self.db.commit()
+            await self.db.refresh(model)
+            self.log_info(f"更新AI模型: {model_id}")
+            return model
+        except Exception as e:
+            await self.db.rollback()
+            self.log_error(f"更新AI模型失败: {str(e)}")
+            raise
     
     async def delete_model(self, model_id: str) -> bool:
         """删除AI模型（软删除）"""
@@ -142,7 +161,9 @@ class AIModelService(LoggerMixin):
                 model_name=model.model_name,
                 api_key=api_key,
                 api_url=model.api_url,
-                capabilities=model.capabilities
+                capabilities=model.capabilities,
+                timeout=model.timeout,
+                max_retries=model.max_retries
             )
             
             # 创建提供者并测试
@@ -170,75 +191,9 @@ class AIModelService(LoggerMixin):
                 "model_info": None
             }
     
-    async def log_call(
-        self,
-        request: AIRequest,
-        response: AIResponse
-    ) -> None:
-        """记录AI调用日志"""
-        try:
-            # 查找使用的模型
-            models = await self.list_models(is_active=True)
-            model = None
-            for m in models:
-                if m.provider == response.provider and m.model_name == response.model:
-                    model = m
-                    break
-            
-            if not model:
-                self.log_warning(f"找不到模型记录: {response.provider}:{response.model}")
-                return
-            
-            # 创建日志记录
-            log = AICallLog(
-                model_id=model.id,
-                task_type=request.task_type,
-                request_data={
-                    "content": request.content,
-                    "max_tokens": request.max_tokens,
-                    "temperature": request.temperature
-                },
-                response_data={
-                    "content": response.content,
-                    "usage": response.usage
-                },
-                tokens_used=response.usage.get("total_tokens", 0),
-                cost=response.cost,
-                duration_ms=response.duration_ms,
-                status="success" if response.success else "failed",
-                error_message=response.error
-            )
-            
-            self.db.add(log)
-            
-            # 更新模型统计
-            model.total_requests += 1
-            if response.success:
-                model.successful_requests += 1
-            else:
-                model.failed_requests += 1
-                model.last_error = response.error
-                model.last_error_at = datetime.utcnow()
-            
-            model.total_tokens_used += response.usage.get("total_tokens", 0)
-            model.total_cost += response.cost
-            model.last_used_at = datetime.utcnow()
-            
-            # 更新平均响应时间
-            if model.average_response_time == 0:
-                model.average_response_time = response.duration_ms
-            else:
-                # 移动平均
-                model.average_response_time = (
-                    model.average_response_time * 0.9 + response.duration_ms * 0.1
-                )
-            
-            await self.db.commit()
-            
-        except Exception as e:
-            self.log_error(f"记录AI调用失败: {e}")
-            # 不抛出异常，避免影响主流程
-    
+    # Removed log_call method as AIRouter will handle logging and statistics update
+    # async def log_call(...)
+
     async def get_statistics(self) -> Dict[str, Any]:
         """获取AI使用统计"""
         models = await self.list_models()
@@ -263,7 +218,7 @@ class AIModelService(LoggerMixin):
             provider_stats[model.provider]["tokens"] += model.total_tokens_used
             provider_stats[model.provider]["models"].append(model.model_name)
         
-        # 最近24小时统计
+        # 最近4小时统计
         recent_logs = await self.db.execute(
             select(AICallLog).where(
                 AICallLog.created_at >= datetime.utcnow().replace(
@@ -291,7 +246,20 @@ class AIModelService(LoggerMixin):
                 "success_rate": sum(m.successful_requests for m in models) / total_requests if total_requests > 0 else 0
             }
         }
-    
+
+    async def _select_model_by_capabilities(self, capabilities: List[AICapability]) -> Optional[AIModel]:
+        """根据所需能力选择合适的AI模型（待实现详细选择逻辑）"""
+        # TODO: 实现更复杂的模型选择逻辑，例如按优先级、负载、健康状态等
+        models = await self.list_models(is_active=True)
+        
+        for model in models:
+            model_capabilities = set(model.capabilities)
+            if all(cap.value in model_capabilities for cap in capabilities):
+                # 找到第一个匹配的模型（临时简单实现）
+                return model
+        
+        return None
+
     async def check_all_health(self) -> Dict[str, Any]:
         """检查所有AI模型健康状态"""
         models = await self.list_models(is_active=True)
@@ -321,4 +289,4 @@ class AIModelService(LoggerMixin):
             "healthy_models": healthy_count,
             "total_models": total_count,
             "models": health_status
-        } 
+        }

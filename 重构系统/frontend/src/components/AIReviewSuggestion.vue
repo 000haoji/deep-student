@@ -255,14 +255,14 @@ import {
 } from '@element-plus/icons-vue'
 import { aiAPI, problemAPI } from '@/utils/api'
 
-const props = defineProps({
-  userId: {
-    type: String,
-    default: null
-  }
-})
+// const props = defineProps({ // userId prop removed
+//   userId: {
+//     type: String,
+//     default: null
+//   }
+// })
 
-const emit = defineEmits(['startReview', 'viewProblems'])
+const emit = defineEmits(['startReview', 'viewProblems', 'practiceKnowledgePoint']) // Added practiceKnowledgePoint
 
 const loading = ref(false)
 const suggestions = reactive({
@@ -334,11 +334,10 @@ const generateSuggestions = async () => {
   loading.value = true
   
   try {
-    // 首先获取用户的错题数据
+    // Fetch problems (globally, not user-specific)
     const problemsResponse = await problemAPI.getList({ 
       page: 1, 
-      size: 100,
-      user_id: props.userId 
+      size: 100 // Consider making size smaller or configurable if not all problems are needed for suggestion
     })
     
     const problems = problemsResponse.data.data || []
@@ -703,4 +702,4 @@ defineExpose({
   color: #67c23a;
   font-weight: bold;
 }
-</style> 
+</style>

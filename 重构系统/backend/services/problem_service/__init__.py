@@ -2,17 +2,22 @@
 错题管理服务
 提供错题的CRUD、AI分析、复习管理等功能
 """
-from .models import Problem, ReviewRecord, Subject
+from .models import Problem, ReviewRecord, Subject, ProblemTag, ProblemCategory
 from .schemas import (
     ProblemCreate,
     ProblemUpdate,
-    ProblemResponse,
+    ProblemData,             # Changed from ProblemResponse
+    SingleProblemResponse,   # Added
     ProblemListResponse,
     ReviewRecordCreate,
-    ReviewRecordResponse
+    # ReviewRecordResponse,  # This was also removed/refactored in schemas.py, need to check its usage.
+                           # Assuming ReviewRecordResponse is still valid or was not the cause of the immediate error.
+                           # Let's re-check schemas.py for ReviewRecordResponse.
+                           # ReviewRecordResponse is still in schemas.py.
+    ReviewRecordResponse,
+    ProblemQuery
 )
-# 临时注释掉，避免导入依赖问题
-# from .service import ProblemService
+from .service import ProblemService
 from .api import router as problem_router
 
 __all__ = [
@@ -20,18 +25,22 @@ __all__ = [
     "Problem",
     "ReviewRecord",
     "Subject",
+    "ProblemTag",
+    "ProblemCategory",
     
     # Schema
     "ProblemCreate",
     "ProblemUpdate",
-    "ProblemResponse",
+    "ProblemData",             # Changed from ProblemResponse
+    "SingleProblemResponse",   # Added
     "ProblemListResponse",
     "ReviewRecordCreate",
     "ReviewRecordResponse",
+    "ProblemQuery",
     
     # 服务
-    # "ProblemService",
+    "ProblemService",
     
     # 路由
     "problem_router"
-] 
+]

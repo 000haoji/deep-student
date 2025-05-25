@@ -3,6 +3,7 @@
 提供深度分析、学习模式识别、进度跟踪等功能
 """
 import json
+import uuid # 导入 uuid 模块
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
 from collections import defaultdict, Counter
@@ -10,31 +11,37 @@ from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.utils.logger import LoggerMixin
-from services.ai_api_manager import ai_router, AIRequest, TaskType
-from services.problem_service.models import Problem, Subject
-from .models import ReviewAnalysis, AnalysisFollowUp, LearningPattern, AnalysisType
+# from services.ai_api_manager.service import AIModelService # No longer needed here
+from services.ai_api_manager.models import AIRequest, TaskType # Use models.AIRequest
+from services.ai_api_manager.router import ai_router # Import global ai_router
+from services.problem_service.models import Problem, Subject, ReviewRecord
+from services.problem_service.service import ProblemService
+from .models import ReviewAnalysis, AnalysisFollowUp, LearningPattern, AnalysisType, ReviewPlan, ReviewStage
 from .schemas import (
     BatchAnalysisRequest, KnowledgePointAnalysisRequest,
     TimePeriodAnalysisRequest, ComprehensiveAnalysisRequest,
-    FollowUpRequest
+    FollowUpRequest # ReviewPlanCreate, ReviewPlanUpdate # Temporarily commented out
 )
 
 
 class ReviewService(LoggerMixin):
-    """回顾分析服务"""
+    """复习服务"""
     
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.problem_service = ProblemService(db)
+        # self._ai_service and ai_service property removed, will use global ai_router
     
     async def analyze_batch_problems(
         self,
         request: BatchAnalysisRequest
+        # user_id: str # user_id REMOVED
     ) -> ReviewAnalysis:
         """批量分析错题"""
         # 获取题目信息
-        problems = await self._get_problems_by_ids(request.problem_ids)
+        problems = await self._get_problems_by_ids(request.problem_ids) # user_id removed
         if not problems:
-            raise ValueError("No valid problems found")
+            raise ValueError("No valid problems found or problem IDs are invalid.") # "for the current user" removed
         
         # 准备分析数据
         analysis_data = self._prepare_problems_data(problems)
@@ -49,7 +56,7 @@ class ReviewService(LoggerMixin):
             }
         )
         
-        ai_response = await ai_router.route_request(ai_request)
+        ai_response = await ai_router.route_request(ai_request) # Use global ai_router
         
         if not ai_response.success:
             raise Exception(f"AI analysis failed: {ai_response.error}")
@@ -60,6 +67,7 @@ class ReviewService(LoggerMixin):
         
         # 创建分析记录
         analysis = ReviewAnalysis(
+            # user_id=user_id, # user_id REMOVED from ReviewAnalysis model
             title=request.title or f"批量分析 - {len(problems)}道题目",
             analysis_type=AnalysisType.BATCH_PROBLEMS,
             description=request.description,
@@ -89,12 +97,14 @@ class ReviewService(LoggerMixin):
     async def analyze_knowledge_points(
         self,
         request: KnowledgePointAnalysisRequest
+        # user_id: str # user_id REMOVED
     ) -> ReviewAnalysis:
         """分析特定知识点"""
         # 获取包含这些知识点的题目
         problems = await self._get_problems_by_knowledge_points(
-            request.knowledge_points,
-            request.date_range
+            knowledge_points=request.knowledge_points,
+            # user_id=user_id, # user_id removed
+            date_range=request.date_range
         )
         
         if len(problems) < request.min_problem_count:
@@ -116,7 +126,7 @@ class ReviewService(LoggerMixin):
             content=analysis_data
         )
         
-        ai_response = await ai_router.route_request(ai_request)
+        ai_response = await ai_router.route_request(ai_request) # Use global ai_router
         
         if not ai_response.success:
             raise Exception(f"AI analysis failed: {ai_response.error}")
@@ -126,6 +136,7 @@ class ReviewService(LoggerMixin):
         parsed_analysis = self._parse_ai_analysis(ai_analysis)
         
         analysis = ReviewAnalysis(
+            # user_id=user_id, # user_id REMOVED
             title=f"知识点分析 - {', '.join(request.knowledge_points[:3])}",
             analysis_type=AnalysisType.KNOWLEDGE_POINT,
             description=f"分析知识点: {', '.join(request.knowledge_points)}",
@@ -155,13 +166,15 @@ class ReviewService(LoggerMixin):
     async def analyze_time_period(
         self,
         request: TimePeriodAnalysisRequest
+        # user_id: str # user_id REMOVED
     ) -> ReviewAnalysis:
         """分析时间段内的学习情况"""
         # 获取时间段内的题目
         problems = await self._get_problems_by_date_range(
-            request.start_date,
-            request.end_date,
-            request.subjects
+            start_date=request.start_date,
+            end_date=request.end_date,
+            # user_id=user_id, # user_id removed
+            subjects=request.subjects
         )
         
         if not problems:
@@ -184,7 +197,7 @@ class ReviewService(LoggerMixin):
             }
         )
         
-        ai_response = await ai_router.route_request(ai_request)
+        ai_response = await ai_router.route_request(ai_request) # Use global ai_router
         
         if not ai_response.success:
             raise Exception(f"AI analysis failed: {ai_response.error}")
@@ -194,6 +207,7 @@ class ReviewService(LoggerMixin):
         parsed_analysis = self._parse_ai_analysis(ai_analysis)
         
         analysis = ReviewAnalysis(
+            # user_id=user_id, # user_id REMOVED
             title=f"时间段分析 {request.start_date} - {request.end_date}",
             analysis_type=AnalysisType.TIME_PERIOD,
             description=f"分析时间段内的学习进展和趋势",
@@ -226,10 +240,14 @@ class ReviewService(LoggerMixin):
     async def comprehensive_analysis(
         self,
         request: ComprehensiveAnalysisRequest
+        # user_id: str # user_id REMOVED
     ) -> ReviewAnalysis:
         """综合分析"""
         # 构建查询条件
-        query = select(Problem).where(Problem.deleted_at.is_(None))
+        query = select(Problem).where(
+            Problem.deleted_at.is_(None)
+            # Problem.user_id == user_id # user_id filter REMOVED
+        )
         
         if not request.include_all_problems:
             # 只分析特定范围
@@ -269,7 +287,7 @@ class ReviewService(LoggerMixin):
             }
         )
         
-        ai_response = await ai_router.route_request(ai_request)
+        ai_response = await ai_router.route_request(ai_request) # Use global ai_router
         
         if not ai_response.success:
             raise Exception(f"AI analysis failed: {ai_response.error}")
@@ -279,6 +297,7 @@ class ReviewService(LoggerMixin):
         parsed_analysis = self._parse_ai_analysis(ai_analysis)
         
         analysis = ReviewAnalysis(
+            # user_id=user_id, # user_id REMOVED
             title="综合学习分析报告",
             analysis_type=AnalysisType.COMPREHENSIVE,
             description="全面分析学习情况、进展和改进方向",
@@ -306,19 +325,78 @@ class ReviewService(LoggerMixin):
         await self.db.refresh(analysis)
         
         # 识别学习模式
-        await self._identify_learning_patterns(problems, analysis.id)
+        # await self._identify_learning_patterns(problems, analysis.id) # Temporarily comment out if LearningPattern is not fully defined or used
         
         return analysis
+
+    async def get_analysis_service(self, analysis_id: str) -> Optional[ReviewAnalysis]: # user_id removed
+        """获取单个分析详情""" # user_id validation removed
+        try:
+            analysis_uuid = uuid.UUID(analysis_id)
+        except ValueError:
+            self.log_warning(f"Invalid UUID format for analysis_id: {analysis_id}")
+            return None
+            
+        result = await self.db.execute(
+            select(ReviewAnalysis).where(
+                and_(
+                    ReviewAnalysis.id == analysis_uuid
+                    # ReviewAnalysis.user_id == user_id # user_id filter REMOVED
+                )
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_analyses_service(
+        self,
+        # user_id: str, # user_id REMOVED
+        analysis_type: Optional[AnalysisType] = None,
+        page: int = 1,
+        size: int = 20,
+        importance_min: Optional[float] = None,
+        urgency_min: Optional[float] = None,
+        sort_by: str = "created_at", # Default sort field
+        sort_desc: bool = True      # Default sort order
+    ) -> tuple[List[ReviewAnalysis], int]:
+        """获取分析列表""" # user_id validation removed
+        query = select(ReviewAnalysis) # user_id filter REMOVED
+
+        if analysis_type:
+            query = query.where(ReviewAnalysis.analysis_type == analysis_type)
+        if importance_min is not None:
+            query = query.where(ReviewAnalysis.importance_score >= importance_min)
+        if urgency_min is not None:
+            query = query.where(ReviewAnalysis.urgency_score >= urgency_min)
+
+        # 计算总数
+        count_query = select(func.count()).select_from(query.subquery())
+        total = await self.db.scalar(count_query)
+
+        # 排序
+        sort_column_attr = getattr(ReviewAnalysis, sort_by, ReviewAnalysis.created_at)
+        if sort_desc:
+            query = query.order_by(desc(sort_column_attr))
+        else:
+            query = query.order_by(sort_column_attr)
+        
+        # 分页
+        query = query.offset((page - 1) * size).limit(size)
+        
+        result = await self.db.execute(query)
+        analyses = result.scalars().all()
+        
+        return analyses, total
     
     async def add_follow_up(
         self,
         request: FollowUpRequest
+        # user_id: str # user_id REMOVED
     ) -> AnalysisFollowUp:
         """添加分析跟进记录"""
         # 验证分析是否存在
-        analysis = await self.db.get(ReviewAnalysis, request.analysis_id)
+        analysis = await self.get_analysis_service(request.analysis_id) # user_id removed
         if not analysis:
-            raise ValueError("Analysis not found")
+            raise ValueError("Analysis not found.") # "or user does not have permission" removed
         
         # 创建跟进记录
         follow_up = AnalysisFollowUp(
@@ -346,25 +424,25 @@ class ReviewService(LoggerMixin):
         
         return follow_up
     
-    async def get_learning_insights(self) -> List[Dict[str, Any]]:
-        """获取学习洞察"""
+    async def get_learning_insights(self) -> List[Dict[str, Any]]: # user_id removed
+        """获取学习洞察""" # "(用户特定)" removed
         insights = []
         
         # 1. 进步趋势
-        progress_insight = await self._analyze_progress_trend()
+        progress_insight = await self._analyze_progress_trend() # user_id removed
         if progress_insight:
             insights.append(progress_insight)
         
         # 2. 异常检测
-        anomaly_insights = await self._detect_anomalies()
+        anomaly_insights = await self._detect_anomalies() # user_id removed
         insights.extend(anomaly_insights)
         
         # 3. 里程碑
-        milestone_insights = await self._check_milestones()
+        milestone_insights = await self._check_milestones() # user_id removed
         insights.extend(milestone_insights)
         
         # 4. 建议
-        recommendation_insights = await self._generate_recommendations()
+        recommendation_insights = await self._generate_recommendations() # user_id removed
         insights.extend(recommendation_insights)
         
         # 按重要性排序
@@ -373,12 +451,25 @@ class ReviewService(LoggerMixin):
         return insights
     
     # 辅助方法
-    async def _get_problems_by_ids(self, problem_ids: List[str]) -> List[Problem]:
-        """根据ID获取题目"""
+    async def _get_problems_by_ids(self, problem_ids: List[str]) -> List[Problem]: # user_id removed
+        """根据ID获取题目""" # user_id validation removed
+        # 注意：problem_ids 可能是字符串形式的UUID，需要转换为UUID对象进行查询
+        problem_ids_as_uuid = []
+        for pid_str in problem_ids:
+            try:
+                problem_ids_as_uuid.append(uuid.UUID(pid_str))
+            except ValueError:
+                self.log_warning(f"Invalid UUID format for problem ID: {pid_str}")
+                # 根据策略，可以选择忽略无效ID或引发错误
+        
+        if not problem_ids_as_uuid:
+            return [] # 如果没有有效的UUID，则返回空列表
+
         result = await self.db.execute(
             select(Problem).where(
                 and_(
-                    Problem.id.in_(problem_ids),
+                    Problem.id.in_(problem_ids_as_uuid), # 使用转换后的UUID列表
+                    # Problem.user_id == user_id, # user_id filter REMOVED
                     Problem.deleted_at.is_(None)
                 )
             )
@@ -388,10 +479,14 @@ class ReviewService(LoggerMixin):
     async def _get_problems_by_knowledge_points(
         self,
         knowledge_points: List[str],
+        # user_id: str, # user_id REMOVED
         date_range: Optional[Dict[str, date]] = None
     ) -> List[Problem]:
         """根据知识点获取题目"""
-        query = select(Problem).where(Problem.deleted_at.is_(None))
+        query = select(Problem).where(
+            Problem.deleted_at.is_(None)
+            # Problem.user_id == user_id # user_id filter REMOVED
+        )
         
         # 知识点过滤
         kp_conditions = []
@@ -415,6 +510,7 @@ class ReviewService(LoggerMixin):
         self,
         start_date: date,
         end_date: date,
+        # user_id: str, # user_id REMOVED
         subjects: Optional[List[str]] = None
     ) -> List[Problem]:
         """根据时间范围获取题目"""
@@ -422,6 +518,7 @@ class ReviewService(LoggerMixin):
             and_(
                 Problem.created_at >= start_date,
                 Problem.created_at <= end_date,
+                # Problem.user_id == user_id, # user_id filter REMOVED
                 Problem.deleted_at.is_(None)
             )
         )
@@ -576,13 +673,13 @@ class ReviewService(LoggerMixin):
             "top_knowledge_points": coverage[:10]
         }
     
-    async def _analyze_learning_progress(self) -> Dict[str, Any]:
-        """分析学习进展"""
+    async def _analyze_learning_progress(self) -> Dict[str, Any]: # user_id removed
+        """分析学习进展""" # "(用户特定)" removed
         # 获取最近30天的数据
         end_date = datetime.now().date()
         start_date = end_date - timedelta(days=30)
         
-        # 查询统计数据
+        # 查询统计数据 (用户特定)
         result = await self.db.execute(
             select(
                 func.date(Problem.created_at).label("date"),
@@ -591,6 +688,7 @@ class ReviewService(LoggerMixin):
             ).where(
                 and_(
                     Problem.created_at >= start_date,
+                    # Problem.user_id == user_id, # Filter by user_id REMOVED
                     Problem.deleted_at.is_(None)
                 )
             ).group_by(func.date(Problem.created_at))
@@ -639,30 +737,330 @@ class ReviewService(LoggerMixin):
         # 简化实现
         return []
     
-    async def _analyze_progress_trend(self) -> Optional[Dict[str, Any]]:
-        """分析进步趋势"""
-        # 简化实现
+    async def _analyze_progress_trend(self) -> Optional[Dict[str, Any]]: # user_id removed
+        """分析进步趋势""" # "(用户特定)" removed
+        # 获取最近30天的学习进展数据
+        learning_progress_data = await self._analyze_learning_progress() # user_id removed
+        
+        # 简化实现：如果最近有题目且平均掌握度高于某个阈值，则认为进步明显
+        # 在实际应用中，这里会进行更复杂的时间序列分析或比较分析
+        avg_daily_problems = learning_progress_data.get("avg_daily_problems", 0)
+        # mastery_trend_indicator = learning_progress_data.get("mastery_trend", "stable") # Placeholder
+
+        # This is a very simplified example.
+        # A real trend analysis would look at changes over time.
+        # For now, let's assume if they did some problems recently, it's a positive sign.
+        # The `_analyze_learning_progress` already calculates `mastery_trend` in a simplified way.
+
+        problems_last_30_days_count = await self.db.scalar(
+            select(func.count(Problem.id)).where(
+                # Problem.user_id == user_id, # user_id filter REMOVED
+                Problem.created_at >= (datetime.now().date() - timedelta(days=30)),
+                Problem.deleted_at.is_(None)
+            )
+        )
+        
+        if problems_last_30_days_count > 5: # Arbitrary threshold
+            return {
+                "insight_type": "trend",
+                "title": "近期学习活跃",
+                "description": f"过去30天内记录了 {problems_last_30_days_count} 道题目，请继续保持！", # "您在" removed
+                "supporting_data": {"problems_last_30_days": problems_last_30_days_count},
+                "importance": 7.0,
+                "actionable": True,
+                "recommended_actions": ["制定学习计划，保持学习节奏", "针对近期错题进行复盘"]
+            }
+        return None
+    
+    async def _detect_anomalies(self) -> List[Dict[str, Any]]: # user_id removed
+        """检测异常""" # "(用户特定)" removed
+        # 示例：检测在某个知识点上掌握度突然下降
+        anomalies = []
+        # Query for problems where mastery dropped significantly after a review
+        # This is a complex query and requires tracking mastery changes over time or per review.
+        # For simplification, this part remains a placeholder.
+        # Example: "知识点 '微积分初步' 掌握度近期有明显波动，建议重点复习。"
+        return anomalies
+    
+    async def _check_milestones(self) -> List[Dict[str, Any]]: # user_id removed
+        """检查里程碑""" # "(用户特定)" removed
+        milestones = []
+        # 示例：解决了超过100道题
+        total_problems_count = await self.db.scalar(
+            select(func.count(Problem.id)).where(Problem.deleted_at.is_(None)) # user_id filter REMOVED
+        )
+        if total_problems_count >= 100:
+            milestones.append({
+                "insight_type": "milestone",
+                "title": "成就达成：累计解决100题！",
+                "description": "已累计解决超过100道题目，继续努力！", # "恭喜您" removed
+                "supporting_data": {"total_problems": total_problems_count},
+                "importance": 8.0,
+                "actionable": False
+            })
+        # Add more milestones: e.g., "数学学科平均掌握度达到80%"
+        return milestones
+    
+    async def _generate_recommendations(self) -> List[Dict[str, Any]]: # user_id removed
+        """生成建议""" # "(用户特定)" removed
+        recommendations = []
+        # 示例：如果在某些知识点上掌握度较低，则生成复习建议
+        low_mastery_problems = await self.db.execute(
+            select(Problem.knowledge_points, func.avg(Problem.mastery_level).label("avg_kp_mastery"))
+            .where(Problem.mastery_level < 0.5, Problem.deleted_at.is_(None), Problem.knowledge_points.isnot(None)) # user_id filter REMOVED
+            .group_by(Problem.knowledge_points) # This group by might be tricky if knowledge_points is JSON array
+            .limit(5) # Get top 5 knowledge areas with low mastery
+        )
+        # The above query is a bit complex due to JSON array.
+        # A simpler approach for recommendation: find problems with low mastery and suggest reviewing them.
+        
+        problems_to_review_query = select(Problem).where(
+            # Problem.user_id == user_id, # user_id filter REMOVED
+            Problem.mastery_level < 0.6, # Threshold for "needs review"
+            Problem.deleted_at.is_(None)
+        ).order_by(Problem.last_review_at.asc().nulls_first(), Problem.created_at.desc()).limit(3) # Prioritize older or never reviewed
+
+        problems_to_review_results = await self.db.execute(problems_to_review_query)
+        problems_to_review = problems_to_review_results.scalars().all()
+
+        if problems_to_review:
+            problem_titles = [p.title for p in problems_to_review]
+            recommendations.append({
+                "insight_type": "recommendation",
+                "title": "复习建议",
+                "description": f"在以下题目上掌握度较低，建议优先复习：{', '.join(problem_titles)}", # "您" removed
+                "supporting_data": {"problem_ids_to_review": [str(p.id) for p in problems_to_review]},
+                "importance": 7.5,
+                "actionable": True,
+                "recommended_actions": ["将这些题目加入复习计划", "重新学习相关知识点"]
+            })
+        return recommendations
+    
+    # async def create_review_plan(
+    #     self,
+    #     data: ReviewPlanCreate # This schema is not defined yet
+    # ) -> ReviewPlan:
+    #     """创建复习计划"""
+    #     try:
+    #         # 获取需要复习的题目
+    #         # user_id related logic removed
+    #         problems, _ = await self.problem_service.list_problems(
+    #             # user_id=user_id_for_problems, # user_id REMOVED
+    #             subject=data.subject,
+    #             category=data.category,
+    #             tags=data.tags,
+    #             mastery_range=(0, 0.8)  # 掌握度低于80%的题目
+    #         )
+            
+    #         if not problems:
+    #             raise ValueError("No problems found for review for the specified criteria.") # "for the specified user" removed
+            
+    #         # 创建复习计划
+    #         plan = ReviewPlan(
+    #             id=str(uuid.uuid4()), # Ensure ID is generated if model expects it
+    #             # user_id=user_id_for_problems, # user_id REMOVED from ReviewPlan model
+    #             title=data.title,
+    #             subject=data.subject,
+    #             category=data.category,
+    #             tags=data.tags,
+    #             start_date=data.start_date,
+    #             end_date=data.end_date,
+    #             total_problems=len(problems)
+    #         )
+            
+    #         self.db.add(plan)
+    #         await self.db.commit()
+    #         await self.db.refresh(plan)
+            
+    #         # 生成复习阶段
+    #         await self._generate_review_stages(plan, problems)
+            
+    #         self.log_info(f"Created review plan: {plan.id}")
+    #         return plan
+            
+    #     except Exception as e:
+    #         self.log_error(f"Failed to create review plan: {e}")
+    #         await self.db.rollback()
+    #         raise
+    
+    async def _generate_review_stages(
+        self,
+        plan: ReviewPlan,
+        problems: List[Problem]
+    ) -> None:
+        """生成复习阶段"""
+        # 艾宾浩斯遗忘曲线复习间隔（小时）
+        review_intervals = [1, 24, 72, 168, 360, 720]
+        
+        # 计算每个阶段的复习时间
+        current_time = plan.start_date
+        for interval in review_intervals:
+            stage_time = current_time + timedelta(hours=interval)
+            if stage_time > plan.end_date:
+                break
+                
+            # 创建复习阶段
+            stage = ReviewStage(
+                plan_id=plan.id,
+                scheduled_time=stage_time,
+                interval_hours=interval,
+                status="pending"
+            )
+            
+            self.db.add(stage)
+        
+        await self.db.commit()
+    
+    async def adjust_review_plan(
+        self,
+        plan_id: str,
+        user_performance: Dict[str, float]
+    ) -> ReviewPlan:
+        """动态调整复习计划"""
+        plan = await self.get_review_plan(plan_id)
+        if not plan:
+            raise ValueError("Review plan not found")
+        
+        try:
+            # 获取最近的复习记录
+            recent_records = await self._get_recent_review_records(plan_id)
+            
+            # 分析用户表现
+            performance_analysis = self._analyze_performance(recent_records, user_performance)
+            
+            # 调整复习间隔
+            await self._adjust_review_intervals(plan, performance_analysis)
+            
+            # 更新计划状态
+            plan.last_adjusted = datetime.now()
+            plan.adjustment_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "analysis": performance_analysis
+            })
+            
+            await self.db.commit()
+            await self.db.refresh(plan)
+            
+            self.log_info(f"Adjusted review plan: {plan_id}")
+            return plan
+            
+        except Exception as e:
+            self.log_error(f"Failed to adjust review plan: {e}")
+            await self.db.rollback()
+            raise
+    
+    async def _get_recent_review_records(
+        self,
+        plan_id: str,
+        days: int = 7
+    ) -> List[ReviewRecord]:
+        """获取最近的复习记录"""
+        cutoff_time = datetime.now() - timedelta(days=days)
+        
+        result = await self.db.execute(
+            select(ReviewRecord)
+            .where(
+                and_(
+                    ReviewRecord.plan_id == plan_id,
+                    ReviewRecord.created_at >= cutoff_time
+                )
+            )
+            .order_by(ReviewRecord.created_at.desc())
+        )
+        
+        return result.scalars().all()
+    
+    def _analyze_performance(
+        self,
+        records: List[ReviewRecord],
+        user_performance: Dict[str, float]
+    ) -> Dict[str, Any]:
+        """分析用户表现"""
+        if not records:
+            return {"status": "insufficient_data"}
+        
+        # 计算平均掌握度
+        avg_mastery = sum(r.mastery_level for r in records) / len(records)
+        
+        # 分析错误模式
+        error_patterns = {}
+        for record in records:
+            if record.error_analysis:
+                pattern = record.error_analysis.get("pattern", "unknown")
+                error_patterns[pattern] = error_patterns.get(pattern, 0) + 1
+        
+        # 分析学习速度
+        completion_times = []
+        for i in range(1, len(records)):
+            time_diff = (records[i-1].created_at - records[i].created_at).total_seconds()
+            completion_times.append(time_diff)
+        
+        avg_completion_time = sum(completion_times) / len(completion_times) if completion_times else 0
+        
         return {
-            "insight_type": "trend",
-            "title": "学习进步明显",
-            "description": "最近30天平均掌握度提升15%",
-            "supporting_data": {"improvement": 0.15},
-            "importance": 7.5,
-            "actionable": True,
-            "recommended_actions": ["继续保持当前学习节奏"]
+            "status": "success",
+            "avg_mastery": avg_mastery,
+            "error_patterns": error_patterns,
+            "avg_completion_time": avg_completion_time,
+            "user_performance": user_performance
         }
     
-    async def _detect_anomalies(self) -> List[Dict[str, Any]]:
-        """检测异常"""
-        # 简化实现
-        return []
+    async def _adjust_review_intervals(
+        self,
+        plan: ReviewPlan,
+        performance: Dict[str, Any]
+    ) -> None:
+        """调整复习间隔"""
+        if performance["status"] != "success":
+            return
+        
+        # 获取所有待处理的复习阶段
+        result = await self.db.execute(
+            select(ReviewStage)
+            .where(
+                and_(
+                    ReviewStage.plan_id == plan.id,
+                    ReviewStage.status == "pending"
+                )
+            )
+            .order_by(ReviewStage.scheduled_time)
+        )
+        
+        stages = result.scalars().all()
+        
+        # 根据表现调整间隔
+        avg_mastery = performance["avg_mastery"]
+        current_time = datetime.now()
+        
+        for stage in stages:
+            if stage.scheduled_time <= current_time:
+                continue
+                
+            # 根据掌握度调整间隔
+            if avg_mastery > 0.8:  # 掌握度好，增加间隔
+                new_interval = stage.interval_hours * 1.5
+            elif avg_mastery < 0.5:  # 掌握度差，减少间隔
+                new_interval = stage.interval_hours * 0.75
+            else:
+                new_interval = stage.interval_hours
+            
+            # 更新阶段时间
+            stage.interval_hours = new_interval
+            stage.scheduled_time = current_time + timedelta(hours=new_interval)
+            
+            # 记录调整原因
+            stage.adjustment_history.append({
+                "timestamp": datetime.now().isoformat(),
+                "reason": f"Based on mastery level: {avg_mastery:.2f}",
+                "old_interval": stage.interval_hours,
+                "new_interval": new_interval
+            })
+        
+        await self.db.commit()
     
-    async def _check_milestones(self) -> List[Dict[str, Any]]:
-        """检查里程碑"""
-        # 简化实现
-        return []
-    
-    async def _generate_recommendations(self) -> List[Dict[str, Any]]:
-        """生成建议"""
-        # 简化实现
-        return [] 
+    async def get_review_plan(self, plan_id: str) -> Optional[ReviewPlan]:
+        """获取复习计划"""
+        result = await self.db.execute(
+            select(ReviewPlan).where(ReviewPlan.id == plan_id)
+        )
+        return result.scalar_one_or_none()

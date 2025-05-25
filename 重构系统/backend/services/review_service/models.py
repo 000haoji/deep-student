@@ -4,14 +4,16 @@
 from enum import Enum
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Float, JSON, Text, ForeignKey, Enum as SQLEnum, DateTime, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Float, JSON, Text, ForeignKey, Enum as SQLEnum, DateTime, UniqueConstraint, Boolean # Added Boolean
 from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 import uuid
 from sqlalchemy.sql import func
+from sqlalchemy.ext.declarative import declarative_base
 
 from shared.models.base import BaseModel
 
+Base = declarative_base()
 
 class AnalysisType(str, Enum):
     """分析类型"""
@@ -111,4 +113,110 @@ class LearningPattern(BaseModel):
     
     __table_args__ = (
         UniqueConstraint('pattern_type', 'pattern_name', name='_type_name_uc'),
-    ) 
+    )
+
+
+class ReviewPlan(Base):
+    """复习计划"""
+    __tablename__ = "review_plans"
+    
+    id = Column(String(36), primary_key=True)
+    title = Column(String(100), nullable=False)
+    subject = Column(String(50), nullable=False)
+    category = Column(String(50))
+    tags = Column(JSON, default=list)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    total_problems = Column(Integer, default=0)
+    completed_problems = Column(Integer, default=0)
+    status = Column(String(20), default="active")  # active, completed, paused
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    last_adjusted = Column(DateTime)
+    adjustment_history = Column(JSON, default=list)
+    
+    # 关联
+    stages = relationship("ReviewStage", back_populates="plan", cascade="all, delete-orphan")
+    progress_records = relationship("ReviewProgress", back_populates="plan", cascade="all, delete-orphan")
+
+
+class ReviewStage(Base):
+    """复习阶段"""
+    __tablename__ = "review_stages"
+    
+    id = Column(String(36), primary_key=True)
+    plan_id = Column(String(36), ForeignKey("review_plans.id"), nullable=False)
+    scheduled_time = Column(DateTime, nullable=False)
+    interval_hours = Column(Integer, nullable=False)
+    status = Column(String(20), default="pending")  # pending, in_progress, completed, skipped
+    completed_at = Column(DateTime)
+    problems_completed = Column(Integer, default=0)
+    total_problems = Column(Integer, default=0)
+    mastery_level = Column(Float, default=0.0)
+    adjustment_history = Column(JSON, default=list)
+    
+    # 关联
+    plan = relationship("ReviewPlan", back_populates="stages")
+    progress = relationship("ReviewProgress", back_populates="stage", cascade="all, delete-orphan")
+
+
+class ReviewProgress(Base):
+    """复习进度"""
+    __tablename__ = "review_progress"
+    
+    id = Column(String(36), primary_key=True)
+    plan_id = Column(String(36), ForeignKey("review_plans.id"), nullable=False)
+    stage_id = Column(String(36), ForeignKey("review_stages.id"), nullable=False)
+    problem_id = Column(String(36), ForeignKey("problems.id"), nullable=False)
+    
+    # 进度信息
+    status = Column(String(20), default="pending")  # pending, in_progress, completed, skipped
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    time_spent = Column(Integer, default=0)  # 秒
+    attempts = Column(Integer, default=0)
+    is_correct = Column(Boolean)
+    mastery_level = Column(Float, default=0.0)
+    notes = Column(String(500))
+    
+    # 详细记录
+    answer_history = Column(JSON, default=list)  # 答题历史
+    error_analysis = Column(JSON)  # 错误分析
+    learning_patterns = Column(JSON)  # 学习模式
+    
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # 关联
+    plan = relationship("ReviewPlan", back_populates="progress_records")
+    stage = relationship("ReviewStage", back_populates="progress")
+    problem = relationship("Problem")
+
+
+class ReviewStatistics(Base):
+    """复习统计"""
+    __tablename__ = "review_statistics"
+    
+    id = Column(String(36), primary_key=True)
+    plan_id = Column(String(36), ForeignKey("review_plans.id"), nullable=False)
+    
+    # 统计信息
+    total_time_spent = Column(Integer, default=0)  # 总复习时间（秒）
+    total_problems = Column(Integer, default=0)
+    completed_problems = Column(Integer, default=0)
+    correct_problems = Column(Integer, default=0)
+    average_mastery = Column(Float, default=0.0)
+    
+    # 详细统计
+    subject_stats = Column(JSON, default=dict)  # 各科目统计
+    category_stats = Column(JSON, default=dict)  # 各分类统计
+    time_distribution = Column(JSON, default=dict)  # 时间分布
+    error_patterns = Column(JSON, default=dict)  # 错误模式
+    
+    # 时间范围
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    last_updated = Column(DateTime, default=datetime.now, onupdate=datetime.now)
+    
+    # 关联
+    plan = relationship("ReviewPlan")

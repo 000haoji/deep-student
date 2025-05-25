@@ -51,6 +51,5 @@ class FileRecord(BaseModel):
     access_count: Mapped[int] = mapped_column(Integer, default=0)
     
     # 关联信息
-    owner_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     related_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # problem, analysis, etc.
-    related_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True) 
+    related_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)

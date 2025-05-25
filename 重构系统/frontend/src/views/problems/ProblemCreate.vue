@@ -43,8 +43,21 @@
             :rows="5"
             placeholder="请输入题目内容"
           />
+          <!-- 图片上传 -->
+          <el-upload
+            class="problem-image-upload"
+            :http-request="customUpload" 
+            :auto-upload="false"
+            :on-change="handleImageChange"
+            :on-remove="handleImageRemove"
+            :file-list="fileList"
+            list-type="picture-card"
+            accept="image/*"
+          >
+            <el-icon><Plus /></el-icon>
+          </el-upload>
           <!-- AI分析按钮 -->
-          <div class="ai-analysis-section" v-if="form.content.trim()">
+          <div class="ai-analysis-section" v-if="form.content.trim() || fileList.length > 0">
             <el-button 
               type="primary" 
               :icon="aiAnalysisLoading ? '' : 'MagicStick'"
@@ -194,11 +207,43 @@
           <el-tab-pane label="学习建议" name="suggestions">
             <div class="analysis-section">
               <h4>学习建议：</h4>
-              <ul class="suggestions-list">
-                <li v-for="suggestion in aiAnalysisResult.study_suggestions" :key="suggestion">
+              <ul class="suggestions-list" v-if="aiAnalysisResult.study_suggestions && aiAnalysisResult.study_suggestions.length > 0">
+                <li v-for="(suggestion, index) in aiAnalysisResult.study_suggestions" :key="index">
                   {{ suggestion }}
                 </li>
               </ul>
+              <p v-else>暂无学习建议。</p>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="其他信息" name="other_info">
+            <div class="analysis-section">
+              <h4>建议分类：</h4>
+              <p>{{ aiAnalysisResult.suggested_category || '未提供' }}</p>
+            </div>
+            <div class="analysis-section">
+              <h4>建议标签：</h4>
+              <div class="knowledge-points" v-if="aiAnalysisResult.tags && aiAnalysisResult.tags.length > 0">
+                <el-tag 
+                  v-for="tag in aiAnalysisResult.tags" 
+                  :key="tag"
+                  type="success"
+                  class="knowledge-tag"
+                >
+                  {{ tag }}
+                </el-tag>
+              </div>
+              <p v-else>暂无建议标签。</p>
+            </div>
+            <div class="analysis-section">
+              <h4>解题思路：</h4>
+              <div class="error-analysis-content">
+                {{ aiAnalysisResult.solution || '未提供' }}
+              </div>
+            </div>
+            <div class="analysis-section">
+              <h4>难度评估：</h4>
+              <p>{{ aiAnalysisResult.difficulty_level ? `级别 ${aiAnalysisResult.difficulty_level}` : '未评估' }}</p>
             </div>
           </el-tab-pane>
         </el-tabs>
@@ -211,6 +256,30 @@
         </div>
       </template>
     </el-dialog>
+
+    <!-- 分析方式选择对话框 -->
+    <el-dialog
+      v-model="analysisMethodVisible"
+      title="选择分析方式"
+      width="400px"
+      :close-on-click-modal="false"
+      :show-close="false"
+    >
+      <el-form label-width="100px">
+        <el-form-item label="分析方式">
+          <el-radio-group v-model="selectedAnalysisMethod">
+            <el-radio label="multimodal_large">多模态大模型分析</el-radio>
+            <el-radio label="multimodal_small_text">多模态小模型 + 纯文字模型</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <div class="dialog-footer">
+          <el-button @click="analysisMethodVisible = false">取消</el-button>
+          <el-button type="primary" @click="performAIAnalysis(selectedAnalysisMethod)">确定</el-button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -218,7 +287,7 @@
 import { ref, reactive } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { MagicStick } from '@element-plus/icons-vue'
+import { MagicStick, Plus } from '@element-plus/icons-vue'
 import { problemAPI, aiAPI } from '@/utils/api'
 
 const router = useRouter()
@@ -227,6 +296,8 @@ const loading = ref(false)
 const aiAnalysisLoading = ref(false)
 const aiResultVisible = ref(false)
 const activeTab = ref('knowledge')
+const analysisMethodVisible = ref(false)
+const selectedAnalysisMethod = ref('multimodal_large')
 
 const form = reactive({
   title: '',
@@ -281,132 +352,150 @@ const similarProblems = ref([])
 const aiAnalysisResult = reactive({
   knowledge_points: [],
   error_analysis: '',
-  study_suggestions: []
+  study_suggestions: [],
+  solution: '', 
+  difficulty_level: null,
+  tags: [], 
+  suggested_category: ''
 })
+
+// 图片上传相关数据和方法
+const fileList = ref([]);
+
+const handleImageChange = (file, files) => {
+  // 只保留最新上传的文件
+  fileList.value = [file];
+  // TODO: 将文件转换为Base64或准备上传
+  console.log('文件已选择:', file);
+};
+
+const handleImageRemove = (file, files) => {
+  fileList.value = [];
+  console.log('文件已移除:', file);
+};
 
 // AI分析功能
 const analyzeWithAI = async () => {
-  if (!form.content.trim()) {
-    ElMessage.warning('请先输入题目内容')
+  if (!form.content.trim() && fileList.value.length === 0) {
+    ElMessage.warning('请先输入题目内容或上传图片')
     return
   }
 
-  aiAnalysisLoading.value = true
-  
-  try {
-    const analysisRequest = {
-      task_type: 'PROBLEM_ANALYSIS',
-      content: {
-        problem_content: form.content,
-        subject: form.subject,
-        user_answer: form.user_answer,
-        correct_answer: form.correct_answer
-      },
-      max_tokens: 1500,
-      temperature: 0.7
-    }
-
-    const response = await aiAPI.callAI(analysisRequest)
-    
-    if (response.data.success) {
-      const result = response.data.content
-      
-      // 解析AI返回的结果
-      try {
-        const parsedResult = JSON.parse(result)
-        
-        Object.assign(aiAnalysisResult, {
-          knowledge_points: parsedResult.knowledge_points || [],
-          error_analysis: parsedResult.error_analysis || '',
-          study_suggestions: parsedResult.study_suggestions || []
-        })
-
-        // 如果有相似题目推荐，也显示出来
-        if (parsedResult.similar_problems) {
-          similarProblems.value = parsedResult.similar_problems
-        }
-
-        aiResultVisible.value = true
-        
-      } catch (parseError) {
-        // 如果返回的不是JSON格式，直接作为错误分析使用
-        aiAnalysisResult.error_analysis = result
-        aiAnalysisResult.knowledge_points = []
-        aiAnalysisResult.study_suggestions = []
-        aiResultVisible.value = true
-      }
-      
-      ElMessage.success('AI分析完成')
-    } else {
-      ElMessage.error('AI分析失败: ' + response.data.error)
-    }
-    
-  } catch (error) {
-    console.error('AI分析错误:', error)
-    ElMessage.error('AI分析失败，请稍后重试')
-  } finally {
-    aiAnalysisLoading.value = false
+  if (fileList.value.length > 0) {
+    // 如果有图片，显示分析方式选择对话框
+    analysisMethodVisible.value = true;
+  } else {
+    // 如果没有图片，直接使用文本分析
+    await performAIAnalysis('text_only');
   }
 }
+
+// 执行AI分析
+const performAIAnalysis = async (method) => {
+  analysisMethodVisible.value = false; // 关闭选择对话框
+  aiAnalysisLoading.value = true;
+
+  try {
+    let imageData = null; 
+    if (fileList.value.length > 0) {
+      // 将 File 对象转换为 Base64 字符串
+      imageData = await fileToBase64(fileList.value[0].raw); 
+    }
+
+    const requestData = {
+      content: form.content,
+      image_data: imageData, // 图片数据 (Base64)
+      analysis_method: method, // 分析方法
+      subject: form.subject, 
+      category: form.category 
+    };
+
+    // 调用后端AI分析接口
+    console.log('发送AI分析请求:', requestData);
+    const response = await aiAPI.analyzeProblem(requestData); 
+    
+    if (response.data.success) {
+      Object.assign(aiAnalysisResult, response.data.data);
+      similarProblems.value = response.data.data.similar_problems || []; // 更新相似题目
+      aiResultVisible.value = true;
+    } else {
+      ElMessage.error('AI分析失败: ' + response.data.message);
+    }
+  } catch (error) {
+    ElMessage.error('AI分析请求异常: ' + error.message);
+  } finally {
+    aiAnalysisLoading.value = false;
+  }
+};
 
 // 应用AI分析结果
 const applyAIResult = () => {
   // 应用知识点
-  if (aiAnalysisResult.knowledge_points.length > 0) {
-    form.knowledge_points = [...aiAnalysisResult.knowledge_points]
+  if (aiAnalysisResult.knowledge_points && aiAnalysisResult.knowledge_points.length > 0) {
+    form.knowledge_points = [...new Set([...form.knowledge_points, ...aiAnalysisResult.knowledge_points])];
   }
   
   // 应用错误分析
   if (aiAnalysisResult.error_analysis) {
-    form.error_analysis = aiAnalysisResult.error_analysis
+    form.error_analysis = aiAnalysisResult.error_analysis;
+  }
+
+  // 应用建议分类
+  if (aiAnalysisResult.suggested_category) {
+    form.category = aiAnalysisResult.suggested_category;
+    ElMessage.info(`AI建议分类 "${aiAnalysisResult.suggested_category}" 已填充`);
+  }
+
+  // 应用建议标签
+  if (aiAnalysisResult.tags && aiAnalysisResult.tags.length > 0) {
+    form.tags = [...new Set([...form.tags, ...aiAnalysisResult.tags])];
   }
   
-  // 自动生成标签
-  const aiTags = []
-  if (aiAnalysisResult.knowledge_points.length > 3) {
-    aiTags.push('复杂')
+  // 应用解题思路 (如果表单中有对应字段)
+  // form.solution = aiAnalysisResult.solution || form.solution; 
+  // 假设表单中没有 solution 字段，错误分析中可能包含
+
+  // 应用难度等级 (如果表单中有对应字段)
+  // form.difficulty_level = aiAnalysisResult.difficulty_level || form.difficulty_level;
+  // 假设表单中没有 difficulty_level 字段
+
+  // 旧的自动生成标签逻辑可以保留或与AI建议的标签合并
+  const autoGeneratedTags = [];
+  if (form.knowledge_points.length > 3 && !form.tags.includes('复杂')) {
+    autoGeneratedTags.push('复杂');
   }
-  if (aiAnalysisResult.error_analysis.includes('概念')) {
-    aiTags.push('概念题')
+  if (form.error_analysis && form.error_analysis.includes('概念') && !form.tags.includes('概念题')) {
+    autoGeneratedTags.push('概念题');
   }
-  if (aiAnalysisResult.error_analysis.includes('计算')) {
-    aiTags.push('计算题')
+  if (form.error_analysis && form.error_analysis.includes('计算') && !form.tags.includes('计算题')) {
+    autoGeneratedTags.push('计算题');
+  }
+  if (autoGeneratedTags.length > 0) {
+      form.tags = [...new Set([...form.tags, ...autoGeneratedTags])];
   }
   
-  form.tags = [...new Set([...form.tags, ...aiTags])]
-  
-  aiResultVisible.value = false
-  ElMessage.success('AI分析结果已应用到表单')
+  aiResultVisible.value = false;
+  ElMessage.success('AI分析结果已应用到表单');
 }
 
 // 查看相似题目
-const viewSimilarProblem = async (problem) => {
-  try {
-    await ElMessageBox.confirm(
-      `题目：${problem.title}\n\n内容：${problem.content}\n\n是否要基于此题目创建新的错题记录？`,
-      '相似题目详情',
-      {
-        confirmButtonText: '基于此题创建',
-        cancelButtonText: '仅查看',
-        type: 'info',
-        customClass: 'similar-problem-dialog'
-      }
-    )
-    
-    // 用户选择基于相似题目创建
-    Object.assign(form, {
-      title: '（参考）' + problem.title,
-      subject: problem.subject,
-      category: problem.category,
-      content: problem.content
-    })
-    
-    ElMessage.success('已将相似题目信息填入表单')
-    
-  } catch (error) {
-    // 用户点击了"仅查看"或取消
-  }
-}
+const viewSimilarProblem = (problem) => {
+  // TODO: 实现查看相似题目的逻辑，例如跳转到详情页或弹窗显示
+  console.log('查看相似题目:', problem);
+  ElMessageBox.alert(`相似题目内容：${problem.content}`, problem.title, { 
+    confirmButtonText: '确定' 
+  });
+};
+
+// 将 File 对象转换为 Base64 字符串 (需要异步)
+const fileToBase64 = (file) => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.readAsDataURL(file);
+    reader.onload = () => resolve(reader.result.split(',')[1]); // 移除 data:image/...;base64,
+    reader.onerror = error => reject(error);
+  });
+};
 
 const handleSubmit = async () => {
   const valid = await formRef.value.validate()
@@ -439,24 +528,18 @@ const handleSubmit = async () => {
 }
 
 .ai-analysis-section {
-  margin-top: 10px;
-  padding: 12px;
-  background: #f0f9ff;
-  border: 1px solid #b3d8ff;
-  border-radius: 6px;
+  margin-top: 15px;
   display: flex;
   align-items: center;
-  gap: 12px;
 }
 
 .ai-analysis-btn {
-  flex-shrink: 0;
+  margin-right: 10px;
 }
 
 .ai-tip {
   font-size: 12px;
-  color: #409eff;
-  flex: 1;
+  color: #909399;
 }
 
 .form-tip {
@@ -466,90 +549,66 @@ const handleSubmit = async () => {
 }
 
 .similar-problems {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 12px;
-  margin-top: 10px;
+  width: 100%;
 }
 
 .similar-problem-item {
-  border: 1px solid #e4e7ed;
-  border-radius: 6px;
-  overflow: hidden;
+  margin-bottom: 15px;
 }
 
 .similar-card {
-  margin: 0;
+  width: 100%;
 }
 
-.similar-content h4 {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-  color: #303133;
+.similar-content {
+  margin-bottom: 10px;
 }
 
 .similar-preview {
-  font-size: 12px;
+  font-size: 14px;
   color: #606266;
-  margin: 8px 0;
-  line-height: 1.4;
+  margin-bottom: 10px;
 }
 
-.similar-meta {
-  display: flex;
-  gap: 6px;
-  margin-top: 8px;
+.similar-meta .el-tag {
+  margin-right: 5px;
 }
 
 .similar-actions {
-  margin-top: 12px;
   text-align: right;
 }
 
-.ai-result-content {
-  max-height: 400px;
-  overflow-y: auto;
-}
-
 .analysis-section h4 {
-  margin: 0 0 12px 0;
-  color: #303133;
+  margin-top: 0;
 }
 
-.knowledge-points {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+.knowledge-points .el-tag {
+  margin-right: 5px;
+  margin-bottom: 5px;
 }
 
-.knowledge-tag {
-  margin: 0;
-}
-
-.error-analysis-content {
-  padding: 12px;
-  background: #f5f7fa;
-  border-radius: 6px;
-  line-height: 1.6;
-  color: #303133;
+.error-analysis-content,
+.suggestions-list {
+  white-space: pre-wrap; /* 保留换行符 */
 }
 
 .suggestions-list {
-  margin: 0;
   padding-left: 20px;
-}
-
-.suggestions-list li {
-  margin-bottom: 8px;
-  line-height: 1.5;
-  color: #303133;
 }
 
 .dialog-footer {
   text-align: right;
 }
 
-:global(.similar-problem-dialog) {
-  white-space: pre-line;
+/* 图片上传组件样式 */
+.problem-image-upload ::v-deep .el-upload--picture-card {
+  width: 100px;
+  height: 100px;
+  line-height: 100px;
 }
-</style> 
+
+.problem-image-upload ::v-deep .el-upload-list--picture-card .el-upload-list__item {
+  width: 100px;
+  height: 100px;
+}
+</style>

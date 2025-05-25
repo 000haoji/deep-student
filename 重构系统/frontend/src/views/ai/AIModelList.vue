@@ -258,6 +258,15 @@ const form = reactive({
   is_active: true
 })
 
+// 自定义 API Key 验证器
+const validateApiKey = (rule, value, callback) => {
+  if (!isEdit.value && !value) { // 如果是创建模式且 API Key 为空
+    callback(new Error('请输入API密钥'));
+  } else {
+    callback(); // 编辑模式下，空值代表不修改，或创建模式下有值
+  }
+};
+
 // 表单验证规则
 const rules = {
   provider: [
@@ -267,7 +276,7 @@ const rules = {
     { required: true, message: '请输入模型名称', trigger: 'blur' }
   ],
   api_key: [
-    { required: true, message: '请输入API密钥', trigger: 'blur' }
+    { validator: validateApiKey, trigger: 'blur' }
   ],
   capabilities: [
     { required: true, message: '请选择至少一个能力', trigger: 'change' }
@@ -413,24 +422,46 @@ const resetForm = () => {
 // 提交表单
 const submitForm = async () => {
   if (!formRef.value) return
-  
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
-  
   submitLoading.value = true
   try {
+    // 构建更新数据，确保字段名称与后端一致
+    const updateData = {
+      provider: form.provider,
+      model_name: form.model_name,  // 使用 model_name 而不是 modelName
+      api_key: form.api_key || undefined,  // 如果为空则设为 undefined
+      api_url: form.api_url,
+      capabilities: form.capabilities,
+      priority: form.priority,
+      timeout: form.timeout,
+      max_retries: form.max_retries,
+      is_active: form.is_active,
+      cost_per_1k_tokens: form.cost_per_1k_tokens ?? 0,
+      max_tokens: form.max_tokens ?? 4096,
+      custom_headers: form.custom_headers ?? null
+    }
+
     if (isEdit.value) {
-      await aiAPI.updateModel(form.id, form)
+      console.log('提交更新的模型数据:', updateData)  // 添加日志
+      await aiAPI.updateModel(form.id, updateData)
       ElMessage.success('模型更新成功')
     } else {
-      await aiAPI.createModel(form)
+      await aiAPI.createModel(updateData)
       ElMessage.success('模型创建成功')
     }
-    
     dialogVisible.value = false
-    loadModels()
+    resetForm()
+    await loadModels()  // 重新加载模型列表
   } catch (error) {
-    ElMessage.error(isEdit.value ? '模型更新失败' : '模型创建失败')
+    let msg = isEdit.value ? '模型更新失败' : '模型创建失败'
+    if (error?.response?.data?.detail) {
+      msg += ': ' + error.response.data.detail
+    } else if (error?.message) {
+      msg += ': ' + error.message
+    }
+    console.error('模型保存失败', error, error?.response?.data)
+    ElMessage.error(msg)
   } finally {
     submitLoading.value = false
   }
@@ -440,12 +471,35 @@ const submitForm = async () => {
 const toggleModelStatus = async (model) => {
   model.statusLoading = true
   try {
-    await aiAPI.updateModel(model.id, { is_active: model.is_active })
+    // 补全所有必需字段
+    const updateData = {
+      provider: model.provider,
+      model_name: model.model_name,  // 修改为 model_name
+      api_key: '', // 不更新密钥
+      api_url: model.api_url,
+      capabilities: model.capabilities,
+      priority: model.priority,
+      timeout: model.timeout,
+      max_retries: model.max_retries,
+      is_active: model.is_active,
+      cost_per_1k_tokens: model.cost_per_1k_tokens ?? 0,
+      max_tokens: model.max_tokens ?? 4096,
+      custom_headers: model.custom_headers ?? null
+    }
+    console.log('切换模型状态:', updateData)  // 添加日志
+    await aiAPI.updateModel(model.id, updateData)
     ElMessage.success(`模型已${model.is_active ? '启用' : '禁用'}`)
   } catch (error) {
     // 回滚状态
     model.is_active = !model.is_active
-    ElMessage.error('状态切换失败')
+    let msg = '状态切换失败'
+    if (error?.response?.data?.detail) {
+      msg += ': ' + error.response.data.detail
+    } else if (error?.message) {
+      msg += ': ' + error.message
+    }
+    console.error('状态切换失败', error, error?.response?.data)
+    ElMessage.error(msg)
   } finally {
     model.statusLoading = false
   }

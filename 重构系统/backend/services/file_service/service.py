@@ -24,6 +24,7 @@ class FileService(LoggerMixin):
     """文件服务"""
     
     def __init__(self):
+        super().__init__()  # Initialize LoggerMixin
         # 初始化MinIO客户端
         self.client = None
         self.minio_available = False
@@ -33,10 +34,10 @@ class FileService(LoggerMixin):
         """初始化MinIO客户端（优雅降级）"""
         try:
             self.client = Minio(
-                settings.minio_endpoint,
-                access_key=settings.minio_access_key,
-                secret_key=settings.minio_secret_key,
-                secure=settings.minio_secure
+                settings.MINIO_ENDPOINT,
+                access_key=settings.MINIO_ACCESS_KEY,
+                secret_key=settings.MINIO_SECRET_KEY,
+                secure=settings.MINIO_SECURE
             )
             # 测试连接
             self.client.list_buckets()
@@ -46,7 +47,11 @@ class FileService(LoggerMixin):
             self.log_info("MinIO client initialized successfully")
         except Exception as e:
             self.minio_available = False
-            self.log_warning(f"MinIO is not available: {e}. File service will work in degraded mode.")
+            # Ensure self.logger is available before calling self.log_warning
+            if not hasattr(self, 'logger'): # Should be set by LoggerMixin's __init__
+                print(f"Logger not initialized in FileService. MinIO error: {e}") # Fallback print
+            else:
+                self.log_warning(f"MinIO is not available: {e}. File service will work in degraded mode.")
     
     def _ensure_bucket(self):
         """确保存储桶存在"""
@@ -54,9 +59,9 @@ class FileService(LoggerMixin):
             return
             
         try:
-            if not self.client.bucket_exists(settings.minio_bucket_name):
-                self.client.make_bucket(settings.minio_bucket_name)
-                self.log_info(f"Created bucket: {settings.minio_bucket_name}")
+            if not self.client.bucket_exists(settings.MINIO_BUCKET_NAME):
+                self.client.make_bucket(settings.MINIO_BUCKET_NAME)
+                self.log_info(f"Created bucket: {settings.MINIO_BUCKET_NAME}")
         except S3Error as e:
             self.log_error(f"Failed to ensure bucket: {e}")
     
@@ -142,7 +147,7 @@ class FileService(LoggerMixin):
             
             # 上传到MinIO
             self.client.put_object(
-                bucket_name=settings.minio_bucket_name,
+                bucket_name=settings.MINIO_BUCKET_NAME,
                 object_name=object_name,
                 data=file_stream,
                 length=file_size,
@@ -152,11 +157,11 @@ class FileService(LoggerMixin):
             # 生成访问URL
             if is_public:
                 # 公开访问URL
-                access_url = f"http://{settings.minio_endpoint}/{settings.minio_bucket_name}/{object_name}"
+                access_url = f"http://{settings.MINIO_ENDPOINT}/{settings.MINIO_BUCKET_NAME}/{object_name}"
             else:
                 # 生成预签名URL（7天有效期）
                 access_url = self.client.presigned_get_object(
-                    bucket_name=settings.minio_bucket_name,
+                    bucket_name=settings.MINIO_BUCKET_NAME,
                     object_name=object_name,
                     expires=timedelta(days=7)
                 )
@@ -169,9 +174,9 @@ class FileService(LoggerMixin):
                     file_type=self._get_file_type(mime_type).value,
                     mime_type=mime_type,
                     size=file_size,
-                    bucket_name=settings.minio_bucket_name,
+                    bucket_name=settings.MINIO_BUCKET_NAME,
                     object_name=object_name,
-                    storage_path=f"{settings.minio_bucket_name}/{object_name}",
+                    storage_path=f"{settings.MINIO_BUCKET_NAME}/{object_name}",
                     access_url=access_url,
                     is_public=is_public,
                     category=category,
@@ -263,7 +268,7 @@ class FileService(LoggerMixin):
         
         try:
             response = self.client.get_object(
-                bucket_name=settings.minio_bucket_name,
+                bucket_name=settings.MINIO_BUCKET_NAME,
                 object_name=object_name
             )
             data = response.read()
@@ -297,7 +302,7 @@ class FileService(LoggerMixin):
         try:
             # 从MinIO删除
             self.client.remove_object(
-                bucket_name=settings.minio_bucket_name,
+                bucket_name=settings.MINIO_BUCKET_NAME,
                 object_name=object_name
             )
             
@@ -338,7 +343,7 @@ class FileService(LoggerMixin):
         
         try:
             url = self.client.presigned_get_object(
-                bucket_name=settings.minio_bucket_name,
+                bucket_name=settings.MINIO_BUCKET_NAME,
                 object_name=object_name,
                 expires=timedelta(seconds=expires)
             )
@@ -366,7 +371,7 @@ class FileService(LoggerMixin):
         
         try:
             objects = self.client.list_objects(
-                bucket_name=settings.minio_bucket_name,
+                bucket_name=settings.MINIO_BUCKET_NAME,
                 prefix=prefix,
                 recursive=recursive
             )
@@ -400,7 +405,7 @@ class FileService(LoggerMixin):
         
         try:
             stat = self.client.stat_object(
-                bucket_name=settings.minio_bucket_name,
+                bucket_name=settings.MINIO_BUCKET_NAME,
                 object_name=object_name
             )
             
@@ -419,4 +424,4 @@ class FileService(LoggerMixin):
 
 
 # 创建单例实例
-file_service = FileService() 
+file_service = FileService()

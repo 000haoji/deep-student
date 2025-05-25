@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.database import get_db
 from shared.utils.logger import get_logger
-from .models import AIModelConfig, AIRequest, AIResponse, TaskType
+from .models import AIModelConfig, AIRequest, AIResponse, TaskType, ProblemAnalysisRequest
 from .router import AIRouter
 from .service import AIModelService
 
@@ -17,6 +17,9 @@ router = APIRouter(prefix="/api/v1/ai", tags=["AI Management"])
 # 创建全局AI路由器实例
 ai_router = AIRouter()
 
+def get_ai_service(db: AsyncSession = Depends(get_db)) -> AIModelService:
+    """获取AI服务实例"""
+    return AIModelService(db)
 
 @router.post("/models", response_model=dict)
 async def create_ai_model(
@@ -24,7 +27,7 @@ async def create_ai_model(
     db: AsyncSession = Depends(get_db)
 ):
     """创建新的AI模型配置"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     model = await service.create_model(config)
     return {
         "success": True,
@@ -44,7 +47,7 @@ async def list_ai_models(
     db: AsyncSession = Depends(get_db)
 ):
     """获取AI模型列表"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     models = await service.list_models(provider=provider, is_active=is_active)
     
     return {
@@ -71,7 +74,7 @@ async def get_ai_model(
     db: AsyncSession = Depends(get_db)
 ):
     """获取单个AI模型详情"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     model = await service.get_model(model_id)
     
     if not model:
@@ -90,7 +93,7 @@ async def update_ai_model(
     db: AsyncSession = Depends(get_db)
 ):
     """更新AI模型配置"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     model = await service.update_model(model_id, config)
     
     if not model:
@@ -113,7 +116,7 @@ async def delete_ai_model(
     db: AsyncSession = Depends(get_db)
 ):
     """删除AI模型（软删除）"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     success = await service.delete_model(model_id)
     
     if not success:
@@ -136,13 +139,13 @@ async def call_ai_api(
         # 使用全局AI路由器处理请求
         response = await ai_router.route_request(request)
         
-        # 后台记录调用日志
-        background_tasks.add_task(
-            log_ai_call,
-            db,
-            request,
-            response
-        )
+        # 日志记录现在由 AIRouter 内部处理
+        # background_tasks.add_task(
+        #     log_ai_call,
+        #     db,
+        #     request,
+        #     response
+        # )
         
         return response
     except Exception as e:
@@ -155,7 +158,7 @@ async def get_ai_stats(
     db: AsyncSession = Depends(get_db)
 ):
     """获取AI使用统计"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     stats = await service.get_statistics()
     
     return {
@@ -169,7 +172,7 @@ async def check_ai_health(
     db: AsyncSession = Depends(get_db)
 ):
     """检查所有AI模型健康状态"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     health_status = await service.check_all_health()
     
     return {
@@ -184,7 +187,7 @@ async def test_ai_model(
     db: AsyncSession = Depends(get_db)
 ):
     """测试AI模型连接"""
-    service = AIModelService(db)
+    service = get_ai_service(db)
     result = await service.test_model(model_id)
     
     return {
@@ -197,14 +200,26 @@ async def test_ai_model(
     }
 
 
-async def log_ai_call(
-    db: AsyncSession,
-    request: AIRequest,
-    response: AIResponse
+@router.post("/analyze_problem", response_model=dict, deprecated=True, summary="[Deprecated] Use ProblemService or generic /call")
+async def analyze_problem_api(
+    request: ProblemAnalysisRequest, # Note: This is AIModel.ProblemAnalysisRequest, not ProblemService.schemas.ProblemAnalyzeRequest
+    db: AsyncSession = Depends(get_db)
 ):
-    """记录AI调用日志（后台任务）"""
-    try:
-        service = AIModelService(db)
-        await service.log_call(request, response)
-    except Exception as e:
-        logger.error(f"记录AI调用日志失败: {e}") 
+    """
+    AI智能分析错题 (此端点位置不佳，考虑迁移或使用通用 /call)
+    当前它调用 AIModelService 上不存在的方法.
+    """
+    # service = get_ai_service(db)
+    # analysis_result = await service.analyze_problem(request) # AIModelService has no analyze_problem
+    # This endpoint is problematic. It should ideally be in ProblemService
+    # or adapt to use the generic /call by transforming ProblemAnalysisRequest to AIRequest.
+    logger.warning("Deprecated /analyze_problem endpoint in AI Manager was called.")
+    raise HTTPException(status_code=501, detail="This endpoint is deprecated and non-functional. Use ProblemService or generic /call.")
+    # return {
+    #     "success": True,
+    #     "data": analysis_result
+    # }
+
+
+# Removed log_ai_call function as AIRouter handles logging internally
+# async def log_ai_call(...)

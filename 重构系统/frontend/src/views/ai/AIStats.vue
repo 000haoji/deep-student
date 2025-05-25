@@ -59,6 +59,22 @@
       </el-col>
     </el-row>
 
+    <!-- 错误或无数据提示 -->
+    <el-alert
+      v-if="errorMsg"
+      :title="errorMsg"
+      type="error"
+      show-icon
+      style="margin-bottom: 20px;"
+    />
+    <el-alert
+      v-else-if="noData"
+      title="暂无统计数据"
+      type="info"
+      show-icon
+      style="margin-bottom: 20px;"
+    />
+
     <!-- 图表区域 -->
     <el-row :gutter="20" class="chart-row">
       <!-- 调用趋势图 -->
@@ -79,7 +95,10 @@
             </div>
           </template>
           <div class="chart-container">
-            <canvas ref="trendChartRef" width="600" height="300"></canvas>
+            <template v-if="noData">
+              <div class="empty-chart">暂无趋势数据</div>
+            </template>
+            <canvas v-else ref="trendChartRef" width="600" height="300"></canvas>
           </div>
         </el-card>
       </el-col>
@@ -91,7 +110,10 @@
             <span>成本分布</span>
           </template>
           <div class="chart-container">
-            <canvas ref="costChartRef" width="300" height="300"></canvas>
+            <template v-if="noData">
+              <div class="empty-chart">暂无成本分布数据</div>
+            </template>
+            <canvas v-else ref="costChartRef" width="300" height="300"></canvas>
           </div>
         </el-card>
       </el-col>
@@ -106,6 +128,9 @@
           </template>
           
           <el-table :data="modelStats" v-loading="loading" stripe>
+            <template #empty>
+              <div style="padding: 20px; text-align: center; color: #909399;">暂无模型统计数据</div>
+            </template>
             <el-table-column prop="provider" label="提供商" width="120">
               <template #default="{ row }">
                 <el-tag :type="getProviderTagType(row.provider)">
@@ -240,6 +265,8 @@ const healthLoading = ref(false)
 const trendChartRef = ref()
 const costChartRef = ref()
 const dateRange = ref([])
+const errorMsg = ref("")
+const noData = ref(false)
 
 // 统计数据
 const overview = reactive({
@@ -308,9 +335,21 @@ const getSuccessRateClass = (rate) => {
 // 加载统计数据
 const loadStats = async () => {
   loading.value = true
+  errorMsg.value = ""
+  noData.value = false
   try {
     const response = await aiAPI.getStats()
     const data = response.data.data
+    
+    // 判断无数据
+    if (!data || !data.overview || (
+      data.overview.total_calls === 0 &&
+      data.overview.success_rate === 0 &&
+      data.overview.total_tokens === 0 &&
+      data.overview.total_cost === 0
+    )) {
+      noData.value = true
+    }
     
     // 更新概览数据
     Object.assign(overview, {
@@ -329,7 +368,7 @@ const loadStats = async () => {
     updateCostChart(data.cost_distribution || [])
     
   } catch (error) {
-    ElMessage.error('加载统计数据失败')
+    errorMsg.value = '加载统计数据失败'
   } finally {
     loading.value = false
   }
@@ -591,5 +630,15 @@ onMounted(() => {
   color: #303133;
   font-size: 14px;
   font-weight: 500;
+}
+
+.empty-chart {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #909399;
+  font-size: 16px;
 }
 </style> 

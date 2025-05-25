@@ -77,7 +77,7 @@ class Problem(BaseModel, SoftDeleteMixin):
     
     # 备注
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 用户备注
-    
+
     # 关联
     review_records: Mapped[List["ReviewRecord"]] = relationship(
         "ReviewRecord",
@@ -103,7 +103,6 @@ class ReviewRecord(BaseModel):
     # AI反馈
     ai_feedback: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)  # AI给出的反馈
 
-
 class ProblemTemplate(BaseModel):
     """题目模板（用于批量导入）"""
     __tablename__ = "problem_templates"
@@ -119,4 +118,47 @@ class ProblemTemplate(BaseModel):
     
     __table_args__ = (
         UniqueConstraint('subject', 'name', name='_subject_name_uc'),
-    ) 
+    )
+
+
+class ProblemTag(BaseModel):
+    """题目标签"""
+    __tablename__ = "problem_tags"
+    
+    name: Mapped[str] = mapped_column(String(50), nullable=False) # Name alone might not be unique across users
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    color: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 标签颜色
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)  # 使用次数
+
+    __table_args__ = (
+        UniqueConstraint('name', name='_tag_name_uc'),
+    )
+    
+    def __repr__(self):
+        return f"<ProblemTag {self.name}>"
+
+
+class ProblemCategory(BaseModel):
+    """题目分类"""
+    __tablename__ = "problem_categories"
+    
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    subject: Mapped[str] = mapped_column(SQLEnum(Subject), nullable=False)
+    parent_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("problem_categories.id"), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    order: Mapped[int] = mapped_column(Integer, default=0)  # 排序
+    usage_count: Mapped[int] = mapped_column(Integer, default=0)  # 使用次数
+    
+    # 关联
+    parent: Mapped[Optional["ProblemCategory"]] = relationship(
+        "ProblemCategory",
+        remote_side="ProblemCategory.id",
+        backref="children"
+    )
+    
+    __table_args__ = (
+        UniqueConstraint('subject', 'name', name='_subject_category_name_uc'),
+    )
+    
+    def __repr__(self):
+        return f"<ProblemCategory {self.subject}:{self.name}>"
