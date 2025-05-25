@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # 限流配置
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_DEFAULT: str = "100 per hour"
+
+    # JWT 配置
+    JWT_SECRET_KEY: str = "your-secret-key-here-change-in-production"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440 # e.g., 24 hours * 60 minutes
     
     class Config:
         env_file = ".env"

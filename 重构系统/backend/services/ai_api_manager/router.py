@@ -16,8 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker # Import asy
 from shared.utils.logger import LoggerMixin
 # from shared.database import get_db # get_db is for FastAPI dependencies
 from .models import (
-    AIModel, AICallLog, AIRequest, AIResponse,
+    AIModel, AICallLog, # AIRequest, AIResponse removed, they are schemas
     AIProvider, TaskType, AICapability
+)
+from .schemas import (
+    AIRequestSchema as AIRequest,       # Import Pydantic schema for request
+    AIResponseDataSchema as AIResponse  # Import Pydantic schema for response data
 )
 from .providers.base import BaseAIProvider
 from .providers.openai_provider import OpenAIProvider
@@ -207,9 +211,12 @@ class AIRouter(LoggerMixin):
             TaskType.CODE_GENERATION: [AICapability.TEXT],
             TaskType.CODE_REVIEW: [AICapability.TEXT],
             TaskType.MATH_SOLVING: [AICapability.TEXT],
+            # Added new task types for AI-driven problem creation
+            TaskType.PROBLEM_IMAGE_TO_STRUCTURED_JSON: [AICapability.VISION, AICapability.TEXT],
+            TaskType.PROBLEM_INTERACTIVE_DEEP_ANALYSIS: [AICapability.TEXT, AICapability.ADVANCED_TEXT], # ADVANCED_TEXT for complex reasoning
         }
         
-        required_capabilities = capability_map.get(task_type, [AICapability.TEXT])
+        required_capabilities = capability_map.get(task_type, [AICapability.TEXT]) # Default to TEXT if task_type not in map
         
         suitable_models = []
         for model_key, model in self._model_cache.items():

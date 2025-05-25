@@ -3,10 +3,10 @@
 """
 from typing import List, Optional, Dict, Any # Added Dict, Any
 from uuid import UUID
+import json # For SSE streaming
 from fastapi import APIRouter, Depends, HTTPException, Query, File, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel # For new response model & User model placeholder
-
+from pydantic import BaseModel, Field # For new response model & User model placeholder, Added Field
 from shared.database import get_db
 from shared.utils.logger import get_logger
 from .models import Subject, Problem
@@ -36,18 +36,61 @@ from .schemas import (
     ProblemCategoryListResponse,
     # Batch Request Schema
     ProblemBatchRequest,
+    # AI-Driven Workflow Schemas
+    ProblemAICreateInitiateRequest,
+    ProblemAICreateInitiateResponse,
+    ProblemAIStreamRequest,
+    ProblemAIFinalizeRequest,
+    ProblemAIStructuredData, # Though this is part of InitiateResponse, good to have for type hints if needed
+    # Schemas for AI Session and Chat History
+    ProblemAISessionData,
+    SingleProblemAISessionResponse,
+    ProblemAISessionListResponse, # Added for listing sessions
+    AIChatMessage # For chat history response
 )
+from .models import ProblemAISessionStatus # Added for status filter
+
+# Custom response model for chat history
+class AIChatHistoryResponse(BaseModel):
+    success: bool = True
+    message: Optional[str] = None
+    data: List[AIChatMessage] = Field(default_factory=list)
+
 from .service import ProblemService
 from ..file_service.schemas import FileUploadResponse as StorageFileUploadResponse # For file storage info
-from ..file_service.service import file_service # Import the actual service instance
+from ..file_service.service import file_service as get_file_service_instance # Import the actual service instance, aliased to avoid conflict with potential local var
+from ..ai_api_manager.service import AIModelService # For AI capabilities
+from ..ai_api_manager.schemas import AIRequestSchema # For AI requests
+from ..ai_api_manager.models import TaskType as AI_TaskType # Import TaskType directly from models
+
 # pydantic.BaseModel is already imported
 from fastapi.responses import JSONResponse, StreamingResponse # For export
 import io # For CSV Streaming
 import csv # For CSV generation
 from enum import Enum as PyEnum # To avoid conflict with models.Subject
+import uuid # For session_id generation
 
 logger = get_logger(__name__)
+
+# Router for traditional problem management
 router = APIRouter(prefix="/api/v1/problems", tags=["Problems"])
+
+# Router for AI-Driven Problem Creation
+ai_problem_router = APIRouter(prefix="/api/v1/problems/ai-create", tags=["Problems - AI Driven Creation"])
+
+
+# Dependency for AIModelService (assuming it might need DB for model configs)
+async def get_ai_model_service(db: AsyncSession = Depends(get_db)) -> AIModelService:
+    return AIModelService(db)
+
+# Dependency for FileService (assuming it might need DB for file records)
+async def get_file_service(db: AsyncSession = Depends(get_db)) -> get_file_service_instance:
+    # FileService instance is directly imported and might not need db passed here if it's configured globally
+    # However, if its methods that we call expect a db session, we should provide it.
+    # For now, returning the imported instance. Revisit if its methods need db explicitly.
+    # return get_file_service_instance # This would return the global instance
+    return get_file_service_instance(db) # If FileService needs a session per request like other services
+
 
 class ExportFormat(str, PyEnum):
     JSON = "json"
@@ -931,3 +974,323 @@ async def batch_operate_problems_endpoint(
             failed_count=len(request_data.problem_ids),
             errors=[{"id": pid, "error": str(e)} for pid in request_data.problem_ids]
         )
+
+
+# --- AI-Driven Problem Creation Endpoints ---
+
+ai_problem_router = APIRouter(prefix="/api/v1/problems/ai-create", tags=["Problems - AI Driven Creation"])
+
+@ai_problem_router.post("/initiate", response_model=ProblemAICreateInitiateResponse, summary="阶段一：AI驱动错题创建 - 初始化")
+async def ai_initiate_problem_creation(
+    request_data: ProblemAICreateInitiateRequest,
+    db: AsyncSession = Depends(get_db)
+    # No need to inject file_service or ai_model_service here, ProblemService handles them
+):
+    """
+    上传图片（Base64或URL），AI进行初步OCR和结构化分析。
+    服务层将处理图片上传、调用AI模型，并返回包含 session_id 和初步分析结果。
+    """
+    problem_service_instance = ProblemService(db)
+    try:
+        # The service method initiate_ai_problem_creation handles file saving and AI call.
+        structured_data_from_service = await problem_service_instance.initiate_ai_problem_creation(request_data)
+        
+        return ProblemAICreateInitiateResponse(
+            success=True,
+            message="AI错题创建初始化成功。",
+            data=structured_data_from_service
+        )
+    except HTTPException as http_exc: # Re-raise HTTP exceptions that service might raise
+        logger.error(f"HTTPException during AI problem initiation: {http_exc.detail}", exc_info=True)
+        raise http_exc
+    except ValueError as ve: # Catch specific validation errors from service or Pydantic
+        logger.warning(f"AI initiate problem creation Value Error: {ve}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"AI错题创建初始化失败: {e}", exc_info=True)
+        # Catch-all for other unexpected errors from the service layer
+        raise HTTPException(status_code=500, detail=f"AI错题创建初始化过程发生内部错误: {str(e)}")
+
+
+@ai_problem_router.get("/interactive-stream/{session_id}", summary="阶段二：AI驱动错题创建 - 交互式分析流 (SSE)")
+async def ai_interactive_analysis_stream(
+    session_id: str,
+    user_message: Optional[str] = Query(None, description="用户发送的消息"),
+    chat_history_json: Optional[str] = Query(None, alias="chat_history_json", description="JSON字符串格式的聊天历史"),
+    initial_data_ref_json: Optional[str] = Query(None, alias="initial_data_ref_json", description="JSON字符串格式的初始结构化数据参考"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    与AI进行交互式分析和错题内容细化。
+    客户端通过此接口发送用户消息和对话历史 (作为查询参数)，接收AI的流式响应 (Server-Sent Events)。
+    - `chat_history_json`: 应为 `List[ChatLogEntry]` 的JSON字符串。
+    - `initial_data_ref_json`: 应为 `ProblemAIStructuredData` (或其部分) 的JSON字符串。
+    """
+    service = ProblemService(db)
+
+    parsed_chat_history: List[Dict[str, Any]] = []
+    if chat_history_json:
+        try:
+            parsed_chat_history = json.loads(chat_history_json)
+            if not isinstance(parsed_chat_history, list):
+                parsed_chat_history = [] # Default to empty if not a list
+        except json.JSONDecodeError:
+            logger.warning(f"SSE stream: Invalid JSON for chat_history_json for session {session_id}")
+            # Potentially raise HTTPException or proceed with empty history
+            parsed_chat_history = []
+
+    parsed_initial_data_ref: Optional[Dict[str, Any]] = None
+    if initial_data_ref_json:
+        try:
+            parsed_initial_data_ref = json.loads(initial_data_ref_json)
+            if not isinstance(parsed_initial_data_ref, dict):
+                 parsed_initial_data_ref = None
+        except json.JSONDecodeError:
+            logger.warning(f"SSE stream: Invalid JSON for initial_data_ref_json for session {session_id}")
+            parsed_initial_data_ref = None
+            
+    # Reconstruct the payload for the service layer, matching ProblemAIStreamRequest schema
+    parsed_chat_history_models = []
+    if parsed_chat_history: # Ensure it's not empty
+        for item in parsed_chat_history:
+            # Validate item structure before creating AIChatMessage
+            if isinstance(item, dict) and "role" in item and "content" in item:
+                try:
+                    parsed_chat_history_models.append(AIChatMessage(role=item["role"], content=item["content"]))
+                except Exception as e_chat_model: # Catch Pydantic validation error for AIChatMessage
+                    logger.warning(f"SSE stream: Invalid item in chat_history_json for session {session_id}: {item}. Error: {e_chat_model}")
+                    # Skip invalid items or handle error appropriately
+            else:
+                logger.warning(f"SSE stream: Skipping malformed item in chat_history_json for session {session_id}: {item}")
+
+
+    initial_data_ref_model: Optional[ProblemAIStructuredData] = None
+    if parsed_initial_data_ref:
+        try:
+            initial_data_ref_model = ProblemAIStructuredData(**parsed_initial_data_ref)
+        except Exception as e_initial_data: # Catch Pydantic validation error
+            logger.warning(f"SSE stream: Invalid JSON for initial_data_ref_json, cannot parse as ProblemAIStructuredData for session {session_id}. Error: {e_initial_data}")
+            # Proceed with None if parsing fails
+
+    stream_request_payload = ProblemAIStreamRequest(
+        user_message=user_message,
+        chat_history=parsed_chat_history_models,
+        initial_data_ref=initial_data_ref_model
+    )
+    
+    async def stream_wrapper():
+        """Wraps the service stream to format data as SSE."""
+        try:
+            # Pass the session_id_str and the reconstructed payload to the service method
+            async for chunk_data in service.handle_ai_interactive_analysis_stream(session_id_str=session_id, request_payload=stream_request_payload):
+                if isinstance(chunk_data, str): # Assuming service yields dicts as per its original design
+                    # This path might not be hit if service.handle_ai_interactive_analysis_stream always yields dicts
+                    sse_event = {"type": "content_chunk", "value": chunk_data}
+                    yield f"data: {json.dumps(sse_event)}\n\n"
+                elif isinstance(chunk_data, dict): # This is the expected path from service's stream_ai_response_for_session
+                    # The service should yield dicts structured for SSE (e.g., {"type": "content_chunk", "value": "..."})
+                    # Or {"type": "error", "message": "..."}
+                    # Or {"type": "stream_end"}
+                    yield f"data: {json.dumps(chunk_data)}\n\n"
+                else:
+                    logger.warning(f"Unknown chunk type received in AI stream for session {session_id}: {type(chunk_data)}. Expected dict.")
+            
+            # Stream_end event should ideally be yielded by the service layer method itself.
+            # If not, we can add it here, but it's cleaner if the service controls its full stream lifecycle.
+            # For robustness, if the service stream ends without a specific 'stream_end' event,
+            # the client's EventSource onclose or onerror will eventually trigger.
+            # However, an explicit end event is good practice.
+            # Let's assume service.handle_ai_interactive_analysis_stream yields a stream_end event.
+
+        except HTTPException as http_exc_stream: # Catch HTTP exceptions from the service layer
+            logger.error(f"HTTPException during stream processing for session {session_id}: {http_exc_stream.detail}", exc_info=True)
+            error_event = {"type": "error", "message": http_exc_stream.detail, "status_code": http_exc_stream.status_code}
+            yield f"data: {json.dumps(error_event)}\n\n"
+        except Exception as e_stream_api:
+            logger.error(f"Error during API stream generation for session {session_id}: {e_stream_api}", exc_info=True)
+            error_event = {"type": "error", "message": f"Stream processing error: {str(e_stream_api)}"}
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
+
+
+@ai_problem_router.post("/finalize", response_model=SingleProblemResponse, summary="阶段三：AI驱动错题创建 - 最终确认")
+async def ai_finalize_problem_creation(
+    request_data: ProblemAIFinalizeRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    最终确认AI辅助创建的错题信息，并将其保存到数据库。
+    请求中应包含所有错题字段、AI的完整分析JSON以及聊天记录。
+    """
+    service = ProblemService(db)
+    try:
+        created_problem_orm = await service.finalize_ai_problem_creation(request_data)
+        return SingleProblemResponse(
+            success=True,
+            message="AI辅助创建错题并成功保存。",
+            data=ProblemData.from_orm(created_problem_orm)
+        )
+    except HTTPException as http_exc:
+        raise http_exc
+    except ValueError as ve:
+        logger.warning(f"AI finalize problem creation Value Error for session {request_data.session_id}: {ve}", exc_info=True)
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error(f"AI辅助创建错题最终确认失败 for session {request_data.session_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"AI辅助创建错题最终确认失败: {str(e)}")
+
+
+@ai_problem_router.get("/session/{session_id}", response_model=SingleProblemAISessionResponse, summary="获取AI错题创建会话详情")
+async def get_ai_problem_session_details(
+    session_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    根据会话ID获取AI错题创建会话的详细信息，
+    包括当前状态、结构化数据、初始信息、以及最终关联的错题（如果已生成）和聊天记录。
+    """
+    service = ProblemService(db)
+    try:
+        # Service method should handle eager loading of related data (chat logs, final problem)
+        session_orm = await service.get_problem_ai_session(session_id, load_chat_logs=True, load_final_problem=True)
+        if not session_orm:
+            raise HTTPException(status_code=404, detail=f"AI创建会话 {session_id} 未找到。")
+
+        # Convert ORM model (ProblemAISession) to Pydantic model (ProblemAISessionData)
+        # This conversion should correctly handle nested ProblemData and List[AIChatMessage]
+        # if ProblemAISessionData.Config.from_attributes = True (or orm_mode=True for Pydantic v1)
+        # and relationships are correctly defined and loaded in the ORM model.
+        
+        # Explicitly convert chat logs if needed and not handled by from_orm for nested lists of Pydantic models
+        chat_logs_pydantic = []
+        if session_orm.ai_chat_logs: # ai_chat_logs is the relationship name in ProblemAISession model
+            for log_entry_orm in session_orm.ai_chat_logs:
+                chat_logs_pydantic.append(AIChatMessage.from_orm(log_entry_orm)) # Assuming AIChatMessage can from_orm ProblemAIChatLog
+
+        # Convert final_problem if it exists
+        final_problem_pydantic = None
+        if session_orm.final_problem: # final_problem is the relationship name
+            final_problem_pydantic = ProblemData.from_orm(session_orm.final_problem)
+
+        session_data_pydantic = ProblemAISessionData(
+            id=str(session_orm.id), # Ensure ID is string
+            status=session_orm.status,
+            initial_image_ref=str(session_orm.initial_image_ref) if session_orm.initial_image_ref else None,
+            initial_subject_hint=session_orm.initial_subject_hint,
+            current_structured_data=session_orm.current_structured_data, # Assuming this is already a dict/JSONB
+            final_problem_id=str(session_orm.final_problem_id) if session_orm.final_problem_id else None,
+            created_at=session_orm.created_at,
+            updated_at=session_orm.updated_at,
+            final_problem=final_problem_pydantic,
+            chat_logs=chat_logs_pydantic
+        )
+        
+        return SingleProblemAISessionResponse(
+            success=True,
+            data=session_data_pydantic
+        )
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"获取AI会话 {session_id} 详情失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取AI会话详情时发生内部错误: {str(e)}")
+
+
+@ai_problem_router.get("/chat-history/{session_id}", response_model=AIChatHistoryResponse, summary="获取AI错题创建会话的聊天记录")
+async def get_ai_problem_session_chat_history(
+    session_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    根据会话ID获取AI错题创建会话的完整聊天记录。
+    """
+    service = ProblemService(db)
+    try:
+        # Service method returns List[ProblemAIChatLog] (ORM objects)
+        chat_logs_orm = await service.get_chat_history_for_session(session_id)
+        
+        if not chat_logs_orm: # Check if the list is empty
+            # To distinguish between "session not found" and "session exists but has no logs",
+            # we check if the session itself exists.
+            _session = await service.get_problem_ai_session(session_id, load_chat_logs=False, load_final_problem=False)
+            if not _session:
+                 raise HTTPException(status_code=404, detail=f"AI创建会话 {session_id} 未找到。")
+        
+        # Convert List[ProblemAIChatLog] (ORM) to List[AIChatMessage] (Pydantic)
+        chat_logs_pydantic = [AIChatMessage.from_orm(log) for log in chat_logs_orm]
+        
+        return AIChatHistoryResponse(
+            success=True,
+            message="聊天记录获取成功。" if chat_logs_pydantic else "该会话没有聊天记录。",
+            data=chat_logs_pydantic
+        )
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"获取AI会话 {session_id} 聊天记录失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取聊天记录时发生内部错误: {str(e)}")
+
+
+@ai_problem_router.get("/sessions", response_model=ProblemAISessionListResponse, summary="获取AI错题创建会话列表")
+async def list_ai_problem_sessions_endpoint(
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(20, ge=1, le=100, description="每页数量"),
+    status: Optional[ProblemAISessionStatus] = Query(None, description="按会话状态过滤"),
+    sort_by: str = Query("created_at", description="排序字段 (例如: created_at, updated_at, status)"),
+    sort_desc: bool = Query(True, description="是否降序排序"),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    获取所有AI错题创建会话的列表，支持分页和按状态过滤。
+    """
+    service = ProblemService(db)
+    try:
+        # Validate sort_by field against ProblemAISession model attributes if necessary
+        allowed_sort_fields = ["created_at", "updated_at", "status", "initial_subject_hint"] # Add more as needed
+        if sort_by not in allowed_sort_fields:
+            sort_by = "created_at" # Default if invalid
+
+        sessions_orm, total_sessions = await service.list_ai_problem_sessions(
+            page=page,
+            size=size,
+            status=status,
+            sort_by=sort_by,
+            sort_desc=sort_desc
+        )
+
+        # Convert ORM list to Pydantic list
+        sessions_data_pydantic = []
+        for session_orm in sessions_orm:
+            # For list view, we might not need full chat_logs or final_problem details to keep response light.
+            # ProblemAISessionData by default tries to load them if relationships are present.
+            # The service method `list_ai_problem_sessions` currently does not eager load these.
+            # So, chat_logs and final_problem will be empty lists/None in ProblemAISessionData.from_orm(session_orm)
+            # which is generally fine for a list view.
+            sessions_data_pydantic.append(ProblemAISessionData.from_orm(session_orm))
+            
+        # The ProblemAISessionListResponse schema expects `data`, `total`, `page`, `size`
+        # It needs to be updated to include these pagination fields, or we return a custom dict.
+        # Let's assume ProblemAISessionListResponse is updated or we construct the dict.
+        # For now, ProblemAISessionListResponse only has success, message, data.
+        # Let's adapt the response to include pagination.
+        # Update: The schema `ProblemAISessionListResponse` was defined without pagination fields in the prompt.
+        # I will return a dict matching the structure of `ProblemListResponse` for consistency.
+        # The ProblemAISessionListResponse schema has been updated to include pagination fields.
+        return ProblemAISessionListResponse(
+            success=True,
+            message="AI会话列表获取成功。",
+            data=sessions_data_pydantic,
+            total=total_sessions,
+            page=page,
+            size=size
+            # The 'pages' property is calculated automatically by the Pydantic model
+        )
+
+    except Exception as e:
+        logger.error(f"获取AI会话列表失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取AI会话列表时发生内部错误: {str(e)}")
+
+
+# Make sure to include ai_problem_router in the main app.
+# e.g., in backend/app.py: app.include_router(ai_problem_router_from_problem_service)

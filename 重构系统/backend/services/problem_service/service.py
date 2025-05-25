@@ -4,27 +4,38 @@
 import base64
 import io
 import time
-from typing import List, Optional, Dict, Any
+import uuid # For generating session IDs
+from typing import List, Optional, Dict, Any, AsyncGenerator
 from datetime import datetime, timedelta
 import httpx # For downloading image from URL
 from sqlalchemy import select, func, and_, or_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from PIL import Image
+import json # For SSE data
 
 from shared.utils.logger import LoggerMixin
 from ..file_service import file_service
-# from ..ai_api_manager.schemas import AIRequest as AIRequestSchema, TaskType # AIRequestSchema if schemas.py version is different
-from ..ai_api_manager.models import AIRequest, TaskType # Using AIRequest from models.py as AIRouter does
-from ..ai_api_manager.router import ai_router # Import global ai_router
-from .models import Problem, ReviewRecord, Subject, ProblemTag, ProblemCategory
-from .schemas import (
-    ProblemCreate, ProblemUpdate, # ProblemAnalyzeRequest (schema for API, not direct AIRequest)
-    ProblemOCRRequest, ReviewRecordCreate, ProblemQuery,
-    ProblemTagCreate, ProblemTagUpdate, # Added Tag schemas
-    ProblemCategoryCreate, ProblemCategoryUpdate, # Added Category schemas
-    ProblemData, # For export data structure
-    ProblemBatchRequest # For batch operations
+from ..ai_api_manager.schemas import AIRequestSchema # Use the new schema
+from ..ai_api_manager.models import TaskType # TaskType can still be from models or schemas if defined there
+from ..ai_api_manager.service import AIModelService # Import AIService to use it directly
+from .models import (
+    Problem, ReviewRecord, Subject, ProblemTag, ProblemCategory, ProblemAIChatLog,
+    ProblemAISession, ProblemAISessionStatus # Import new models
 )
+from .schemas import (
+    ProblemCreate, ProblemUpdate,
+    ProblemOCRRequest, ReviewRecordCreate, ProblemQuery,
+    ProblemTagCreate, ProblemTagUpdate,
+    ProblemCategoryCreate, ProblemCategoryUpdate,
+    ProblemData,
+    ProblemBatchRequest,
+    # AI-Driven Workflow Schemas
+    ProblemAICreateInitiateRequest, ProblemAIStructuredData,
+    AIChatLogEntryCreateSchema, ProblemAIFinalizeRequest,
+    ProblemAIStreamRequest, AIChatMessage,
+    ProblemAISessionCreate, ProblemAISessionData, ProblemAISessionUpdate # Import new schemas
+)
+from sqlalchemy.orm import selectinload # For eager loading
 
 
 class ProblemService(LoggerMixin):
@@ -32,8 +43,14 @@ class ProblemService(LoggerMixin):
     
     def __init__(self, db: AsyncSession):
         self.db = db
-        # self._ai_service removed, will use global ai_router
+        # AIService will be instantiated on demand or could be passed via DI
     
+    async def _get_ai_service(self) -> AIModelService:
+        # Helper to get AI service instance, avoids repeated instantiation if not needed
+        # Or could be initialized in __init__ if ProblemService is created per request.
+        # For simplicity, creating it here when needed.
+        return AIModelService(self.db)
+
     async def create_problem(
         self,
         data: ProblemCreate,
@@ -851,70 +868,59 @@ class ProblemService(LoggerMixin):
                 }
             )
             
-            # 调用AI服务进行分析
-            # analysis_response = await self.ai_service.analyze(analysis_request) # Old call
-            analysis_response = await ai_router.route_request(analysis_request) # Use global ai_router
+            ai_content_payload = {"text": content}
+            if problem.subject:
+                subject_value = problem.subject.value if hasattr(problem.subject, 'value') else str(problem.subject)
+                ai_content_payload["subject"] = subject_value
+
+            analysis_request = AIRequestSchema( # Use AIRequestSchema
+                task_type=TaskType.PROBLEM_ANALYSIS,
+                prompt=json.dumps(ai_content_payload), # Pass structured content as JSON string in prompt or use context
+                # Or better: use context field in AIRequestSchema
+                # context={"text": content, "subject": subject_value, ... other problem fields ...}
+                # Let's adjust to use context properly
+                context={
+                    "text": content,
+                    "subject": subject_value,
+                    "user_answer": problem.user_answer, # Assuming these are available on problem model
+                    "correct_answer": problem.correct_answer
+                }
+                # metadata is for AIService logging, not AI provider directly
+            )
             
-            if not analysis_response.success or not analysis_response.content:
-                error_message = analysis_response.error or "Unknown AI analysis error from router"
+            ai_service = await self._get_ai_service()
+            analysis_response_data: AIResponseDataSchema = await ai_service.process_ai_request(analysis_request)
+            
+            if not analysis_response_data.success or not analysis_response_data.result_json:
+                error_message = analysis_response_data.error_message or "Unknown AI analysis error"
                 self.log_error(f"AI analysis failed for problem {problem_id}: {error_message}")
-                # Consider not raising an exception here to allow partial updates,
-                # or make it configurable. For now, let's assume failure means no update.
-            # For a robust system, you might want to log the error and proceed,
-            # or retry, or flag the problem for manual review.
-            # For now, let's assume failure means no update.
-            # Let's update the problem even if AI analysis fails partially or completely.
-            # The AI analysis fields in the DB might remain null or unchanged.
-            # For now, let's assume if AI fails, we don't update AI-derived fields.
-            # To make it simple, if AI analysis fails, we just log and don't update AI fields.
-            
-            # Attempt to store the error message if the model supports it (e.g., an ai_analysis_error field)
-            if hasattr(problem, 'ai_analysis_error'):
-                 problem.ai_analysis_error = error_message 
-                 await self.db.commit() # Commit this error state
-
-            self.log_warning(f"AI analysis failed for problem {problem_id}, AI fields not updated. Error: {error_message}")
-            return {
-                "status": "ai_failed",
-                "problem_id": str(problem_id),
-                "message": f"AI analysis failed: {error_message}",
-                "analysis": None
-            }
-
-            # AI analysis was successful, content should be a JSON string
-            raw_ai_content = analysis_response.content
-            analysis_data_dict = {}
-            if isinstance(raw_ai_content, str):
-                try:
-                    analysis_data_dict = json.loads(raw_ai_content)
-                except json.JSONDecodeError:
-                    self.log_error(f"Failed to parse AI analysis JSON for problem {problem_id}: {raw_ai_content}")
-                    # Handle as AI failure for updating fields
-                    if hasattr(problem, 'ai_analysis_error'):
-                        problem.ai_analysis_error = "Failed to parse AI JSON response"
-                        await self.db.commit()
-                    return {
-                        "status": "ai_failed",
-                        "problem_id": str(problem_id),
-                        "message": "AI analysis successful, but failed to parse JSON response.",
-                        "analysis": None
-                    }
-            elif isinstance(raw_ai_content, dict): # If AI provider already returns a dict
-                analysis_data_dict = raw_ai_content
-            else:
-                self.log_error(f"Unexpected AI analysis content type for problem {problem_id}: {type(raw_ai_content)}")
+                
                 if hasattr(problem, 'ai_analysis_error'):
-                    problem.ai_analysis_error = "Unexpected AI response content type"
+                    problem.ai_analysis_error = error_message 
+                    await self.db.commit()
+
+                self.log_warning(f"AI analysis failed for problem {problem_id}, AI fields not updated. Error: {error_message}")
+                return {
+                    "status": "ai_failed",
+                    "problem_id": str(problem_id),
+                    "message": f"AI analysis failed: {error_message}",
+                    "analysis": None
+                }
+
+            analysis_data_dict = analysis_response_data.result_json # result_json should be a dict
+            
+            if not isinstance(analysis_data_dict, dict):
+                self.log_error(f"AI analysis for problem {problem_id} returned non-dict JSON: {analysis_data_dict}")
+                if hasattr(problem, 'ai_analysis_error'):
+                    problem.ai_analysis_error = "AI returned non-dictionary JSON structure."
                     await self.db.commit()
                 return {
                     "status": "ai_failed",
                     "problem_id": str(problem_id),
-                    "message": "AI analysis successful, but unexpected response content type.",
+                    "message": "AI analysis successful, but returned non-dictionary JSON.",
                     "analysis": None
                 }
-
-            # 更新问题信息
-            # Update tags first, as they might also be suggested by AI
+            
             new_tags = analysis_data_dict.get("tags", problem.tags if problem.tags else [])
             if isinstance(new_tags, list): # Ensure it's a list
                 original_tags = list(problem.tags) if problem.tags else []
@@ -924,33 +930,33 @@ class ProblemService(LoggerMixin):
                 if tags_to_remove: await self.decrement_tag_usage(tags_to_remove)
                 problem.tags = new_tags
             
-            problem.knowledge_points = analysis_data_dict.get("knowledge_points", problem.knowledge_points)
-            problem.difficulty_level = analysis_data_dict.get("difficulty_level", problem.difficulty_level)
+            problem.knowledge_points = analysis_data_dict.get("knowledge_points", problem.knowledge_points or [])
+            problem.difficulty_level = analysis_data_dict.get("difficulty_level", problem.difficulty_level or 3)
             problem.error_analysis = analysis_data_dict.get("error_analysis", problem.error_analysis)
             problem.solution = analysis_data_dict.get("solution", problem.solution)
-            problem.ai_analysis = analysis_data_dict # Store the full parsed JSON
+            problem.ai_analysis = analysis_data_dict
 
-            # Handle suggested category
             suggested_category_name = analysis_data_dict.get("suggested_category")
             if suggested_category_name and isinstance(suggested_category_name, str):
                 old_category_name = problem.category
                 if old_category_name != suggested_category_name:
-                    problem.category = suggested_category_name # Update problem's category name
+                    problem.category = suggested_category_name
                     if old_category_name:
                         await self.decrement_category_usage(problem.subject, old_category_name)
-                    await self.increment_category_usage(problem.subject, suggested_category_name) # Creates if not exists
+                    await self.increment_category_usage(problem.subject, suggested_category_name)
 
-            if hasattr(problem, 'ai_analysis_error'): # Clear any previous error
+            if hasattr(problem, 'ai_analysis_error'):
                 problem.ai_analysis_error = None
             
             await self.db.commit()
             await self.db.refresh(problem)
             
             self.log_info(f"Successfully analyzed problem: {problem_id}")
+            # analysis_result was not defined. Use analysis_data_dict from AI.
             return {
                 "status": "success",
-                "problem_id": problem_id,
-                "analysis": analysis_result
+                "problem_id": str(problem_id),
+                "analysis": analysis_data_dict 
             }
             
         except Exception as e:
@@ -985,58 +991,46 @@ class ProblemService(LoggerMixin):
             # This case should be prevented by Pydantic model validation, but as a safeguard:
             raise ValueError("No image data provided for OCR (neither base64 nor valid URL).")
 
-        ai_ocr_request_content = {
-            "image_base64": image_b64_for_ai,
-            "enhance_math": data.enhance_math,
-        }
-        
-        # 调用AI API进行OCR
-        ai_ocr_direct_request = AIRequest( # Construct AIRequest directly
+        # Corrected block: Call AI API using AIRequestSchema
+        ai_ocr_direct_request = AIRequestSchema( 
             task_type=TaskType.OCR,
-            content=ai_ocr_request_content
-            # metadata, preferred_providers, etc. can be added if needed by ai_router
+            image_base64=image_b64_for_ai, # Pass base64 directly
+            # image_url could also be used if AI provider supports it and base64 is not preferred
+            context={"enhance_math": data.enhance_math}
         )
         
-        # response = await self.ai_service.route_request(ai_request) # Old call
-        ocr_response = await ai_router.route_request(ai_ocr_direct_request) # Use global ai_router
+        ai_service = await self._get_ai_service()
+        ocr_response_data: AIResponseDataSchema = await ai_service.process_ai_request(ai_ocr_direct_request)
         
-        if ocr_response.success and ocr_response.content:
-            ocr_text_result = ocr_response.content.get("text")
+        if ocr_response_data.success and ocr_response_data.result_text is not None:
+            ocr_text_result = ocr_response_data.result_text
             
-            if ocr_text_result is None: # Check if 'text' key exists and has a value
-                 self.log_warning(f"OCR successful but no text content returned for image. AI Response: {ocr_response.content}")
-                 ocr_text_result = ""
-
-
-            # 如果需要自动创建题目
             if data.auto_create and ocr_text_result:
                 problem_create_payload = ProblemCreate(
-                    title=f"OCR 题目 - {datetime.now().strftime('%Y-%m-%d %H:%M')}", # Generic title
+                    title=f"OCR 题目 - {datetime.now().strftime('%Y-%m-%d %H:%M')}",
                     content=ocr_text_result,
-                    subject=data.subject or Subject.MATH,  # Use provided subject or default
+                    subject=data.subject or Subject.MATH,
                     image_base64=[original_image_for_problem_creation] if original_image_for_problem_creation else [],
-                    category=data.category, # Pass category if provided in OCRRequest
+                    category=data.category,
                 )
-                created_problem = await self.create_problem(
-                    problem_create_payload,
-                    auto_analyze=False
-                )
+                # Pass auto_analyze=False to prevent re-analysis immediately for OCR'd problem
+                created_problem = await self.create_problem(problem_create_payload, auto_analyze=False)
                 
                 return {
-                    "text": ocr_text_result, # Return the OCR'd text
+                    "text": ocr_text_result,
                     "problem_id": str(created_problem.id),
                     "created": True,
                     "message": "OCR successful and problem created."
                 }
             
             return {
-                "text": ocr_text_result, # Return the OCR'd text
+                "text": ocr_text_result,
                 "created": False,
                 "message": "OCR successful."
             }
         else:
-            error_msg = ocr_response.error or "OCR failed with unknown error from AI service via router"
-            self.log_error(f"OCR failed: {error_msg}")
+            error_msg = ocr_response_data.error_message or "OCR failed with unknown error"
+            self.log_error(f"OCR failed: {error_msg}. AI Response: {ocr_response_data.dict()}")
             raise Exception(f"OCR failed: {error_msg}")
     
     async def add_review_record(
@@ -1466,3 +1460,477 @@ class ProblemService(LoggerMixin):
         
         self.log_info(f"Updated problem: {problem_id}")
         return problem
+
+    # --- AI-Driven Problem Creation Workflow Methods ---
+
+    async def initiate_ai_problem_creation(
+        self,
+        request_data: ProblemAICreateInitiateRequest
+    ) -> ProblemAIStructuredData:
+        """
+        阶段一：AI驱动错题创建 - 初始化。
+        接收图片，调用AI进行初步OCR和结构化分析。
+        """
+        self.log_info(f"Initiating AI problem creation. Subject hint: {request_data.subject_hint}")
+        image_b64_content: Optional[str] = None
+        uploaded_image_url: Optional[str] = None
+
+        try:
+            if request_data.image_base64:
+                image_b64_content = request_data.image_base64.split(',')[-1] # Remove data:image/... part if present
+                image_data_bytes = base64.b64decode(image_b64_content)
+            elif request_data.image_url:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(str(request_data.image_url))
+                    response.raise_for_status()
+                    image_data_bytes = await response.aread()
+                image_b64_content = base64.b64encode(image_data_bytes).decode('utf-8') # For AI provider if it needs b64
+            else:
+                # This case should be caught by Pydantic validation in ProblemAICreateInitiateRequest
+                raise ValueError("No image data provided (base64 or URL).")
+
+            # 1. 上传图片到文件服务 (可选，但推荐，以获取稳定的URL或ID)
+            # filename = f"ai_problem_init_{datetime.now().timestamp()}.png" # TODO: determine extension from b64 or URL
+            # For simplicity, let's assume PNG for now or that file_service handles it.
+            try:
+                # Attempt to determine file extension
+                img = Image.open(io.BytesIO(image_data_bytes))
+                extension = img.format.lower() if img.format else "png"
+            except Exception:
+                extension = "png" # Default if format detection fails
+            
+            filename = f"ai_init_{uuid.uuid4()}.{extension}"
+
+            uploaded_image_url = await file_service.upload_image(
+                image_data=image_data_bytes,
+                filename=filename,
+                category="ai_problem_creation",
+                db=self.db
+            )
+            self.log_info(f"Image uploaded to file service: {uploaded_image_url}")
+
+            # 2. 准备AI请求 (session_id for AI context will be the new ProblemAISession.id)
+            # Placeholder for session ID for now, will be replaced by ProblemAISession.id
+            temp_session_id_for_ai_context = str(uuid.uuid4()) # Temporary, will be replaced
+
+            ai_stage1_request = AIRequestSchema(
+                task_type=TaskType.PROBLEM_IMAGE_TO_STRUCTURED_JSON,
+                image_base64=image_b64_content,
+                context={
+                    "subject_hint": request_data.subject_hint.value if request_data.subject_hint else None,
+                    "session_id": temp_session_id_for_ai_context, # Pass a session concept to AI if it uses it
+                    "uploaded_image_url": uploaded_image_url # Pass image ref to AI context
+                }
+            )
+
+            # 3. 调用AI API 管理器
+            ai_service = await self._get_ai_service()
+            self.log_info(f"Calling AI service for task {TaskType.PROBLEM_IMAGE_TO_STRUCTURED_JSON} with temp context session_id {temp_session_id_for_ai_context}")
+            ai_response_data: AIResponseDataSchema = await ai_service.process_ai_request(ai_stage1_request)
+
+            if not ai_response_data.success or not isinstance(ai_response_data.result_json, dict):
+                error_msg = ai_response_data.error_message or "AI stage 1 analysis failed or returned invalid JSON content."
+                self.log_error(f"AI stage 1 (structured JSON) failed. AI Response: {ai_response_data.dict()}")
+                raise Exception(f"AI processing (Stage 1) failed: {error_msg}")
+
+            structured_ai_data_dict = ai_response_data.result_json
+            self.log_info(f"AI stage 1 (structured JSON) successful. Raw AI Data: {structured_ai_data_dict}")
+
+            # 4. 创建 ProblemAISession 记录
+            new_ai_session = ProblemAISession(
+                initial_image_ref=str(uploaded_image_url) if uploaded_image_url else None, # Ensure str
+                initial_subject_hint=request_data.subject_hint,
+                current_structured_data=structured_ai_data_dict, # Store the raw JSON from AI
+                status=ProblemAISessionStatus.ACTIVE
+                # id will be auto-generated by BaseModel
+            )
+            self.db.add(new_ai_session)
+            await self.db.commit()
+            await self.db.refresh(new_ai_session)
+            session_id = new_ai_session.id # This is the actual session ID to be used
+            self.log_info(f"Created ProblemAISession with ID: {session_id}")
+
+
+            # 5. 构建并返回 ProblemAIStructuredData (Pydantic model for response)
+            # Ensure all fields expected by ProblemAIStructuredData are present or handled.
+            # The AI response (structured_ai_data_dict) should ideally match the fields.
+            
+            # Ensure the session_id in the returned structured data matches the new ProblemAISession.id
+            response_structured_data = ProblemAIStructuredData(
+                session_id=session_id, # Use the actual session ID from the created DB record
+                raw_ocr_text=structured_ai_data_dict.get("raw_ocr_text"),
+                extracted_content=structured_ai_data_dict.get("extracted_content"),
+                suggested_subject=structured_ai_data_dict.get("suggested_subject"),
+                preliminary_category=structured_ai_data_dict.get("preliminary_category"),
+                preliminary_tags=structured_ai_data_dict.get("preliminary_tags", []),
+                image_regions_of_interest=structured_ai_data_dict.get("image_regions_of_interest"),
+                detected_language=structured_ai_data_dict.get("detected_language"),
+                original_image_ref=str(uploaded_image_url) if uploaded_image_url else None # Store the URL from file service
+            )
+            
+            # Update the session's current_structured_data with this Pydantic model's dict form
+            # to ensure it has the correct session_id field as well.
+            new_ai_session.current_structured_data = response_structured_data.model_dump()
+            await self.db.commit()
+            await self.db.refresh(new_ai_session)
+
+            return response_structured_data
+
+        except Exception as e:
+            self.log_error(f"Error in initiate_ai_problem_creation: {e}", exc_info=True)
+            # Consider specific error handling or re-raising
+            raise
+
+    async def handle_ai_interactive_analysis_stream(
+        self,
+        session_id_str: str, # Changed from session_id to match API call
+        request_payload: ProblemAIStreamRequest # Changed from payload to match API call
+    ) -> AsyncGenerator[Dict[str, Any], None]: # Yielding Dicts for SSE
+        """
+        阶段二：AI驱动错题创建 - 处理与AI的交互式分析流。
+        使用Server-Sent Events (SSE) 返回AI的流式响应。
+        接收包含初始数据引用（可选）、用户当前消息（可选）和聊天历史的请求体。
+        Saves user and AI messages to ProblemAIChatLog.
+        """
+        self.log_info(f"Handling AI interactive analysis stream for session {session_id_str}. User message: '{request_payload.user_message}'. History items: {len(request_payload.chat_history)}")
+
+        # Validate session_id format (optional, Pydantic in ProblemAIStreamRequest might do this if session_id is part of it)
+        try:
+            problem_session_uuid = uuid.UUID(session_id_str)
+        except ValueError:
+            self.log_error(f"Invalid session_id format for interactive stream: {session_id_str}")
+            yield {"type": "error", "message": "Invalid session ID format."}
+            return
+
+        # 1. Save User's Message to Chat Log
+        #    The problem_id is not known yet in this AI-driven creation workflow stage.
+        #    Chat logs here are associated with the session_id.
+        # Validate session_id exists and is active
+        ai_session = await self.get_problem_ai_session(session_id_str, load_chat_logs=False) # Don't need chat logs here
+        if not ai_session:
+            self.log_error(f"AI Session not found for ID: {session_id_str} in interactive stream.")
+            yield {"type": "error", "message": "AI session not found.", "session_id": session_id_str}
+            return
+        if ai_session.status != ProblemAISessionStatus.ACTIVE:
+            self.log_warning(f"AI Session {session_id_str} is not active (status: {ai_session.status}). Stream aborted.")
+            yield {"type": "error", "message": f"AI session is not active (status: {ai_session.status}).", "session_id": session_id_str}
+            return
+
+        # 1. Save User's Message to Chat Log
+        latest_order_stmt = select(func.max(ProblemAIChatLog.order_in_conversation)).where(
+            ProblemAIChatLog.problem_creation_session_id == session_id_str
+        )
+        latest_order_result = await self.db.scalar(latest_order_stmt)
+        current_order = (latest_order_result or 0) + 1
+
+        if request_payload.user_message:
+            user_log_entry = ProblemAIChatLog(
+                problem_creation_session_id=session_id_str, # Link to ProblemAISession.id
+                role="user",
+                content=request_payload.user_message,
+                content_type="text",
+                order_in_conversation=current_order,
+                timestamp=datetime.now()
+            )
+            self.db.add(user_log_entry)
+            await self.db.commit()
+            current_order += 1
+            self.log_info(f"User message saved for AI session {session_id_str}, order {user_log_entry.order_in_conversation}")
+
+        # 2. Prepare AI Request
+        # Use current_structured_data from the session if initial_data_ref is not in payload or for context
+        current_session_structured_data = ai_session.current_structured_data
+        
+        context_for_ai = {
+            "session_id": session_id_str,
+             # Prefer initial_data_ref from request if provided (e.g. first stream call by client)
+             # otherwise use the one stored in the session.
+            "structured_problem_context": request_payload.initial_data_ref.model_dump() if request_payload.initial_data_ref else current_session_structured_data,
+        }
+
+        ai_interactive_request = AIRequestSchema(
+            task_type=TaskType.PROBLEM_INTERACTIVE_DEEP_ANALYSIS,
+            stream=True,
+            prompt=request_payload.user_message, # User's current message
+            history=[hist.model_dump() for hist in request_payload.chat_history], # Full history from client
+            context=context_for_ai
+        )
+
+        accumulated_ai_response_content = ""
+        ai_response_saved = False
+
+        try:
+            ai_service = await self._get_ai_service()
+            self.log_info(f"Streaming AI request for session {session_id_str}, task: {ai_interactive_request.task_type}")
+            
+            result_generator = await ai_service.process_ai_request(ai_interactive_request)
+            
+            if not isinstance(result_generator, AsyncGenerator):
+                self.log_error(f"AIService did not return a generator for streaming request in session {session_id_str}")
+                yield {"type": "error", "message": "Internal error: AI service did not stream.", "session_id": session_id_str}
+                return
+
+            async for chunk_data in result_generator:
+                if isinstance(chunk_data, dict):
+                    yield chunk_data # Forward to API layer for SSE formatting
+                    
+                    event_type = chunk_data.get("type")
+                    if event_type == "content_chunk":
+                        accumulated_ai_response_content += chunk_data.get("value", "")
+                    elif event_type == "structured_data_update": # Hypothetical event from AI service
+                        updated_data = chunk_data.get("data")
+                        if isinstance(updated_data, dict) and ai_session: # ai_session should be valid here
+                            ai_session.current_structured_data = updated_data
+                            ai_session.updated_at = datetime.now()
+                            self.db.add(ai_session) # Add to session for update
+                            await self.db.commit()
+                            await self.db.refresh(ai_session)
+                            self.log_info(f"AI Session {session_id_str} current_structured_data updated via stream.")
+                    elif event_type == "stream_end":
+                        if accumulated_ai_response_content and not ai_response_saved:
+                            # Save final AI response chunk
+                            # ... (save logic as before)
+                            pass # Handled below
+                        break 
+                    elif event_type == "error":
+                        # ... (error handling as before)
+                        break 
+                else: # Fallback for unexpected chunk type
+                    self.log_warning(f"AIService yielded unexpected data type: {type(chunk_data)} for session {session_id_str}.")
+                    # ... (fallback handling as before)
+
+            # Save accumulated AI response if any, after stream ends or breaks
+            if accumulated_ai_response_content and not ai_response_saved:
+                ai_log_entry = ProblemAIChatLog(
+                    problem_creation_session_id=session_id_str,
+                    role="ai",
+                    content=accumulated_ai_response_content,
+                    content_type="text_markdown",
+                    order_in_conversation=current_order,
+                    timestamp=datetime.now()
+                )
+                self.db.add(ai_log_entry)
+                await self.db.commit()
+                ai_response_saved = True # Mark as saved
+                self.log_info(f"Final accumulated AI response saved for session {session_id_str}, order {ai_log_entry.order_in_conversation}")
+            
+            # Ensure a stream_end event is yielded if not already by AI service
+            if chunk_data.get("type") != "stream_end": # Check last chunk from generator
+                 yield {"type": "stream_end", "session_id": session_id_str}
+
+            self.log_info(f"AI interactive stream processing completed for session {session_id_str}")
+
+        except Exception as e:
+            # ... (Outer exception handling as before, including saving partial AI response)
+            self.log_error(f"Unhandled error during AI interactive stream for session {session_id_str}: {e}", exc_info=True)
+            yield {"type": "error", "message": f"Internal server error during stream: {str(e)}", "session_id": session_id_str}
+            if accumulated_ai_response_content and not ai_response_saved:
+                 try:
+                    ai_log_entry = ProblemAIChatLog(
+                        problem_creation_session_id=session_id_str,
+                        role="ai",
+                        content=accumulated_ai_response_content + f"\n[Error after this content: {str(e)}]",
+                        content_type="text_partial_error",
+                        order_in_conversation=current_order, # Ensure current_order is accessible
+                        timestamp=datetime.now()
+                    )
+                    self.db.add(ai_log_entry)
+                    await self.db.commit()
+                    self.log_info(f"Partially accumulated AI response with error saved for session {session_id_str}.")
+                 except Exception as db_save_exc:
+                     self.log_error(f"Failed to save partial AI response during error handling for session {session_id_str}: {db_save_exc}")
+
+
+    async def finalize_ai_problem_creation(
+        self,
+        request_data: ProblemAIFinalizeRequest
+    ) -> Problem:
+        """
+        阶段三：AI驱动错题创建 - 最终确认并保存。
+        接收包含所有最终字段和聊天记录的请求，创建错题，并更新AI会话状态。
+        """
+        self.log_info(f"Finalizing AI problem creation for session {request_data.session_id}. Title: {request_data.title}")
+        
+        # 0. Retrieve and validate AI Session
+        ai_session = await self.get_problem_ai_session(request_data.session_id)
+        if not ai_session:
+            self.log_error(f"AI Session not found for ID: {request_data.session_id} during finalization.")
+            raise ValueError(f"AI Session with ID {request_data.session_id} not found.")
+        if ai_session.status == ProblemAISessionStatus.FINALIZED:
+            self.log_warning(f"AI Session {request_data.session_id} is already finalized.")
+            # Depending on policy, either raise error or return existing problem if problem_id exists
+            if ai_session.final_problem_id:
+                existing_problem = await self.get_problem_by_id(ai_session.final_problem_id)
+                if existing_problem: return existing_problem # Or raise error: "Session already finalized"
+            raise ValueError("AI Session already finalized.")
+        if ai_session.status == ProblemAISessionStatus.ABORTED:
+            raise ValueError("AI Session was aborted and cannot be finalized.")
+
+        try:
+            # 1. Create Problem entity (same as before)
+            problem_core_data = request_data.dict(exclude={"chat_logs", "session_id", "ai_full_analysis_json"})
+            problem_dict = {}
+            for field in Problem.__table__.columns.keys():
+                if field in problem_core_data:
+                    problem_dict[field] = problem_core_data[field]
+            
+            problem_dict.setdefault("knowledge_points", [])
+            problem_dict.setdefault("image_urls", request_data.image_urls or []) # Use image_urls from request
+            problem_dict.setdefault("difficulty_level", 3)
+            problem_dict.setdefault("mastery_level", 0.0)
+            problem_dict.setdefault("review_count", 0)
+            problem_dict.setdefault("tags", [])
+            problem_dict["ai_analysis"] = request_data.ai_full_analysis_json
+
+            new_problem = Problem(**problem_dict)
+
+            if new_problem.tags:
+                await self.increment_tag_usage(list(set(new_problem.tags)))
+            if new_problem.category:
+                await self.increment_category_usage(new_problem.subject, new_problem.category)
+
+            self.db.add(new_problem)
+            await self.db.flush() 
+            await self.db.refresh(new_problem)
+            self.log_info(f"Problem entity created with ID {new_problem.id} for session {request_data.session_id}")
+
+            # 2. Link Chat Logs (already linked to session, now link problem_id)
+            # This part of the logic remains similar: update problem_id on existing logs.
+            stmt_select_logs = select(ProblemAIChatLog).where(
+                ProblemAIChatLog.problem_creation_session_id == request_data.session_id
+            )
+            result_logs = await self.db.execute(stmt_select_logs)
+            session_chat_logs = result_logs.scalars().all()
+            for chat_log in session_chat_logs:
+                chat_log.problem_id = new_problem.id
+                self.db.add(chat_log)
+            
+            self.log_info(f"Updated {len(session_chat_logs)} chat log entries with problem_id {new_problem.id}")
+
+            # 3. Update ProblemAISession
+            ai_session.final_problem_id = new_problem.id
+            ai_session.status = ProblemAISessionStatus.FINALIZED
+            # Optionally, update current_structured_data one last time if request_data is more final
+            # For example, if ai_full_analysis_json is the most complete version of structured data:
+            if request_data.ai_full_analysis_json:
+                 ai_session.current_structured_data = request_data.ai_full_analysis_json
+            else: # Or use the problem_dict created for the problem
+                 # Construct a dict that matches ProblemAIStructuredData closely from problem_dict
+                 final_structured_for_session = {
+                     "session_id": ai_session.id,
+                     "extracted_content": new_problem.content,
+                     "suggested_subject": new_problem.subject,
+                     "preliminary_category": new_problem.category,
+                     "preliminary_tags": new_problem.tags,
+                     "knowledge_points": new_problem.knowledge_points, # Add KPs if available
+                     # ... other relevant fields from Problem that match ProblemAIStructuredData
+                 }
+                 ai_session.current_structured_data = final_structured_for_session
+
+
+            ai_session.updated_at = datetime.now()
+            self.db.add(ai_session)
+
+            await self.db.commit()
+            await self.db.refresh(new_problem)
+            await self.db.refresh(ai_session)
+            # Refresh chat logs if they need to be accessed with updated problem_id immediately
+            for log in session_chat_logs:
+                await self.db.refresh(log)
+
+            self.log_info(f"Successfully finalized AI session {request_data.session_id} and created problem {new_problem.id}")
+            return new_problem
+
+        except Exception as e:
+            self.log_error(f"Error in finalize_ai_problem_creation for session {request_data.session_id}: {e}", exc_info=True)
+            await self.db.rollback()
+            raise
+
+    # --- New methods for ProblemAISession ---
+
+    async def get_problem_ai_session(
+        self, 
+        session_id: str, 
+        load_chat_logs: bool = True, 
+        load_final_problem: bool = True
+    ) -> Optional[ProblemAISession]:
+        """获取指定的AI错题创建会话及其关联数据。"""
+        query = select(ProblemAISession).where(ProblemAISession.id == session_id)
+        
+        options_to_load = []
+        if load_chat_logs:
+            options_to_load.append(selectinload(ProblemAISession.ai_chat_logs))
+        if load_final_problem:
+            options_to_load.append(selectinload(ProblemAISession.final_problem)) # Assuming 'final_problem' is the relationship name
+            
+        if options_to_load:
+            query = query.options(*options_to_load)
+            
+        result = await self.db.execute(query)
+        session = result.scalar_one_or_none()
+        
+        if session:
+            self.log_info(f"Retrieved AI session {session_id}. Chat logs loaded: {load_chat_logs}, Final problem loaded: {load_final_problem}")
+        else:
+            self.log_warning(f"AI session {session_id} not found.")
+        return session
+
+    async def get_chat_history_for_session(self, session_id: str) -> List[ProblemAIChatLog]:
+        """获取指定AI错题创建会话的所有聊天记录。"""
+        # Ensure the session itself exists first (optional, but good practice)
+        session_exists = await self.db.scalar(select(func.count(ProblemAISession.id)).where(ProblemAISession.id == session_id))
+        if not session_exists:
+            self.log_warning(f"Attempted to get chat history for non-existent AI session: {session_id}")
+            return [] # Or raise HTTPException(status_code=404, detail="AI session not found")
+
+        stmt = select(ProblemAIChatLog).where(
+            ProblemAIChatLog.problem_creation_session_id == session_id
+        ).order_by(ProblemAIChatLog.order_in_conversation)
+        
+        result = await self.db.execute(stmt)
+        chat_logs = result.scalars().all()
+        self.log_info(f"Retrieved {len(chat_logs)} chat log entries for AI session {session_id}.")
+        return chat_logs
+
+    async def list_ai_problem_sessions(
+        self,
+        page: int = 1,
+        size: int = 20,
+        status: Optional[ProblemAISessionStatus] = None,
+        # user_id: Optional[str] = None, # If user association is added later
+        sort_by: str = "created_at",
+        sort_desc: bool = True
+    ) -> tuple[List[ProblemAISession], int]:
+        """获取AI错题创建会话列表，支持分页和状态过滤。"""
+        query = select(ProblemAISession)
+
+        # if user_id: # Example for future user filtering
+        #     query = query.where(ProblemAISession.user_id == user_id)
+        
+        if status:
+            query = query.where(ProblemAISession.status == status)
+
+        # Eager load related data if it's commonly needed for list display
+        # For now, just basic session data. Details can be fetched via get_problem_ai_session.
+        # query = query.options(selectinload(ProblemAISession.final_problem).load_only(Problem.id, Problem.title) if needed)
+
+
+        # Count total matching sessions
+        count_query = select(func.count()).select_from(query.subquery())
+        total_sessions = await self.db.scalar(count_query)
+
+        # Apply sorting
+        sort_column = getattr(ProblemAISession, sort_by, ProblemAISession.created_at)
+        if sort_desc:
+            query = query.order_by(desc(sort_column))
+        else:
+            query = query.order_by(sort_column)
+        
+        # Apply pagination
+        query = query.offset((page - 1) * size).limit(size)
+        
+        result = await self.db.execute(query)
+        sessions = result.scalars().all()
+        
+        self.log_info(f"Listed {len(sessions)} AI problem sessions. Total matching: {total_sessions}. Page: {page}, Size: {size}, Status filter: {status}")
+        return sessions, total_sessions

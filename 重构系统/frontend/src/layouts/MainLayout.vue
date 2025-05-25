@@ -19,10 +19,14 @@
           <template #title>数据概览</template>
         </el-menu-item>
         
-        <el-menu-item index="/problems">
-          <el-icon><Document /></el-icon>
-          <template #title>错题管理</template>
-        </el-menu-item>
+        <el-sub-menu index="problems-group">
+          <template #title>
+            <el-icon><Document /></el-icon>
+            <span>错题管理</span>
+          </template>
+          <el-menu-item index="/problems">错题列表</el-menu-item>
+          <el-menu-item index="/problems/ai-sessions">AI创建会话</el-menu-item>
+        </el-sub-menu>
         
         <el-menu-item index="/analyses">
           <el-icon><TrendCharts /></el-icon>
@@ -91,8 +95,9 @@ const activeMenu = computed(() => route.path)
 const currentRouteName = computed(() => {
   const routeNameMap = {
     '/dashboard': '数据概览',
-    '/problems': '错题管理',
+    '/problems': '错题列表', // Updated
     '/problems/create': '创建错题',
+    '/problems/ai-sessions': 'AI创建会话', // Added
     '/analyses': '分析报告',
     '/analyses/create': '创建分析',
     '/ai/models': 'AI模型配置',

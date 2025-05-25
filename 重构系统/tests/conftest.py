@@ -3,10 +3,17 @@
 """
 import pytest
 import asyncio
+import sys # Added sys
+import os  # Added os
 from typing import AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
+
+# Add project root to sys.path to allow imports from 'shared', 'backend.services', etc.
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from shared.database import Base
 from shared.config import settings
@@ -58,8 +65,8 @@ async def db(init_db) -> AsyncGenerator[AsyncSession, None]:
 @pytest.fixture
 async def test_user(db: AsyncSession):
     """创建测试用户"""
-    from services.user_service.models import User
-    from services.user_service.schemas import UserCreate
+    from backend.services.user_service.models import User # Changed from services.user_service to backend.services.user_service
+    from backend.services.user_service.schemas import UserCreate # Changed from services.user_service to backend.services.user_service
     
     user_data = UserCreate(
         username="testuser",
@@ -77,4 +84,4 @@ async def test_user(db: AsyncSession):
     await db.commit()
     await db.refresh(user)
     
-    return user 
+    return user

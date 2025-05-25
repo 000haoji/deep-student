@@ -21,7 +21,7 @@ from shared.database import init_db
 # 导入路由
 # from services.ai_api_manager import get_router as get_ai_router # This function might not be standard
 from services.ai_api_manager.api import router as ai_models_mgmt_router # For AI model CRUD, stats etc.
-from services.ai_api_manager.api import ai_router as global_ai_request_router # The AIRouter instance for making calls
+from services.ai_api_manager.router import ai_router as global_ai_request_router # The AIRouter instance for making calls, changed import source
 from services.problem_service.api import router as problem_router
 from services.review_service.api import router as review_router
 from services.file_service.api import router as file_router

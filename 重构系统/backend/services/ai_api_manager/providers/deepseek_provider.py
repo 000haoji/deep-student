@@ -4,520 +4,348 @@ DeepSeek AI提供商实现
 import json
 import asyncio
 import aiohttp
-from typing import Dict, Any, Optional, AsyncGenerator
+from typing import Dict, Any, Optional, AsyncGenerator, Tuple, List, Union
+
 from .base import BaseAIProvider
-from ..models import TaskType
+from ..schemas import AIRequestSchema
+from ..models import TaskType, AIProvider as AIProviderEnum
 from shared.utils.logger import LoggerMixin
 
+DEFAULT_DEEPSEEK_API_URL = "https://api.deepseek.com/v1"
 
 class DeepSeekProvider(BaseAIProvider, LoggerMixin):
     """DeepSeek AI提供商"""
-    
-    def __init__(self, api_key: str, api_url: str = None, model_name: str = "deepseek-chat", 
-                 timeout: int = 60, max_retries: int = 5):
-        super().__init__(api_key, api_url, model_name, timeout, max_retries)
-        self.api_url = api_url or "https://api.deepseek.com/v1"
-        self.model_name = model_name or "deepseek-chat"
-    
-    async def call_api(
-        self, 
-        task_type: TaskType,
-        content: Dict[str, Any],
-        stream: bool = False,
-        max_tokens: int = 1000,
-        temperature: float = 0.7,
-        timeout: Optional[int] = None
-    ) -> Dict[str, Any] | AsyncGenerator[Dict[str, Any], None]:
-        """
-        调用DeepSeek API
-        
-        Args:
-            task_type: 任务类型
-            content: 请求内容
-            stream: 是否流式响应
-            max_tokens: 最大token数
-            temperature: 温度参数
-            timeout: 超时时间
-            
-        Returns:
-            API响应结果或流式生成器
-        """
-        messages = self._build_messages(task_type, content)
-        
-        # 根据任务类型选择模型
-        model_name = self._select_model(task_type)
-        
-        # 构建请求数据
-        request_data = {
-            "model": model_name,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream
-        }
-        
-        # 针对代码任务添加特殊参数
-        if task_type in [TaskType.CODE_GENERATION, TaskType.CODE_REVIEW]:
-            request_data.update({
-                "top_p": 0.95,
-                "frequency_penalty": 0.1,
-                "presence_penalty": 0.1
-            })
-        
-        url = f"{self.api_url}/chat/completions"
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}"
-        }
-        
-        if stream:
-            return self._stream_request(url, headers, request_data, timeout)
-        else:
-            return await self._single_request(url, headers, request_data, timeout)
-    
-    def _select_model(self, task_type: TaskType) -> str:
-        """根据任务类型选择合适的模型"""
-        if task_type in [TaskType.CODE_GENERATION, TaskType.CODE_REVIEW]:
-            return "deepseek-coder"
-        elif task_type == TaskType.MATH_SOLVING:
-            return "deepseek-math"
-        else:
-            return self.model_name
-    
-    async def _single_request(
+
+    def __init__(
         self,
-        url: str,
-        headers: Dict[str, str],
-        data: Dict[str, Any],
-        timeout: Optional[int]
-    ) -> Dict[str, Any]:
-        """发送单次请求"""
-        timeout = timeout or self.timeout
+        model_name: str, # e.g., "deepseek-chat", "deepseek-coder"
+        provider_name: AIProviderEnum, # Should be AIProviderEnum.DEEPSEEK
+        api_key: Optional[str],
+        base_url: Optional[str] = None,
+        timeout_seconds: int = 120,
+        max_retries: int = 3, # Deepseek current default was 5, can adjust
+        rpm_limit: Optional[int] = None,
+        tpm_limit: Optional[int] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
+        max_tokens_limit: Optional[int] = None, # e.g., 32768
+    ):
+        super().__init__(
+            model_name=model_name,
+            provider_name=provider_name,
+            api_key=api_key,
+            base_url=base_url or DEFAULT_DEEPSEEK_API_URL,
+            timeout_seconds=timeout_seconds,
+            max_retries=max_retries,
+            rpm_limit=rpm_limit,
+            tpm_limit=tpm_limit,
+            custom_headers=custom_headers,
+            max_tokens_limit=max_tokens_limit
+        )
+        self._session: Optional[aiohttp.ClientSession] = None
+        # DeepSeek API endpoint is typically /v1/chat/completions
+        self.api_endpoint = f"{self.base_url}/chat/completions"
+
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+            self._session = aiohttp.ClientSession(timeout=timeout) # Headers added per-request
+        return self._session
+
+    async def close(self) -> None:
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
+    def _select_effective_model(self, requested_task_type: TaskType) -> str:
+        """根据任务类型选择实际使用的模型名称。"""
+        # This uses self.model_name (the configured model for this provider instance)
+        # as a base, and potentially overrides it for specific task types if the
+        # base model isn't specialized (e.g. if base is deepseek-chat).
+        if requested_task_type in [TaskType.CODE_GENERATION, TaskType.CODE_REVIEW] and "coder" not in self.model_name:
+            return "deepseek-coder" # Prefer coder model for code tasks
+        # Add other specific model selections if needed, e.g., for 'deepseek-math'
+        # if requested_task_type == TaskType.MATH_SOLVING and "math" not in self.model_name:
+        #     return "deepseek-math"
+        return self.model_name # Default to the configured model
+
+
+    def _build_messages(self, request: AIRequestSchema) -> List[Dict[str, Any]]:
+        """构建与OpenAI兼容的消息列表。"""
+        messages: List[Dict[str, Any]] = []
+        task_type = request.task_type
+        context = request.context or {}
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            for attempt in range(self.max_retries + 1):
-                try:
-                    async with session.post(url, headers=headers, json=data) as response:
-                        if response.status == 200:
-                            result = await response.json()
-                            return self._parse_response(result)
-                        else:
-                            error_text = await response.text()
-                            self.log_error(f"DeepSeek API error: {response.status} - {error_text}")
-                            
-                            if attempt < self.max_retries:
-                                await asyncio.sleep(2 ** attempt)  # 指数退避
-                                continue
-                            else:
-                                raise Exception(f"DeepSeek API error: {response.status} - {error_text}")
-                                
-                except asyncio.TimeoutError:
-                    self.log_error(f"DeepSeek API timeout (attempt {attempt + 1})")
-                    if attempt < self.max_retries:
-                        await asyncio.sleep(2 ** attempt)
-                        continue
-                    else:
-                        raise Exception("DeepSeek API request timeout")
-                        
-                except Exception as e:
-                    self.log_error(f"DeepSeek API request failed: {e}")
-                    if attempt < self.max_retries:
-                        await asyncio.sleep(2 ** attempt)
-                        continue
-                    else:
-                        raise
-    
-    async def _stream_request(
-        self,
-        url: str,
-        headers: Dict[str, str],
-        data: Dict[str, Any],
-        timeout: Optional[int]
-    ) -> AsyncGenerator[Dict[str, Any], None]:
-        """发送流式请求"""
-        timeout = timeout or self.timeout
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
-            try:
-                async with session.post(url, headers=headers, json=data) as response:
-                    if response.status == 200:
-                        async for line in response.content:
-                            if line:
-                                line_text = line.decode('utf-8').strip()
-                                if line_text.startswith("data: "):
-                                    data_text = line_text[6:]  # 移除 "data: " 前缀
-                                    
-                                    if data_text == "[DONE]":
-                                        break
-                                    
-                                    try:
-                                        chunk_data = json.loads(data_text)
-                                        parsed_chunk = self._parse_stream_chunk(chunk_data)
-                                        if parsed_chunk:
-                                            yield parsed_chunk
-                                    except json.JSONDecodeError:
-                                        continue
-                    else:
-                        error_text = await response.text()
-                        raise Exception(f"DeepSeek Stream API error: {response.status} - {error_text}")
-                        
-            except Exception as e:
-                self.log_error(f"DeepSeek stream request failed: {e}")
-                yield {"error": str(e)}
-    
-    def _parse_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
-        """解析DeepSeek API响应"""
-        try:
-            choices = response.get("choices", [])
-            if not choices:
-                return {
-                    "content": "",
-                    "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
-                    "finish_reason": "no_choices"
-                }
-            
-            choice = choices[0]
-            message = choice.get("message", {})
-            content = message.get("content", "")
-            
-            # 提取usage信息
-            usage = response.get("usage", {})
-            
-            return {
-                "content": content,
-                "usage": {
-                    "total_tokens": usage.get("total_tokens", 0),
-                    "prompt_tokens": usage.get("prompt_tokens", 0),
-                    "completion_tokens": usage.get("completion_tokens", 0)
-                },
-                "finish_reason": choice.get("finish_reason", "stop")
-            }
-            
-        except Exception as e:
-            self.log_error(f"Failed to parse DeepSeek response: {e}")
-            return {
-                "content": "",
-                "usage": {"total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0},
-                "error": str(e)
-            }
-    
-    def _parse_stream_chunk(self, chunk: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """解析流式响应块"""
-        try:
-            choices = chunk.get("choices", [])
-            if not choices:
-                return None
-            
-            choice = choices[0]
-            delta = choice.get("delta", {})
-            content = delta.get("content", "")
-            
-            if content:
-                return {
-                    "content": content,
-                    "delta": content,
-                    "finish_reason": choice.get("finish_reason")
-                }
-            
-            return None
-            
-        except Exception as e:
-            self.log_error(f"Failed to parse DeepSeek stream chunk: {e}")
-            return None
-    
-    def _build_messages(self, task_type: TaskType, content: Dict[str, Any]) -> list:
-        """构建针对不同任务类型的消息"""
+        # System Prompt
+        system_content = "You are a helpful AI assistant." # Default
         if task_type == TaskType.PROBLEM_ANALYSIS:
-            return self._build_problem_analysis_messages(content)
-        elif task_type == TaskType.REVIEW_ANALYSIS:
-            return self._build_review_analysis_messages(content)
-        elif task_type == TaskType.BATCH_PROBLEM_ANALYSIS:
-            return self._build_batch_analysis_messages(content)
+            subject = context.get("subject", "通用")
+            system_content = f"""You are an expert educational assistant specializing in {subject} problems. 
+Your task is to analyze a student's problem and provide a detailed, structured JSON output.
+The JSON object must include: "knowledge_points" (List[str]), "difficulty_level" (int 1-5), "error_analysis" (str), "solution" (str), "tags" (List[str]), "suggested_category" (str).
+Ensure your entire response is a single, valid JSON object without any markdown or explanations outside the JSON structure.
+"""
+        elif task_type == TaskType.PROBLEM_IMAGE_TO_STRUCTURED_JSON:
+            # DeepSeek (non-visual models) can only process text descriptions.
+            # The prompt should reflect this limitation.
+            system_content = """You are an AI assistant analyzing a textual description of a problem (potentially transcribed from an image).
+Your task is to output a single, valid JSON object with fields: "session_id" (placeholder), "raw_ocr_text" (str, if the input is OCR text), "extracted_content" (str), "suggested_subject" (enum), "preliminary_category" (str), "preliminary_tags" (List[str]), "detected_language" (Optional[str]), "original_image_ref" (placeholder, if applicable).
+Prioritize "subject_hint" from user context if relevant.
+Ensure the output is ONLY the JSON object. No explanations or markdown formatting.
+"""
+        elif task_type == TaskType.PROBLEM_INTERACTIVE_DEEP_ANALYSIS:
+            system_content = """You are an expert AI assistant for interactive problem refinement and deep analysis.
+Respond conversationally and help the user complete all necessary fields for a problem record.
+If the user asks for a JSON representation of the current state of the problem, provide it based on the conversation.
+"""
         elif task_type == TaskType.CODE_GENERATION:
-            return self._build_code_generation_messages(content)
+            language = context.get("language", "Python")
+            system_content = f"You are an expert {language} programmer. Generate clean, efficient, and well-documented code."
         elif task_type == TaskType.CODE_REVIEW:
-            return self._build_code_review_messages(content)
-        elif task_type == TaskType.MATH_SOLVING:
-            return self._build_math_solving_messages(content)
-        elif task_type == TaskType.SUMMARIZATION:
-            return self._build_summarization_messages(content)
-        elif task_type == TaskType.TRANSLATION:
-            return self._build_translation_messages(content)
-        else:
-            return [{"role": "user", "content": str(content)}]
-    
-    def _build_problem_analysis_messages(self, content: Dict[str, Any]) -> list:
-        """构建错题分析消息"""
-        problem_content = content.get("problem_content", "")
-        subject = content.get("subject", "")
-        user_answer = content.get("user_answer", "")
-        correct_answer = content.get("correct_answer", "")
+            language = context.get("language", "Python")
+            system_content = f"You are a meticulous code reviewer. Analyze the given {language} code for quality, bugs, performance, and best practices."
         
-        system_prompt = """你是一名资深教师，擅长分析学生的错题并提供有针对性的指导。请以专业的角度分析错题，提供详细的解析和学习建议。"""
-        
-        user_prompt = f"""请分析以下错题：
+        if system_content:
+            messages.append({"role": "system", "content": system_content})
 
-**题目内容：** {problem_content}
-**学科：** {subject}
-**学生答案：** {user_answer}
-**正确答案：** {correct_answer}
+        # History
+        if request.history:
+            for entry in request.history:
+                role = "assistant" if entry.get("role") == "ai" else entry.get("role", "user")
+                messages.append({"role": role, "content": entry.get("content", "")})
+        
+        # Current User Prompt / Context
+        # For DeepSeek, image data is not directly supported by standard chat/coder models.
+        # If image_base64 or image_url is present, it should ideally be converted to text by OCR first,
+        # and that text should be in request.prompt or request.context.
+        user_prompt_text = request.prompt or ""
 
-请以JSON格式返回分析结果，确保整个输出是一个单一的、合法的JSON对象。JSON对象应包含以下键：
-1. "knowledge_points": (List[str]) 一个包含该题目所涉及的核心知识点的字符串列表。
-2. "error_analysis": (str) 对学生可能产生的常见错误进行详细分析。如果提供了学生答案，请针对性分析。如果未提供学生答案，请描述该题型的常见易错点。
-3. "solution": (str) 详细的解题步骤和思路。
-4. "difficulty_level": (int) 对题目难度的评估，范围从1（非常简单）到5（非常困难）。
-5. "tags": (List[str]) 一个与题目内容和知识点相关的标签列表，用于分类和检索 (例如: "导数应用", "几何证明", "虚拟语气")。
-6. "suggested_category": (str) 根据题目内容和所属学科，建议一个最合适的细分题目分类名称 (例如: 若学科为数学，分类可以是 "函数与极限", "解析几何", "概率统计" 等)。
-7. "key_concepts": (List[str]) 题目涉及的关键概念列表。
-8. "solution_steps": (List[str]) 详细的解题步骤列表（如果适用）。
+        if task_type == TaskType.PROBLEM_ANALYSIS and not user_prompt_text: # Construct from context
+            problem_text_content = context.get("text", "")
+            user_answer = context.get("user_answer")
+            correct_answer = context.get("correct_answer")
+            user_prompt_text = f"Problem: {problem_text_content}\n"
+            if user_answer: user_prompt_text += f"Student's Answer: {user_answer}\n"
+            if correct_answer: user_prompt_text += f"Correct Answer: {correct_answer}"
 
-请确保分析准确、详细且有指导意义。"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_review_analysis_messages(self, content: Dict[str, Any]) -> list:
-        """构建复习分析消息"""
-        problems = content.get("problems", [])
-        user_prefs = content.get("user_preferences", {})
-        
-        system_prompt = """你是一名智能学习助手，专门帮助学生制定科学的复习计划。你需要基于艾宾浩斯遗忘曲线理论和学生的错题数据，生成个性化的复习建议。"""
-        
-        user_prompt = f"""请基于以下错题数据生成个性化复习建议：
+        elif task_type == TaskType.PROBLEM_IMAGE_TO_STRUCTURED_JSON and not user_prompt_text:
+            # Expects OCR text in request.prompt or context.text
+            ocr_text = context.get("text", context.get("raw_ocr_text", ""))
+            subject_hint = context.get("subject_hint")
+            user_prompt_text = f"Analyze this problem description (from OCR): {ocr_text}\n"
+            if subject_hint: user_prompt_text += f"User's subject hint: {subject_hint}\n"
+            user_prompt_text += "Provide the structured JSON output as per system instructions."
+            if request.image_base64 or request.image_url:
+                 self.log_warning("DeepSeekProvider received image data for PROBLEM_IMAGE_TO_STRUCTURED_JSON, but will only process textual description. Ensure OCR text is in request.prompt or context.text.")
 
-**错题数据：**
-{json.dumps(problems, ensure_ascii=False, indent=2)}
 
-**用户偏好：**
-{json.dumps(user_prefs, ensure_ascii=False, indent=2)}
+        if request.image_base64 or request.image_url:
+            # Note: This provider does not process images directly.
+            # If text description of image is not in prompt, this might be an issue.
+            if not user_prompt_text: user_prompt_text = "An image was provided, but I can only process text. Please describe the image or provide its OCR text."
+            self.log_info("DeepSeekProvider: Image data found in request, but this provider primarily handles text. Ensure textual description is available.")
 
-请以JSON格式返回复习建议，包含：
-1. overview: 复习概览统计
-2. schedule: 详细复习计划（包含日期、优先级、题目数量等）
-3. weak_points: 薄弱知识点分析
-4. study_tips: 个性化学习建议
-5. memory_strategy: 记忆策略建议
 
-请确保建议科学合理，符合记忆规律。"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_batch_analysis_messages(self, content: Dict[str, Any]) -> list:
-        """构建批量分析消息"""
-        problems = content.get("problems", [])
-        
-        system_prompt = """你是一名教育专家，擅长对多道错题进行综合分析，找出学生的共同问题和薄弱环节。"""
-        
-        user_prompt = f"""请对以下多道错题进行批量分析：
-
-**题目列表：**
-{json.dumps(problems, ensure_ascii=False, indent=2)}
-
-请以JSON格式返回批量分析结果，包含：
-1. success_count: 成功分析的题目数量
-2. fail_count: 分析失败的题目数量
-3. weak_knowledge_points: 主要薄弱知识点
-4. error_types: 错误类型分布统计
-5. study_suggestions: 整体学习建议
-6. details: 每道题的详细分析结果
-7. common_patterns: 共同错误模式
-
-请确保分析全面且有针对性。"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_code_generation_messages(self, content: Dict[str, Any]) -> list:
-        """构建代码生成消息"""
-        requirement = content.get("requirement", "")
-        language = content.get("language", "Python")
-        
-        system_prompt = f"""你是一名专业的{language}开发工程师，能够根据需求编写高质量、可维护的代码。请确保代码具有良好的结构、适当的注释和错误处理。"""
-        
-        user_prompt = f"""请根据以下需求生成{language}代码：
-
-{requirement}
-
-请提供：
-1. 完整的代码实现
-2. 代码解释和注释
-3. 使用示例
-4. 可能的优化建议"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_code_review_messages(self, content: Dict[str, Any]) -> list:
-        """构建代码审查消息"""
-        code = content.get("code", "")
-        language = content.get("language", "Python")
-        
-        system_prompt = f"""你是一名资深的{language}代码审查专家，能够发现代码中的问题并提供改进建议。请从代码质量、性能、安全性、可维护性等方面进行全面评估。"""
-        
-        user_prompt = f"""请审查以下{language}代码：
-
-```{language.lower()}
-{code}
-```
-
-请提供：
-1. 代码质量评估
-2. 发现的问题和建议
-3. 性能优化建议
-4. 最佳实践建议
-5. 改进后的代码（如有必要）"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_math_solving_messages(self, content: Dict[str, Any]) -> list:
-        """构建数学题解题消息"""
-        problem = content.get("problem", "")
-        
-        system_prompt = """你是一名数学专家，能够解决各种数学问题并提供详细的解题步骤。请用清晰的逻辑和严谨的推理来解决问题。"""
-        
-        user_prompt = f"""请解决以下数学问题：
-
-{problem}
-
-请提供：
-1. 完整的解题步骤
-2. 每一步的详细解释
-3. 关键知识点说明
-4. 解题思路总结
-5. 类似题目的解题方法"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_summarization_messages(self, content: Dict[str, Any]) -> list:
-        """构建摘要消息"""
-        text = content.get("text", "")
-        
-        system_prompt = """你是一名专业的内容摘要师，能够提取文本的核心信息并生成简洁明了的摘要。"""
-        
-        user_prompt = f"""请对以下内容进行摘要：
-
-{text}
-
-要求：
-1. 突出重点信息
-2. 保持逻辑清晰
-3. 简洁明了
-4. 保留关键细节"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    def _build_translation_messages(self, content: Dict[str, Any]) -> list:
-        """构建翻译消息"""
-        text = content.get("text", "")
-        target_lang = content.get("target_language", "中文")
-        source_lang = content.get("source_language", "")
-        
-        system_prompt = f"""你是一名专业翻译师，能够准确地将文本翻译为{target_lang}，保持原文的意思和语调。"""
-        
-        lang_info = f"从{source_lang}" if source_lang else ""
-        user_prompt = f"""请将以下内容{lang_info}翻译为{target_lang}：
-
-{text}
-
-要求：
-1. 准确传达原文意思
-2. 符合目标语言习惯
-3. 保持原文语调和风格
-4. 专业术语准确翻译"""
-        
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    
-    async def check_health(self) -> bool:
-        """检查DeepSeek API健康状态"""
-        try:
-            test_messages = [
-                {"role": "user", "content": "你好，这是一个健康检查测试。"}
-            ]
+        if user_prompt_text:
+            messages.append({"role": "user", "content": user_prompt_text})
+        elif not messages: # Ensure at least one user message if history and system prompt are also empty
+            messages.append({"role": "user", "content": "Hello."})
             
-            request_data = {
-                "model": self.model_name,
-                "messages": test_messages,
-                "max_tokens": 50
-            }
-            
-            result = await self._single_request(
-                f"{self.api_url}/chat/completions",
-                {
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self.api_key}"
-                },
-                request_data,
-                self.timeout
-            )
-            
-            return "content" in result and not result.get("error")
-            
-        except Exception as e:
-            self.log_error(f"DeepSeek health check failed: {e}")
-            return False
-    
-    def calculate_cost(self, usage: Dict[str, Any]) -> float:
-        """
-        计算DeepSeek API调用成本
-        
-        DeepSeek定价（示例，实际以官方为准）：
-        - deepseek-chat: $0.0014 per 1M tokens (输入), $0.0028 per 1M tokens (输出)
-        - deepseek-coder: $0.0014 per 1M tokens (输入), $0.0028 per 1M tokens (输出)
-        """
-        prompt_tokens = usage.get("prompt_tokens", 0)
-        completion_tokens = usage.get("completion_tokens", 0)
-        
-        # 根据模型调整价格
-        if "coder" in self.model_name or "math" in self.model_name:
-            input_rate = 0.0014 / 1000000  # 每token价格
-            output_rate = 0.0028 / 1000000
-        else:
-            input_rate = 0.0014 / 1000000
-            output_rate = 0.0028 / 1000000
-        
-        input_cost = prompt_tokens * input_rate
-        output_cost = completion_tokens * output_rate
-        
-        return input_cost + output_cost
-    
-    def get_model_info(self) -> Dict[str, Any]:
-        """获取模型信息"""
-        capabilities = ["text"]
-        
-        if "coder" in self.model_name:
-            capabilities.append("code")
-        if "math" in self.model_name:
-            capabilities.append("math")
-        
-        return {
-            "provider": "DeepSeek",
-            "model": self.model_name,
-            "capabilities": capabilities,
-            "max_tokens": 32768,  # DeepSeek的最大token数
-            "supports_streaming": True,
-            "supports_vision": False,
-            "supports_function_calling": True if "chat" in self.model_name else False
+        return messages
+
+    def _parse_deepseek_response(self, api_response: Dict[str, Any], request: AIRequestSchema) -> Dict[str, Any]:
+        """Parses the non-streaming DeepSeek API response (similar to OpenAI)."""
+        output_dict: Dict[str, Any] = {
+            "content_text": None, "content_json": None, "usage": {}, 
+            "error": None, "error_type": None
         }
+        try:
+            if "choices" in api_response and api_response["choices"]:
+                choice = api_response["choices"][0]
+                message_content = choice.get("message", {}).get("content")
+                output_dict["content_text"] = message_content
+
+                if (request.output_format == "json_object" or \
+                    request.task_type == TaskType.PROBLEM_ANALYSIS or \
+                    request.task_type == TaskType.PROBLEM_IMAGE_TO_STRUCTURED_JSON) \
+                    and message_content:
+                    try:
+                        output_dict["content_json"] = json.loads(message_content)
+                    except json.JSONDecodeError:
+                        self.log_warning(f"DeepSeek response for JSON task not valid JSON: {message_content[:200]}")
+                
+                output_dict["usage"] = api_response.get("usage", {
+                    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
+                })
+                
+                finish_reason = choice.get("finish_reason")
+                if finish_reason and finish_reason != "stop":
+                    output_dict["error"] = f"Generation stopped due to: {finish_reason}"
+                    output_dict["error_type"] = "length" if finish_reason == "length" else "generation_stopped_error"
+
+            elif "error" in api_response: # Top-level error
+                err = api_response["error"]
+                output_dict["error"] = err.get("message", "Unknown DeepSeek API error")
+                output_dict["error_type"] = f"deepseek_api_error_{err.get('type', 'UNKNOWN')}"
+            
+            return output_dict
+        except Exception as e:
+            self.log_error(f"Error parsing DeepSeek response: {e}. Response: {api_response}", exc_info=True)
+            return {"error": f"Internal error parsing response: {str(e)}", "error_type": "response_parsing_error", "usage":{}}
+
+
+    async def execute_task(self, request: AIRequestSchema) -> Dict[str, Any]:
+        if not self.api_key:
+            return {"error": "API key not configured.", "error_type": "config_error", "usage": {}}
+
+        effective_model_name = self._select_effective_model(request.task_type)
+        messages = self._build_messages(request)
+        
+        payload: Dict[str, Any] = {
+            "model": effective_model_name,
+            "messages": messages,
+            "temperature": request.temperature if request.temperature is not None else 0.7,
+            "stream": False
+        }
+        if request.max_output_tokens:
+            payload["max_tokens"] = request.max_output_tokens
+        
+        # DeepSeek specific: JSON mode via prompt, not a response_format parameter usually.
+        # The system prompts for JSON tasks already instruct this.
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        if self.custom_headers: headers.update(self.custom_headers)
+
+        session = await self._get_session()
+        retries = 0
+        last_exception = None
+
+        while retries <= self.max_retries:
+            try:
+                async with session.post(self.api_endpoint, json=payload, headers=headers) as response:
+                    response_text = await response.text()
+                    try: response_json = json.loads(response_text)
+                    except json.JSONDecodeError:
+                        last_exception = Exception(f"DeepSeek API non-JSON response ({response.status}): {response_text[:500]}")
+                        response_json = {"error": {"message": str(last_exception), "type": "JSON_DECODE_ERROR"}}
+
+                    if response.status == 200:
+                        return self._parse_deepseek_response(response_json, request)
+                    else:
+                        error_detail = response_json.get("error", {})
+                        msg = error_detail.get("message", f"Unknown API error: {response_text[:200]}")
+                        err_type = error_detail.get("type", str(response.status))
+                        last_exception = Exception(f"DeepSeek API Error {err_type}: {msg}")
+            except aiohttp.ClientError as e:
+                last_exception = e
+            
+            retries += 1
+            self.log_warning(f"DeepSeek attempt {retries}/{self.max_retries + 1} for model {effective_model_name} failed: {last_exception}")
+            if retries <= self.max_retries:
+                await asyncio.sleep(1 * retries)
+            else:
+                error_msg_final = str(last_exception) if last_exception else "Max retries reached."
+                err_type_final = "network_error" if isinstance(last_exception, aiohttp.ClientError) else "api_error"
+                return {"error": error_msg_final, "error_type": err_type_final, "usage": {}}
+        
+        return {"error": "Max retries reached (logic error).", "error_type": "max_retries_exceeded", "usage": {}}
+
+
+    async def execute_task_stream(
+        self, request: AIRequestSchema
+    ) -> AsyncGenerator[Union[str, Dict[str, Any]], None]:
+        if not self.api_key:
+            yield {"event": "error", "data": {"message": "API key not configured.", "type": "config_error"}}
+            return
+
+        effective_model_name = self._select_effective_model(request.task_type)
+        messages = self._build_messages(request)
+        payload: Dict[str, Any] = {
+            "model": effective_model_name,
+            "messages": messages,
+            "temperature": request.temperature if request.temperature is not None else 0.7,
+            "stream": True
+        }
+        if request.max_output_tokens:
+            payload["max_tokens"] = request.max_output_tokens
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream"
+        }
+        if self.custom_headers: headers.update(self.custom_headers)
+        
+        session = await self._get_session()
+        try:
+            async with session.post(self.api_endpoint, json=payload, headers=headers) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    try: error_detail = json.loads(error_text).get("error", {})
+                    except: error_detail = {"message": error_text[:200]}
+                    msg = error_detail.get("message", "Unknown API streaming error")
+                    err_type = error_detail.get("type", str(response.status))
+                    yield {"event": "error", "data": {"message": f"DeepSeek API Error {err_type}: {msg}", "type": "api_error"}}
+                    return
+
+                async for line in response.content:
+                    line_str = line.decode('utf-8').strip()
+                    if line_str.startswith("data:"):
+                        data_content = line_str[len("data:"):].strip()
+                        if data_content == "[DONE]": break
+                        try:
+                            chunk_json = json.loads(data_content)
+                            delta = chunk_json.get("choices", [{}])[0].get("delta", {})
+                            content_chunk = delta.get("content")
+                            if content_chunk: yield content_chunk
+                            
+                            finish_reason = chunk_json.get("choices", [{}])[0].get("finish_reason")
+                            if finish_reason == "stop" or finish_reason == "length":
+                                final_usage = chunk_json.get("usage")
+                                if final_usage: yield {"event": "usage", "data": final_usage}
+                                break 
+                        except json.JSONDecodeError:
+                            self.log_warning(f"Could not decode DeepSeek stream chunk: {data_content}")
+        except aiohttp.ClientError as e:
+            self.log_error(f"DeepSeek streaming ClientError: {str(e)}", exc_info=True)
+            yield {"event": "error", "data": {"message": f"Streaming ClientError: {str(e)}", "type": "network_error"}}
+        except Exception as e:
+            self.log_error(f"DeepSeek unexpected streaming error: {str(e)}", exc_info=True)
+            yield {"event": "error", "data": {"message": f"Unexpected streaming error: {str(e)}", "type": "unknown_stream_error"}}
+
+
+    async def check_health(self) -> Tuple[bool, Optional[str]]:
+        if not self.api_key:
+            return False, "API key not configured."
+        
+        effective_model_name = self._select_effective_model(TaskType.SUMMARIZATION) # A generic task
+        payload = {
+            "model": effective_model_name,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 5
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+        session = await self._get_session()
+        try:
+            async with session.post(self.api_endpoint, json=payload, headers=headers) as response:
+                response_text = await response.text()
+                if response.status == 200:
+                    json.loads(response_text) # check if valid json
+                    return True, f"Successfully connected to DeepSeek ({effective_model_name})."
+                else:
+                    try: error_detail = json.loads(response_text).get("error", {})
+                    except: error_detail = {"message": response_text[:200]}
+                    msg = error_detail.get("message", "Unknown health check error")
+                    return False, f"DeepSeek health check failed ({effective_model_name}): {response.status} - {msg}"
+        except aiohttp.ClientError as e:
+            self.log_error(f"DeepSeek health check connection error ({effective_model_name}): {str(e)}", exc_info=True)
+            return False, f"Connection error ({effective_model_name}): {str(e)}"
+        except Exception as e:
+            self.log_error(f"DeepSeek health check unexpected error ({effective_model_name}): {str(e)}", exc_info=True)
+            return False, f"Unexpected error ({effective_model_name}): {str(e)}"

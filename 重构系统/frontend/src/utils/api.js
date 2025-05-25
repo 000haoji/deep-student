@@ -46,7 +46,20 @@ export const problemAPI = {
   delete: (id) => api.delete(`/v1/problems/${id}`),
   review: (id, masteryLevel) => api.post(`/v1/problems/${id}/review`, { mastery_level: masteryLevel }),
   getStats: () => api.get('/v1/problems/stats/overview'),
-  getKnowledgeStats: () => api.get('/v1/problems/stats/knowledge-points')
+  getKnowledgeStats: () => api.get('/v1/problems/stats/knowledge-points'),
+
+  // AI-Driven Problem Creation
+  initiateAICreation: (data) => api.post('/v1/problems/ai-create/initiate', data), // data should be { image_base64: "...", subject_hint: "..." } or { image_url: "...", ... }
+  // streamAIAnalysis: Handled directly by EventSource in components.
+  // Helper to build stream URL:
+  getAIInteractiveStreamURL: (sessionId, params) => {
+    const queryParams = new URLSearchParams(params).toString();
+    return `/api/v1/problems/ai-create/interactive-stream/${sessionId}?${queryParams}`;
+  },
+  finalizeAICreation: (data) => api.post('/v1/problems/ai-create/finalize', data),
+  listAISessions: (params) => api.get('/v1/problems/ai-create/sessions', { params }),
+  getAISessionDetail: (sessionId) => api.get(`/v1/problems/ai-create/session/${sessionId}`),
+  getAISessionChatHistory: (sessionId) => api.get(`/v1/problems/ai-create/chat-history/${sessionId}`)
 }
 
 export const analysisAPI = {
@@ -75,4 +88,4 @@ export const aiAPI = {
   // 统计数据
   getStats: () => api.get('/v1/ai/stats'),
   checkHealth: () => api.get('/v1/ai/health')
-} 
+}

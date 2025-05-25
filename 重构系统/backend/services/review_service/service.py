@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.utils.logger import LoggerMixin
 # from services.ai_api_manager.service import AIModelService # No longer needed here
-from services.ai_api_manager.models import AIRequest, TaskType # Use models.AIRequest
+from services.ai_api_manager.models import TaskType # Use models.AIRequest
+from services.ai_api_manager.schemas import AIRequestSchema as AIRequest # Import Schema
 from services.ai_api_manager.router import ai_router # Import global ai_router
 from services.problem_service.models import Problem, Subject, ReviewRecord
 from services.problem_service.service import ProblemService

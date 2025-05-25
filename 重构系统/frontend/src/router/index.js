@@ -37,6 +37,11 @@ const router = createRouter({
           component: () => import('@/views/problems/ProblemEdit.vue')
         },
         {
+          path: 'problems/ai-sessions', // New route for AI session list
+          name: 'problem-ai-sessions',
+          component: () => import('@/views/problems/AISessionList.vue')
+        },
+        {
           path: 'analyses',
           name: 'analyses',
           component: () => import('@/views/analyses/AnalysisList.vue')
@@ -66,4 +71,4 @@ const router = createRouter({
   ]
 })
 
-export default router 
+export default router

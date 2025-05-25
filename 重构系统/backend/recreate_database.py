@@ -39,7 +39,7 @@ async def create_all_tables():
         # Ensure all SQLAlchemy models are imported before calling create_all
         # so that Base.metadata is populated.
         # This is crucial.
-        import services.user_service.models
+        # import services.user_service.models # Temporarily commented out as it's causing ModuleNotFoundError
         import services.problem_service.models
         import services.ai_api_manager.models
         import services.review_service.models

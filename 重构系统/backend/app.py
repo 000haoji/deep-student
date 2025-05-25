@@ -19,13 +19,20 @@ from shared.utils.logger import get_logger
 # from services.ai_api_manager.models import AIModel, AIProvider # Example, likely not needed here
 # from services.review_service.models import ReviewAnalysis, AnalysisType # Example, likely not needed here
 
-from services.ai_api_manager.router import ai_router # 导入ai_router instance for startup
-# Service instances (like ProblemService, ReviewService) are usually instantiated within API route handlers, not globally in app.py.
-# Service-specific schemas (like ServiceProblemCreate) are also handled by service API modules.
+# Import for startup event (old AIRouter, if still used for initialization tasks like health checks)
+from services.ai_api_manager.router import ai_router as global_ai_event_router 
+# Service instances are usually instantiated within API route handlers.
+# Service-specific schemas are handled by service API modules.
 
 from services.statistics_service.router import router as statistics_router
-from services.problem_service.api import tags_router as problem_tags_router # Added import for tags_router
-from services.problem_service.api import categories_router as problem_categories_router # Added import for categories_router
+from services.problem_service.api import router as problem_router # Main problem router
+from services.problem_service.api import tags_router as problem_tags_router
+from services.problem_service.api import categories_router as problem_categories_router
+from services.problem_service.api import ai_problem_router # Router for AI-driven problem creation
+from services.review_service.api import router as review_router
+from services.file_service.api import router as file_router
+from services.ai_api_manager.api import router as ai_manager_api_router # API for AI model management (CRUD, execute)
+
 
 logger = get_logger(__name__)
 
@@ -45,19 +52,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 导入并包含各个服务的路由
-from services.problem_service.api import router as problem_router
-from services.review_service.api import router as review_router
-from services.file_service.api import router as file_router
-from services.ai_api_manager.api import router as ai_manager_api_router # Renamed to avoid conflict with ai_router instance
-
+# 包含各个服务的路由
 app.include_router(problem_router)
+app.include_router(problem_tags_router)
+app.include_router(problem_categories_router)
+app.include_router(ai_problem_router) # Include the AI-driven problem creation router
 app.include_router(review_router)
 app.include_router(file_router)
-app.include_router(ai_manager_api_router) # Use the imported router for AI model management
+app.include_router(ai_manager_api_router) 
 app.include_router(statistics_router)
-app.include_router(problem_tags_router) # Included the new tags router
-app.include_router(problem_categories_router) # Included the new categories router
 
 # API端点
 
@@ -86,20 +89,22 @@ async def startup_event():
     # 对于启动任务，我们可能需要直接从 SessionLocal 创建一个会话。
     # 暂时先假设我们可以通过某种方式获取到db session，后续可能需要调整
     # 例如，可以像这样创建一个临时的session：
-    # from shared.database import SessionLocal
-    # async with SessionLocal() as db:
-    #     await ai_router.set_db_session(db) # 确保ai_router有set_db_session方法
-    #     await ai_router.initialize(db)
-    # 为了简化，这里先尝试直接使用get_db()的上下文，但这可能不是最佳实践
-    # 正确的做法是像 manage.py 或 cli.py 那样直接创建和管理会话。
-    # 现在 AIRouter 使用 session_maker
-    from shared.database import async_session_maker # Corrected import name
-    logger.info("Setting session maker for AI router...")
-    ai_router.set_session_maker(async_session_maker) # 传递 session_maker
-    logger.info("Initializing AI router...")
-    await ai_router.initialize() # initialize 现在不需要 session 参数
-    logger.info("AI router initialized.")
+    # from shared.database import SessionLocal # Example for direct session creation
+    # async with SessionLocal() as db_session_for_startup:
+        # Perform startup tasks requiring a db session here
     
+    # Initialize the old global_ai_event_router if its background tasks (like health checks) are still desired.
+    # Its request routing capabilities are superseded by AIService.
+    if global_ai_event_router: # Check if it's still relevant/imported
+        from shared.database import async_session_maker
+        logger.info("Setting session maker for global AI event router...")
+        global_ai_event_router.set_session_maker(async_session_maker)
+        logger.info("Initializing global AI event router...")
+        await global_ai_event_router.initialize()
+        logger.info("Global AI event router initialized (for background tasks/health checks).")
+    else:
+        logger.info("Global AI event router not found or not configured for startup initialization.")
+
     logger.info("Application started successfully!")
 
 
