@@ -8,6 +8,16 @@ BILIBILI 演示视频
 【Deep-Student 开源AI错题管理软件】 
 https://www.bilibili.com/video/BV1rcQVY3EDo/?share_source=copy_web&vd_source=1c0ff08e122edb92a89179c0a64878aa
 
+
+
+**全新重构版本即将上线**
+
+
+
+
+
+
+
 ## 系统架构
 
 系统采用微服务架构，分为两个主要组件：
