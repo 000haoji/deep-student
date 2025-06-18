@@ -9,7 +9,7 @@
 
 该应用基于 **Tauri** 构建，结合了 **Rust** 的高性能后端和 **React** 的现代化前端，旨在为学生、研究者和终身学习者提供无缝、高效的学习体验。
 
-![应用截图](https://raw.githubusercontent.com/000haoji/deep-student-docs/main/screenshots/main-interface.png)
+![应用截图](https://www.deepstudent.com/QQ20250615-184510.png)
 
 ## 项目状态
 
