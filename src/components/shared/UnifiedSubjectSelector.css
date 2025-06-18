@@ -1,0 +1,372 @@
+.unified-subject-selector {
+  position: relative;
+  display: inline-block;
+}
+
+/* 现代圆角下拉框样式 */
+.unified-subject-selector .custom-select {
+  position: relative;
+  width: 100%;
+}
+
+.unified-subject-selector .select-selected {
+  background-color: #ffffff;
+  border-radius: 12px;
+  border: 1px solid #e0e0e0;
+  padding: 12px 16px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  min-width: 120px;
+  position: relative;
+  z-index: 10;
+}
+
+.unified-subject-selector .select-selected:hover {
+  border-color: #c7c7c7;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+}
+
+.unified-subject-selector .select-selected:focus {
+  background-color: #edf2f7;
+  color: #4a5568;
+  outline: none;
+}
+
+.unified-subject-selector .select-selected.disabled {
+  background-color: #f7fafc;
+  color: #a0aec0;
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.unified-subject-selector .selected-value {
+  color: #1a1a1a;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.unified-subject-selector .select-arrow {
+  color: #666;
+  font-size: 16px;
+  transform: rotate(0deg);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  flex-shrink: 0;
+  margin-left: 8px;
+  pointer-events: none;
+}
+
+.unified-subject-selector .select-items {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background-color: #fff;
+  border-radius: 12px;
+  border: 1px solid #e0e0e0;
+  margin-top: 8px;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+  opacity: 0;
+  box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+  z-index: 9999;
+  visibility: hidden;
+  pointer-events: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.unified-subject-selector .select-items.show {
+  max-height: 500px;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  overflow-y: auto;
+}
+
+/* 自定义滚动条样式 */
+.unified-subject-selector .select-items::-webkit-scrollbar {
+  width: 6px;
+}
+
+.unified-subject-selector .select-items::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 3px;
+}
+
+.unified-subject-selector .select-items::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+.unified-subject-selector .select-items::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+.unified-subject-selector .select-item {
+  padding: 12px 16px;
+  cursor: pointer;
+  color: #333;
+  font-size: 14px;
+  font-weight: 400;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  border: none;
+  background: none;
+  width: 100%;
+  text-align: left;
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  white-space: nowrap;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.unified-subject-selector .select-item:hover {
+  background-color: #f7f7f7;
+}
+
+.unified-subject-selector .select-item.selected {
+  background-color: #f0f7ff;
+  color: #1a73e8;
+  font-weight: 500;
+}
+
+.unified-subject-selector .select-item.disabled-option {
+  color: #a0aec0 !important;
+  cursor: not-allowed !important;
+  background-color: transparent !important;
+  pointer-events: none !important;
+}
+
+.unified-subject-selector .select-item:first-child {
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+.unified-subject-selector .select-item:last-child {
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+
+.unified-subject-selector.loading .select-selected {
+  background-color: #f7fafc;
+  color: #a0aec0;
+}
+
+/* 头部科目选择器样式 */
+.header-subject-selector {
+  position: relative;
+  margin-right: 1rem;
+}
+
+.header-subject-selector .custom-select {
+  width: auto;
+  min-width: 120px;
+}
+
+.header-subject-selector .select-selected {
+  background-color: #f7fafc;
+  border: none;
+  font-size: 13px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  box-shadow: none;
+  z-index: 1000;
+  color: #718096;
+  transition: all 0.2s ease;
+}
+
+.header-subject-selector .select-selected:hover {
+  background-color: #edf2f7;
+  color: #4a5568;
+  transform: scale(1.05);
+}
+
+.header-subject-selector .select-selected:focus {
+  background-color: #edf2f7;
+  color: #4a5568;
+  outline: none;
+}
+
+.header-subject-selector .selected-value {
+  font-size: 13px;
+  color: inherit;
+}
+
+.header-subject-selector .select-arrow {
+  font-size: 14px;
+  color: inherit;
+}
+
+/* 头部选择器的下拉选项 */
+.header-subject-selector .select-items {
+  margin-top: 4px;
+  border-radius: 10px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  z-index: 9999;
+  max-height: min(60vh, 400px);
+}
+
+.header-subject-selector .select-items.show {
+  max-height: min(60vh, 400px);
+  overflow-y: auto;
+}
+
+.header-subject-selector .select-item {
+  padding: 10px 12px;
+  font-size: 13px;
+  min-height: 36px;
+}
+
+/* 紧凑模式 */
+.unified-subject-selector.compact .select-selected {
+  padding: 8px 12px;
+  background-color: #f7fafc;
+  border: none;
+  border-radius: 8px;
+  box-shadow: none;
+  color: #718096;
+  transition: all 0.2s ease;
+}
+
+.unified-subject-selector.compact .selected-value {
+  font-size: 13px;
+  color: inherit;
+}
+
+.unified-subject-selector.compact .select-arrow {
+  font-size: 14px;
+  color: inherit;
+}
+
+.unified-subject-selector.compact .select-item {
+  padding: 10px 12px;
+  font-size: 13px;
+  min-height: 36px;
+}
+
+.unified-subject-selector.compact .select-items.show {
+  max-height: 400px;
+}
+
+.unified-subject-selector.compact .select-selected:hover {
+  background-color: #edf2f7;
+  color: #4a5568;
+  transform: scale(1.05);
+}
+
+.unified-subject-selector.compact .select-selected:focus {
+  background-color: #edf2f7;
+  color: #4a5568;
+  outline: none;
+}
+
+/* 确保在content-header环境中的适配 */
+.content-header-left .unified-subject-selector {
+  z-index: 1000;
+  position: relative;
+  transform: translateZ(0);
+}
+
+.content-header-left .unified-subject-selector .select-items {
+  z-index: 9999;
+  border-radius: 10px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  background-color: #fff;
+  border: 1px solid #e0e0e0;
+}
+
+/* 当下拉框打开时，临时修改父容器的overflow */
+.content-header:has(.unified-subject-selector .select-items.show) {
+  overflow: visible !important;
+}
+
+/* 如果浏览器不支持:has()，使用这个fallback */
+.content-header.dropdown-open {
+  overflow: visible !important;
+}
+
+/* 更强力的fallback - 确保content-header不会裁剪下拉框 */
+.content-header {
+  position: relative;
+}
+
+.content-header.dropdown-open,
+.content-header:has(.select-items.show) {
+  overflow: visible !important;
+  z-index: 1000;
+}
+
+/* 修复在不同环境下的显示问题 */
+.unified-subject-selector .select-items {
+  pointer-events: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.unified-subject-selector .select-items.show {
+  pointer-events: auto;
+}
+
+/* 确保下拉框不被父容器裁剪 */
+.unified-subject-selector {
+  isolation: isolate;
+}
+
+/* 动态调整下拉框位置，避免超出视口 */
+.unified-subject-selector .select-items {
+  max-height: min(400px, calc(100vh - var(--select-top, 100px) - 20px));
+}
+
+/* 确保选项完全可见 */
+.unified-subject-selector .select-item:last-child {
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+  margin-bottom: 0;
+}
+
+/* 为可能很长的选项列表提供更好的视觉提示 */
+.unified-subject-selector .select-items.show {
+  border-top: 1px solid #e0e0e0;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+/* 为header环境中的fixed定位下拉框设置正确的样式 */
+.content-header-left .unified-subject-selector .select-items.show {
+  /* JavaScript会动态设置这些属性，不要在CSS中覆盖 */
+  /* position: fixed !important; */
+  /* left: auto; */
+  /* top: auto; */
+  /* width: auto; */
+  min-width: 120px;
+  white-space: nowrap;
+  max-height: min(60vh, 400px);
+  overflow-y: auto;
+}
+
+/* 确保在所有环境下都有足够的空间 */
+@media (max-height: 600px) {
+  .unified-subject-selector .select-items.show,
+  .header-subject-selector .select-items.show,
+  .unified-subject-selector.compact .select-items.show {
+    max-height: 40vh;
+  }
+}
+
+@media (max-height: 400px) {
+  .unified-subject-selector .select-items.show,
+  .header-subject-selector .select-items.show,
+  .unified-subject-selector.compact .select-items.show {
+    max-height: 30vh;
+  }
+}

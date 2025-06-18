@@ -1,0 +1,23 @@
+# CogniGraph Neo4j 配置示例文件
+# 复制此文件为 cogni-graph-config.toml 并填入您的实际配置
+
+[neo4j]
+# 本地开发配置
+uri = "bolt://localhost:7687"
+username = "neo4j"
+password = "your-neo4j-password"
+database = "neo4j"  # 可选，留空使用默认数据库
+
+# 云端配置示例 (Neo4j AuraDB)
+# uri = "neo4j+s://your-instance.databases.neo4j.io"
+# username = "neo4j"
+# password = "your-auradb-password"
+
+[vector]
+dimensions = 1536          # OpenAI embedding 维度
+similarity_threshold = 0.7 # 相似度阈值
+max_search_results = 100   # 最大搜索结果数
+
+[recommendation]
+limit = 10                 # 推荐数量限制
+confidence_threshold = 0.7 # 推荐置信度阈值

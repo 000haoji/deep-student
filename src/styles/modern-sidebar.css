@@ -1,0 +1,537 @@
+/* Modern Sidebar Styles */
+
+/* 导入现代字体 */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+/* CSS 变量定义 */
+:root {
+  --sidebar-bg: #ffffff;
+  --sidebar-border: rgba(226, 232, 240, 0.8);
+  --sidebar-shadow: 0 0 30px rgba(0, 0, 0, 0.08), 0 0 60px rgba(59, 130, 246, 0.03);
+  --nav-item-hover: rgba(59, 130, 246, 0.08);
+  --nav-item-active: rgba(59, 130, 246, 0.12);
+  --nav-text-color: #000000;
+  --nav-text-hover: #000000;
+  --nav-text-active: #000000;
+  --nav-icon-size: 20px;
+  --transition-speed: 0.25s;
+  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --glow-color: rgba(59, 130, 246, 0.4);
+}
+
+/* 覆盖全局字体 */
+.app-sidebar * {
+  font-family: var(--font-family) !important;
+}
+
+/* 美化侧边栏主体 */
+.app-sidebar {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  background-image: none !important;
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border-right: 1px solid var(--sidebar-border) !important;
+  box-shadow: var(--sidebar-shadow) !important;
+  transition: all var(--transition-speed) cubic-bezier(0.4, 0, 0.2, 1) !important;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 移除动态背景纹理以确保纯白色背景 */
+.app-sidebar::before {
+  display: none !important;
+}
+
+@keyframes backgroundShift {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.app-sidebar > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Logo 区域美化 */
+.sidebar-header {
+  padding: 1.25rem !important;
+  border-bottom: 1px solid var(--sidebar-border) !important;
+  background: rgba(255, 255, 255, 1.0) !important;
+  backdrop-filter: blur(10px);
+  position: relative;
+  overflow: hidden;
+}
+
+.sidebar-header::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 120px;
+  height: 120px;
+  background: radial-gradient(circle, var(--glow-color) 0%, transparent 70%);
+  transform: translate(-50%, -50%) scale(0);
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+.sidebar-header:hover::after {
+  transform: translate(-50%, -50%) scale(1.5);
+}
+
+.app-logo {
+  transition: all var(--transition-speed) ease;
+  position: relative;
+  z-index: 2;
+}
+
+.logo-icon,
+.logo-full {
+  filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.1));
+  transition: all var(--transition-speed) cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.logo-icon:hover,
+.logo-full:hover {
+  transform: scale(1.08) rotate(1deg);
+  filter: drop-shadow(0 6px 12px rgba(59, 130, 246, 0.2));
+}
+
+/* 导航区域 */
+.sidebar-nav {
+  padding: 0.75rem !important;
+  position: relative;
+}
+
+/* 导航分组标签 */
+.nav-label {
+  font-size: 0.75rem !important;
+  font-weight: 700 !important;
+  color: #000000 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.08em !important;
+  margin: 1.5rem 0.75rem 0.75rem !important;
+  opacity: 0.8;
+  transition: all var(--transition-speed) ease;
+  position: relative;
+}
+
+.nav-label::after {
+  content: '';
+  position: absolute;
+  bottom: -0.25rem;
+  left: 0;
+  width: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #3b82f6, #8b5cf6);
+  transition: width 0.3s ease;
+}
+
+.app-sidebar:hover .nav-label {
+  opacity: 1;
+  color: #000000 !important;
+}
+
+.app-sidebar:hover .nav-label::after {
+  width: 100%;
+}
+
+/* 导航项美化 */
+.nav-item {
+  position: relative !important;
+  margin: 0.375rem 0 !important;
+  padding: 0.75rem 1rem !important;
+  border-radius: 12px !important;
+  background: transparent !important;
+  color: var(--nav-text-color) !important;
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  transition: all var(--transition-speed) cubic-bezier(0.4, 0, 0.2, 1) !important;
+  overflow: hidden !important;
+  border: 1px solid transparent !important;
+  cursor: pointer;
+}
+
+/* 导航项悬停效果 */
+.nav-item:hover {
+  background: var(--nav-item-hover) !important;
+  color: #000000 !important;
+  transform: translateX(4px) scale(1.02);
+  border-color: rgba(59, 130, 246, 0.15) !important;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+}
+
+.nav-item:hover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, transparent 100%);
+  pointer-events: none;
+}
+
+/* 导航项激活状态 */
+.nav-item.active {
+  background: var(--nav-item-active) !important;
+  color: var(--nav-text-active) !important;
+  font-weight: 600 !important;
+  border-color: rgba(59, 130, 246, 0.25) !important;
+  box-shadow: 
+    0 4px 16px rgba(59, 130, 246, 0.2),
+    0 0 0 1px rgba(59, 130, 246, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transform: translateX(2px);
+}
+
+/* 激活指示效果 */
+.nav-item.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, #3b82f6 0%, #8b5cf6 100%);
+  border-radius: 0 4px 4px 0;
+  animation: slideInGlow 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+}
+
+@keyframes slideInGlow {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+    box-shadow: 0 0 0 rgba(59, 130, 246, 0);
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+    box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+  }
+}
+
+/* 图标样式 */
+.nav-icon {
+  width: var(--nav-icon-size) !important;
+  height: var(--nav-icon-size) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin-right: 0.875rem !important;
+  transition: all var(--transition-speed) cubic-bezier(0.4, 0, 0.2, 1) !important;
+  position: relative;
+}
+
+/* 图标悬停效果 */
+.nav-item:hover .nav-icon {
+  transform: scale(1.15) rotate(5deg);
+}
+
+.nav-item.active .nav-icon {
+  color: var(--nav-text-active) !important;
+  transform: scale(1.1);
+}
+
+/* 图标发光效果 */
+.nav-item.active .nav-icon::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  background: radial-gradient(circle, var(--glow-color) 0%, transparent 70%);
+  border-radius: 50%;
+  animation: iconGlow 2s ease-in-out infinite;
+  z-index: -1;
+}
+
+@keyframes iconGlow {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.2); }
+}
+
+/* 文字样式 */
+.nav-text {
+  font-weight: 500 !important;
+  letter-spacing: 0.01em !important;
+  transition: all var(--transition-speed) ease !important;
+}
+
+/* 侧边栏折叠时的样式 */
+.app-sidebar.collapsed .nav-label {
+  opacity: 0 !important;
+  height: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+}
+
+.app-sidebar.collapsed .nav-item {
+  padding: 0.875rem !important;
+  justify-content: center !important;
+  margin: 0.25rem 0.5rem !important;
+}
+
+.app-sidebar.collapsed .nav-icon {
+  margin-right: 0 !important;
+}
+
+/* 侧边栏底部 */
+.sidebar-footer {
+  padding: 0.75rem !important;
+  border-top: 1px solid var(--sidebar-border) !important;
+  background: #ffffff !important;
+  backdrop-filter: blur(10px);
+  margin-top: auto;
+}
+
+.sidebar-footer .nav-item {
+  background: transparent !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  border: none !important;
+  color: #000000 !important;
+  border-radius: 12px !important;
+  margin: 0.375rem 0 !important;
+  padding: 0.75rem 1rem !important;
+  transition: all var(--transition-speed) cubic-bezier(0.4, 0, 0.2, 1) !important;
+  position: relative !important;
+  overflow: hidden !important;
+  border: 1px solid transparent !important;
+  cursor: pointer;
+  font-size: 0.875rem !important;
+  font-weight: 500 !important;
+  text-align: left;
+}
+
+.sidebar-footer .nav-item:hover {
+  background: var(--nav-item-hover) !important;
+  color: #000000 !important;
+  transform: translateX(4px) scale(1.02);
+  border-color: rgba(59, 130, 246, 0.15) !important;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.1);
+}
+
+.sidebar-footer .nav-item:hover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, transparent 100%);
+  pointer-events: none;
+}
+
+.sidebar-footer .nav-item.active {
+  background: var(--nav-item-active) !important;
+  color: var(--nav-text-active) !important;
+  font-weight: 600 !important;
+  border-color: rgba(59, 130, 246, 0.25) !important;
+  box-shadow: 
+    0 4px 16px rgba(59, 130, 246, 0.2),
+    0 0 0 1px rgba(59, 130, 246, 0.1),
+    inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  transform: translateX(2px);
+}
+
+.sidebar-footer .nav-item.active::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background: linear-gradient(180deg, #3b82f6 0%, #8b5cf6 100%);
+  border-radius: 0 4px 4px 0;
+  animation: slideInGlow 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+}
+
+.sidebar-footer .nav-item:hover .nav-icon {
+  transform: scale(1.15) rotate(5deg);
+}
+
+.sidebar-footer .nav-item.active .nav-icon {
+  color: var(--nav-text-active) !important;
+  transform: scale(1.1);
+}
+
+.sidebar-footer .nav-item.active .nav-icon::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  background: radial-gradient(circle, var(--glow-color) 0%, transparent 70%);
+  border-radius: 50%;
+  animation: iconGlow 2s ease-in-out infinite;
+  z-index: -1;
+}
+
+.sidebar-footer .nav-item:active {
+  transform: translateX(2px) scale(0.98) !important;
+}
+
+/* 滚动条美化 */
+.sidebar-nav::-webkit-scrollbar {
+  width: 8px !important;
+}
+
+.sidebar-nav::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.02) !important;
+  border-radius: 4px;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.3) 0%, rgba(147, 51, 234, 0.3) 100%) !important;
+  border-radius: 4px !important;
+  transition: all var(--transition-speed) ease !important;
+}
+
+.sidebar-nav::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, rgba(59, 130, 246, 0.5) 0%, rgba(147, 51, 234, 0.5) 100%) !important;
+  transform: scaleX(1.2);
+}
+
+/* 工具提示美化 */
+.app-sidebar.collapsed .tooltip-test[data-tooltip]:not([data-tooltip=""]):hover::before {
+  content: attr(data-tooltip);
+  position: absolute;
+  left: calc(100% + 12px);
+  top: 50%;
+  transform: translateY(-50%);
+  background: rgba(30, 41, 59, 0.95) !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  font-family: var(--font-family) !important;
+  font-weight: 500 !important;
+  font-size: 0.8125rem;
+  padding: 0.625rem 0.875rem !important;
+  border-radius: 10px !important;
+  color: white;
+  white-space: nowrap;
+  z-index: 1000;
+  animation: tooltipSlideIn 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.app-sidebar.collapsed .tooltip-test[data-tooltip]:not([data-tooltip=""]):hover::after {
+  content: '';
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 50%;
+  transform: translateY(-50%);
+  width: 0;
+  height: 0;
+  border: 6px solid transparent;
+  border-right-color: rgba(30, 41, 59, 0.95) !important;
+  z-index: 1001;
+}
+
+@keyframes tooltipSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
+}
+
+/* 添加平滑的展开/折叠动画 */
+.app-sidebar {
+  transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.app-sidebar .nav-text,
+.app-sidebar .nav-label {
+  transition: opacity 0.3s ease, transform 0.3s ease !important;
+}
+
+.app-sidebar.collapsed .nav-text {
+  opacity: 0 !important;
+  transform: translateX(-12px) !important;
+}
+
+/* 响应式优化 */
+@media (max-width: 768px) {
+  .nav-item {
+    padding: 0.625rem 0.75rem !important;
+    font-size: 0.8125rem !important;
+  }
+  
+  .nav-icon {
+    width: 18px !important;
+    height: 18px !important;
+  }
+  
+  .sidebar-header {
+    padding: 1rem !important;
+  }
+}
+
+/* 暗色模式支持 */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sidebar-bg: rgba(15, 23, 42, 0.95);
+    --sidebar-border: rgba(71, 85, 105, 0.5);
+    --nav-item-hover: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(147, 51, 234, 0.12) 100%);
+    --nav-item-active: linear-gradient(135deg, rgba(59, 130, 246, 0.25) 0%, rgba(147, 51, 234, 0.2) 100%);
+    --nav-text-color: #cbd5e1;
+    --nav-text-hover: #f1f5f9;
+    --nav-text-active: #60a5fa;
+    --glow-color: rgba(96, 165, 250, 0.4);
+  }
+  
+  .sidebar-header {
+    background: rgba(15, 23, 42, 0.5) !important;
+  }
+  
+  .sidebar-footer {
+    background: rgba(15, 23, 42, 0.3) !important;
+  }
+  
+  .sidebar-footer .nav-item {
+    background: rgba(30, 41, 59, 0.5) !important;
+  }
+}
+
+/* 微交互增强 */
+.nav-item {
+  will-change: transform, background, box-shadow;
+}
+
+.nav-item:active {
+  transform: translateX(2px) scale(0.98) !important;
+}
+
+/* 分组分隔线美化 */
+.nav-section:not(:first-child) {
+  position: relative;
+  margin-top: 2rem;
+}
+
+.nav-section:not(:first-child)::before {
+  content: '';
+  position: absolute;
+  top: -1rem;
+  left: 1rem;
+  right: 1rem;
+  height: 1px;
+  background: linear-gradient(90deg, 
+    transparent 0%, 
+    rgba(59, 130, 246, 0.2) 20%, 
+    rgba(147, 51, 234, 0.2) 80%, 
+    transparent 100%
+  );
+}
+
+/* 整体性能优化 */
+.app-sidebar,
+.app-sidebar *,
+.app-sidebar *::before,
+.app-sidebar *::after {
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+/* 添加微妙的内阴影和边框光效 */
+.app-sidebar {
+  box-shadow: 
+    var(--sidebar-shadow),
+    inset -1px 0 0 0 rgba(59, 130, 246, 0.08),
+    inset 0 1px 0 0 rgba(255, 255, 255, 0.1) !important;
+} 

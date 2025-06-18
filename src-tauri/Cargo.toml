@@ -1,0 +1,61 @@
+[package]
+name = "ai-mistake-manager"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "ai_mistake_manager_lib"
+crate-type = ["cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["rustls-tls", "devtools"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1.0", features = ["full"] }
+rusqlite = { version = "0.29", features = ["bundled"] }
+base64 = "0.21"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+futures-util = "0.3"
+regex = "1.0"
+aes-gcm = "0.10"
+rand = "0.8"
+blake3 = "1.5"
+keyring = "2.0"
+zip = "0.6"
+url = "2.4"
+image = "0.24"
+# RAG文档处理依赖
+pdf-extract = "0.7"
+docx-rs = "0.4"
+# 向量搜索依赖 - 暂时移除sqlite-vss，使用基础SQLite + 应用层向量计算
+# sqlite-vss = { version = "0.1", features = ["download-libs"] }  # Windows平台不支持
+# Neo4j图数据库依赖
+neo4rs = "0.7"
+
+# 优化编译速度的配置
+[profile.dev]
+opt-level = 0          # 无优化，快速编译
+debug = true           # 保留调试信息
+incremental = true     # 启用增量编译
+lto = false           # 禁用链接时优化
+
+[profile.release]
+opt-level = "s"        # 优化大小
+lto = true            # 链接时优化
+codegen-units = 1     # 减少代码生成单元以提高优化效果
+

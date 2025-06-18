@@ -1,0 +1,361 @@
+.image-occlusion-container {
+  padding: 20px;
+  max-width: 1200px;
+  margin: 0 auto;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.header {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.header h2 {
+  color: #2c3e50;
+  margin-bottom: 10px;
+  font-size: 2rem;
+  font-weight: 600;
+}
+
+.header p {
+  color: #7f8c8d;
+  font-size: 1rem;
+  margin: 0;
+}
+
+.upload-section {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 30px;
+  justify-content: center;
+  align-items: center;
+}
+
+.upload-button, .extract-button, .create-button {
+  padding: 12px 24px;
+  border: none;
+  border-radius: 8px;
+  font-size: 1rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  color: white;
+}
+
+.upload-button {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+}
+
+.upload-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+}
+
+.extract-button {
+  background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+}
+
+.extract-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(240, 147, 251, 0.3);
+}
+
+.create-button {
+  background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+  width: 100%;
+  margin-top: 20px;
+}
+
+.create-button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(79, 172, 254, 0.3);
+}
+
+.upload-button:disabled, .extract-button:disabled, .create-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.image-workspace {
+  display: grid;
+  grid-template-columns: 1fr 350px;
+  gap: 30px;
+  align-items: start;
+}
+
+.image-container {
+  position: relative;
+  background: #f8f9fa;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+.main-image {
+  max-width: 100%;
+  max-height: 600px;
+  border-radius: 8px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  display: block;
+}
+
+.text-region {
+  transition: all 0.2s ease;
+  z-index: 10;
+}
+
+.text-region:hover {
+  border-width: 3px !important;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.3);
+}
+
+.text-region.selected {
+  animation: pulse 1.5s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0.7);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 0, 0, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 0, 0, 0);
+  }
+}
+
+.controls-panel, .preview-panel {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+  height: fit-content;
+  position: sticky;
+  top: 20px;
+}
+
+.controls-panel h3, .preview-panel h3 {
+  margin: 0 0 15px 0;
+  color: #2c3e50;
+  font-size: 1.2rem;
+  font-weight: 600;
+  border-bottom: 2px solid #e9ecef;
+  padding-bottom: 8px;
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 15px;
+}
+
+.form-group-inline input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  cursor: pointer;
+}
+
+.form-group-inline label {
+  margin-bottom: 0;
+  color: #495057;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.form-group label {
+  display: block;
+  margin-bottom: 6px;
+  color: #495057;
+  font-weight: 500;
+  font-size: 0.9rem;
+}
+
+.form-group input, .form-group textarea, .form-group select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 2px solid #e9ecef;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  transition: border-color 0.2s ease;
+  box-sizing: border-box;
+}
+
+.form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+  outline: none;
+  border-color: #667eea;
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 15px;
+}
+
+.mask-settings {
+  margin: 20px 0;
+}
+
+.mask-style-options {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mask-style-options label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 6px;
+  transition: background-color 0.2s ease;
+}
+
+.mask-style-options label:hover {
+  background-color: #f8f9fa;
+}
+
+.mask-style-options input[type="radio"] {
+  width: auto;
+  margin: 0;
+}
+
+.region-stats {
+  background: #f8f9fa;
+  padding: 15px;
+  border-radius: 8px;
+  margin: 20px 0;
+}
+
+.region-stats p {
+  margin: 5px 0;
+  color: #6c757d;
+  font-size: 0.9rem;
+}
+
+.mask-overlay {
+  transition: opacity 0.3s ease;
+  z-index: 20;
+}
+
+.mask-overlay:hover {
+  opacity: 0.8 !important;
+}
+
+.preview-controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.preview-controls button {
+  padding: 8px 16px;
+  border: 2px solid #667eea;
+  border-radius: 6px;
+  background: white;
+  color: #667eea;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-weight: 500;
+}
+
+.preview-controls button:hover {
+  background: #667eea;
+  color: white;
+}
+
+.preview-controls button:first-child {
+  border-color: #6c757d;
+  color: #6c757d;
+}
+
+.preview-controls button:first-child:hover {
+  background: #6c757d;
+  color: white;
+}
+
+.card-details {
+  padding-top: 15px;
+  border-top: 1px solid #e9ecef;
+}
+
+.card-details h4 {
+  margin: 0 0 10px 0;
+  color: #2c3e50;
+  font-size: 1.1rem;
+}
+
+.card-details p {
+  margin: 0 0 15px 0;
+  color: #6c757d;
+  line-height: 1.5;
+}
+
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 0.8rem;
+  font-weight: 500;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+  .image-workspace {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+  
+  .controls-panel, .preview-panel {
+    position: static;
+  }
+  
+  .form-row {
+    grid-template-columns: 1fr;
+  }
+  
+  .upload-section {
+    flex-direction: column;
+  }
+}
+
+/* 加载状态动画 */
+.processing {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.processing::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 20px;
+  height: 20px;
+  margin: -10px 0 0 -10px;
+  border: 2px solid #667eea;
+  border-radius: 50%;
+  border-top-color: transparent;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

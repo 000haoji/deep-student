@@ -1,0 +1,583 @@
+import React, { useState, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { 
+  AnkiDocumentGenerationRequest, 
+  AnkiDocumentGenerationResponse, 
+  AnkiCard, 
+  AnkiGenerationOptions,
+  SubjectConfig
+} from '../types';
+
+interface AnkiCardGenerationProps {
+  subjectConfigs: SubjectConfig[];
+}
+
+const AnkiCardGeneration: React.FC<AnkiCardGenerationProps> = ({ subjectConfigs }) => {
+  const [documentContent, setDocumentContent] = useState('');
+  const [selectedSubject, setSelectedSubject] = useState('');
+  const [generatedCards, setGeneratedCards] = useState<AnkiCard[]>([]);
+  const [selectedCards, setSelectedCards] = useState<Set<number>>(new Set());
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [options, setOptions] = useState<AnkiGenerationOptions>({
+    deck_name: 'AI学习卡片',
+    note_type: 'Basic',
+    enable_images: false,
+    max_cards_per_mistake: 5,
+    max_tokens: 4096,
+    temperature: 0.3
+  });
+
+  // AnkiConnect相关状态
+  const [isAnkiConnectAvailable, setIsAnkiConnectAvailable] = useState<boolean | null>(null);
+  const [ankiDeckNames, setAnkiDeckNames] = useState<string[]>([]);
+  const [ankiModelNames, setAnkiModelNames] = useState<string[]>([]);
+  const [isAddingToAnki, setIsAddingToAnki] = useState(false);
+  const [ankiConnectionError, setAnkiConnectionError] = useState<string | null>(null);
+
+  // APKG导出相关状态
+  const [isExportingApkg, setIsExportingApkg] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // 处理文件上传
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        setDocumentContent(content);
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  // 生成ANKI卡片
+  const generateCards = async () => {
+    if (!documentContent || !selectedSubject) {
+      setError('请输入文档内容并选择科目');
+      return;
+    }
+
+    setIsGenerating(true);
+    setError(null);
+    
+    try {
+      const request: AnkiDocumentGenerationRequest = {
+        document_content: documentContent,
+        subject_name: selectedSubject,
+        options: options
+      };
+
+      const response: AnkiDocumentGenerationResponse = await invoke('generate_anki_cards_from_document', { request });
+      
+      if (response.success) {
+        setGeneratedCards(response.cards);
+        // 默认选择所有生成的卡片
+        setSelectedCards(new Set(response.cards.map((_, index) => index)));
+      } else {
+        setError(response.error_message || '生成ANKI卡片失败');
+      }
+    } catch (err) {
+      setError(`生成失败: ${err}`);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // 切换卡片选择状态
+  const toggleCardSelection = (index: number) => {
+    const newSelected = new Set(selectedCards);
+    if (newSelected.has(index)) {
+      newSelected.delete(index);
+    } else {
+      newSelected.add(index);
+    }
+    setSelectedCards(newSelected);
+  };
+
+  // 全选/取消全选
+  const toggleSelectAll = () => {
+    if (selectedCards.size === generatedCards.length) {
+      setSelectedCards(new Set());
+    } else {
+      setSelectedCards(new Set(generatedCards.map((_, index) => index)));
+    }
+  };
+
+  // 编辑卡片
+  const editCard = (index: number, field: 'front' | 'back', value: string) => {
+    const newCards = [...generatedCards];
+    newCards[index] = { ...newCards[index], [field]: value };
+    setGeneratedCards(newCards);
+  };
+
+  // 删除卡片
+  const deleteCard = (index: number) => {
+    const newCards = generatedCards.filter((_, i) => i !== index);
+    setGeneratedCards(newCards);
+    
+    // 更新选择状态
+    const newSelected = new Set<number>();
+    selectedCards.forEach(selectedIndex => {
+      if (selectedIndex < index) {
+        newSelected.add(selectedIndex);
+      } else if (selectedIndex > index) {
+        newSelected.add(selectedIndex - 1);
+      }
+    });
+    setSelectedCards(newSelected);
+  };
+
+  // 检查AnkiConnect状态
+  const checkAnkiConnectStatus = async () => {
+    try {
+      const isAvailable = await invoke<boolean>('check_anki_connect_status');
+      setIsAnkiConnectAvailable(isAvailable);
+      setAnkiConnectionError(null);
+      
+      if (isAvailable) {
+        // 同时获取牌组和笔记类型列表
+        const [deckNames, modelNames] = await Promise.all([
+          invoke<string[]>('get_anki_deck_names'),
+          invoke<string[]>('get_anki_model_names')
+        ]);
+        setAnkiDeckNames(deckNames);
+        setAnkiModelNames(modelNames);
+      }
+    } catch (err) {
+      setIsAnkiConnectAvailable(false);
+      setAnkiConnectionError(String(err));
+      console.error('检查AnkiConnect状态失败:', err);
+    }
+  };
+
+  // 添加卡片到AnkiConnect
+  const handleAddToAnkiConnect = async () => {
+    if (selectedCards.size === 0) {
+      setError('请选择要添加的卡片');
+      return;
+    }
+
+    if (!options.deck_name.trim()) {
+      setError('请输入牌组名称');
+      return;
+    }
+
+    if (!options.note_type.trim()) {
+      setError('请输入笔记类型');
+      return;
+    }
+
+    setIsAddingToAnki(true);
+    setError(null);
+    setAnkiConnectionError(null);
+
+    try {
+      // 获取选中的卡片
+      const selectedCardsList = Array.from(selectedCards)
+        .sort((a, b) => a - b)
+        .map(index => generatedCards[index]);
+
+      console.log(`正在添加 ${selectedCardsList.length} 张卡片到Anki...`);
+
+      // 调用后端命令
+      const noteIds = await invoke<(number | null)[]>('add_cards_to_anki_connect', {
+        selectedCards: selectedCardsList,
+        deckName: options.deck_name,
+        noteType: options.note_type
+      });
+
+      // 统计成功和失败的数量
+      const successCount = noteIds.filter(id => id !== null).length;
+      const failCount = noteIds.length - successCount;
+
+      if (successCount > 0) {
+        const message = failCount > 0 
+          ? `成功添加 ${successCount} 张卡片，${failCount} 张失败（可能是重复卡片）`
+          : `成功添加 ${successCount} 张卡片到Anki！`;
+        
+        // 使用简单的alert，后续可以改为toast通知
+        alert(message);
+        
+        // 清空错误状态
+        setError(null);
+      } else {
+        setError('所有卡片添加失败，请检查卡片内容或Anki设置');
+      }
+
+    } catch (err) {
+      console.error('添加卡片到Anki失败:', err);
+      setAnkiConnectionError(String(err));
+      setError(`添加失败: ${err}`);
+    } finally {
+      setIsAddingToAnki(false);
+    }
+  };
+
+  // 导出卡片为.apkg文件
+  const handleExportToApkg = async () => {
+    if (selectedCards.size === 0) {
+      setError('请选择要导出的卡片');
+      return;
+    }
+
+    if (!options.deck_name.trim()) {
+      setError('请输入牌组名称');
+      return;
+    }
+
+    if (!options.note_type.trim()) {
+      setError('请输入笔记类型');
+      return;
+    }
+
+    setIsExportingApkg(true);
+    setError(null);
+
+    try {
+      // 获取选中的卡片
+      const selectedCardsList = Array.from(selectedCards)
+        .sort((a, b) => a - b)
+        .map(index => generatedCards[index]);
+
+      console.log(`正在导出 ${selectedCardsList.length} 张卡片为.apkg文件...`);
+
+      // 调用后端命令
+      const result = await invoke<string>('export_cards_as_apkg', {
+        selectedCards: selectedCardsList,
+        deckName: options.deck_name,
+        noteType: options.note_type
+      });
+
+      // 显示成功消息
+      alert(`导出成功！\n${result}`);
+      
+      // 清空错误状态
+      setError(null);
+
+    } catch (err) {
+      console.error('导出.apkg文件失败:', err);
+      setError(`导出失败: ${err}`);
+    } finally {
+      setIsExportingApkg(false);
+    }
+  };
+
+  // 组件挂载时检查AnkiConnect状态
+  React.useEffect(() => {
+    checkAnkiConnectStatus();
+  }, []);
+
+  return (
+    <div className="anki-card-generation">
+      <h2>ANKI制卡助手</h2>
+      
+      {/* 输入区域 */}
+      <div className="input-section">
+        <div className="form-group">
+          <label>科目选择：</label>
+          <select 
+            value={selectedSubject} 
+            onChange={(e) => setSelectedSubject(e.target.value)}
+            className="form-control"
+          >
+            <option value="">请选择科目</option>
+            {subjectConfigs.map(config => (
+              <option key={config.id} value={config.subject_name}>
+                {config.display_name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="form-group">
+          <label>文档上传：</label>
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            accept=".txt,.md,.doc,.docx"
+            className="form-control"
+          />
+        </div>
+
+        <div className="form-group">
+          <label>文档内容：</label>
+          <textarea
+            value={documentContent}
+            onChange={(e) => setDocumentContent(e.target.value)}
+            placeholder="请输入或上传学习文档内容..."
+            rows={8}
+            className="form-control"
+          />
+        </div>
+
+        {/* ANKI生成选项 */}
+        <div className="options-section">
+          <h4>生成选项</h4>
+          
+          {/* AnkiConnect状态显示 */}
+          <div className="anki-status">
+            <div className="status-indicator">
+              <span className="status-label">AnkiConnect状态：</span>
+              {isAnkiConnectAvailable === null ? (
+                <span className="status-checking">检查中...</span>
+              ) : isAnkiConnectAvailable ? (
+                <span className="status-available">✅ 已连接</span>
+              ) : (
+                <span className="status-unavailable">❌ 未连接</span>
+              )}
+              <button 
+                onClick={checkAnkiConnectStatus}
+                className="btn btn-sm btn-secondary"
+                style={{ marginLeft: '10px' }}
+              >
+                重新检查
+              </button>
+            </div>
+            {ankiConnectionError && (
+              <div className="connection-error">
+                <span>连接错误：{ankiConnectionError}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="form-row">
+            <div className="form-group">
+              <label>目标牌组：</label>
+              {ankiDeckNames.length > 0 ? (
+                <select
+                  value={options.deck_name}
+                  onChange={(e) => setOptions({...options, deck_name: e.target.value})}
+                  className="form-control"
+                >
+                  <option value="">选择已有牌组或输入新牌组名</option>
+                  {ankiDeckNames.map(deckName => (
+                    <option key={deckName} value={deckName}>{deckName}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={options.deck_name}
+                  onChange={(e) => setOptions({...options, deck_name: e.target.value})}
+                  className="form-control"
+                  placeholder="输入牌组名称（如果不存在将自动创建）"
+                />
+              )}
+            </div>
+            <div className="form-group">
+              <label>笔记类型：</label>
+              {ankiModelNames.length > 0 ? (
+                <select
+                  value={options.note_type}
+                  onChange={(e) => setOptions({...options, note_type: e.target.value})}
+                  className="form-control"
+                >
+                  <option value="">选择笔记类型</option>
+                  {ankiModelNames.map(modelName => (
+                    <option key={modelName} value={modelName}>{modelName}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={options.note_type}
+                  onChange={(e) => setOptions({...options, note_type: e.target.value})}
+                  className="form-control"
+                  placeholder="输入笔记类型（如：Basic, Cloze）"
+                />
+              )}
+            </div>
+          </div>
+
+          {/* 高级AI选项 */}
+          <div className="advanced-options">
+            <h5>AI生成参数</h5>
+            <div className="form-row">
+              <div className="form-group">
+                <label>最大令牌数：</label>
+                <input
+                  type="number"
+                  value={options.max_tokens || 4096}
+                  onChange={(e) => setOptions({
+                    ...options, 
+                    max_tokens: parseInt(e.target.value) || 4096
+                  })}
+                  className="form-control"
+                  min="512"
+                  max="8192"
+                  step="256"
+                  placeholder="4096"
+                />
+                <small className="form-help">控制AI生成文本的长度（512-8192）</small>
+              </div>
+              <div className="form-group">
+                <label>创造性温度：</label>
+                <input
+                  type="number"
+                  value={options.temperature || 0.3}
+                  onChange={(e) => setOptions({
+                    ...options, 
+                    temperature: parseFloat(e.target.value) || 0.3
+                  })}
+                  className="form-control"
+                  min="0"
+                  max="1"
+                  step="0.1"
+                  placeholder="0.3"
+                />
+                <small className="form-help">控制AI回答的创造性（0-1，数值越低越保守）</small>
+              </div>
+              <div className="form-group">
+                <label>每个主题最大卡片数：</label>
+                <input
+                  type="number"
+                  value={options.max_cards_per_mistake}
+                  onChange={(e) => setOptions({
+                    ...options, 
+                    max_cards_per_mistake: parseInt(e.target.value) || 5
+                  })}
+                  className="form-control"
+                  min="1"
+                  max="20"
+                  placeholder="5"
+                />
+                <small className="form-help">每个知识点生成的卡片数量</small>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <button 
+          onClick={generateCards} 
+          disabled={isGenerating || !documentContent || !selectedSubject}
+          className="btn btn-primary"
+        >
+          {isGenerating ? '正在生成...' : '生成ANKI卡片'}
+        </button>
+      </div>
+
+      {/* 错误信息和状态提示 */}
+      {error && (
+        <div className="error-message">
+          <span className="error-icon">⚠️</span>
+          <span className="error-text">{error}</span>
+        </div>
+      )}
+
+      {/* 加载状态指示器 */}
+      {(isGenerating || isAddingToAnki || isExportingApkg) && (
+        <div className="loading-indicator">
+          <div className="loading-spinner"></div>
+          <span className="loading-text">
+            {isGenerating && '正在生成ANKI卡片...'}
+            {isAddingToAnki && '正在添加到Anki...'}
+            {isExportingApkg && '正在导出.apkg文件...'}
+          </span>
+        </div>
+      )}
+
+      {/* 生成的卡片预览 */}
+      {generatedCards.length > 0 && (
+        <div className="cards-preview">
+          <div className="cards-header">
+            <h3>生成的卡片 ({generatedCards.length}张)</h3>
+            <div className="card-controls">
+              <button 
+                onClick={toggleSelectAll}
+                className="btn btn-secondary"
+              >
+                {selectedCards.size === generatedCards.length ? '取消全选' : '全选'}
+              </button>
+              <span className="selected-count">
+                已选择: {selectedCards.size}/{generatedCards.length}
+              </span>
+            </div>
+          </div>
+
+          <div className="cards-list">
+            {generatedCards.map((card, index) => (
+              <div key={index} className={`card-item ${selectedCards.has(index) ? 'selected' : ''}`}>
+                <div className="card-header">
+                  <input
+                    type="checkbox"
+                    checked={selectedCards.has(index)}
+                    onChange={() => toggleCardSelection(index)}
+                  />
+                  <span className="card-number">卡片 {index + 1}</span>
+                  <button 
+                    onClick={() => deleteCard(index)}
+                    className="btn btn-danger btn-sm"
+                  >
+                    删除
+                  </button>
+                </div>
+
+                <div className="card-content">
+                  <div className="card-field">
+                    <label>正面（问题）：</label>
+                    <textarea
+                      value={card.front}
+                      onChange={(e) => editCard(index, 'front', e.target.value)}
+                      rows={2}
+                      className="form-control"
+                    />
+                  </div>
+
+                  <div className="card-field">
+                    <label>背面（答案）：</label>
+                    <textarea
+                      value={card.back}
+                      onChange={(e) => editCard(index, 'back', e.target.value)}
+                      rows={3}
+                      className="form-control"
+                    />
+                  </div>
+
+                  <div className="card-field">
+                    <label>标签：</label>
+                    <div className="tags">
+                      {card.tags.map((tag, tagIndex) => (
+                        <span key={tagIndex} className="tag">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* 输出操作 */}
+          <div className="output-actions">
+            <button 
+              className="btn btn-success"
+              disabled={selectedCards.size === 0 || isExportingApkg}
+              onClick={handleExportToApkg}
+            >
+              {isExportingApkg ? '导出中...' : '导出为.apkg文件'}
+            </button>
+            <button 
+              className="btn btn-info"
+              disabled={selectedCards.size === 0 || isAddingToAnki || !isAnkiConnectAvailable}
+              onClick={handleAddToAnkiConnect}
+              title={
+                !isAnkiConnectAvailable 
+                  ? "请确保Anki桌面程序正在运行并启用了AnkiConnect插件" 
+                  : ""
+              }
+            >
+              {isAddingToAnki ? '添加中...' : '添加到Anki (AnkiConnect)'}
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default AnkiCardGeneration;

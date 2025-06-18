@@ -1,0 +1,8 @@
+[source.crates-io]
+replace-with = "ustc"
+
+[source.ustc]
+registry = "https://mirrors.ustc.edu.cn/crates.io-index"
+ 
+[net]
+git-fetch-with-cli = true 
