@@ -63,7 +63,7 @@ zip = { version = "0.6", default-features = false, features = ["deflate"] }
 url = "2.4"
 dirs = "4.0"
 image = "0.24"
-zerocopy = "0.7"
+zerocopy = "0.8"
 backon = "0.4"
 config = { version = "0.14", features = ["toml"] }
 dotenvy = "0.15"
