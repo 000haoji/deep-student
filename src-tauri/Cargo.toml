@@ -61,7 +61,7 @@ jsonschema = "0.18"
 # keyring = "2.0"  # 已禁用：改用加密文件存储，避免 Keychain 弹窗
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 url = "2.4"
-dirs = "4.0"
+dirs = "6.0"
 image = "0.24"
 zerocopy = "0.7"
 backon = "0.4"
