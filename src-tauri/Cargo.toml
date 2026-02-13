@@ -135,7 +135,7 @@ zstd = "0.13.3"
 
 # OAuth2 在 Android 上暂不支持（会引入 native-tls）
 [target.'cfg(not(target_os = "android"))'.dependencies]
-oauth2 = "4.4"
+oauth2 = "5.0"
 pkce = "0.2"
 # MCP客户端库
 
