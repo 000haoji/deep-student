@@ -97,7 +97,7 @@ dashmap = "5.5.3"
 log = "0.4"
 # 错误上报（Sentry）- Android 使用 rustls 避免 OpenSSL
 # 启用 debug-images 支持 Native crash 符号化，anyhow 捕获 C/C++ 层面异常
-sentry = { version = "0.32", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "debug-images", "anyhow"] }
+sentry = { version = "0.46", default-features = false, features = ["backtrace", "contexts", "panic", "rustls", "debug-images", "anyhow"] }
 sentry-tracing = { version = "0.32", default-features = false }
 futures = "0.3"
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
