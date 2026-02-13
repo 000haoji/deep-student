@@ -75,7 +75,7 @@ tauri = { version = "2", features = ["protocol-asset"] }
 reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
 # 高性能缓存库
 moka = { version = "0.12", features = ["future"] }
-lru = "0.12"
+lru = "0.16"
 # 轻量级内置指标服务
 hyper = { version = "0.14", features = ["full"] }
 # RAG文档处理依赖（PDF 文本提取已统一使用 pdfium-render，不再依赖 pdf-extract）
