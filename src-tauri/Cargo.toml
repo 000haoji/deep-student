@@ -59,7 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 jsonschema = "0.18"
 # blake3 = "1.5"  # 临时禁用避免C编译问题
 # keyring = "2.0"  # 已禁用：改用加密文件存储，避免 Keychain 弹窗
-zip = { version = "0.6", default-features = false, features = ["deflate"] }
+zip = { version = "4.6", default-features = false, features = ["deflate"] }
 url = "2.4"
 dirs = "4.0"
 image = "0.24"
