@@ -2898,7 +2898,7 @@ dependencies = [
  "quick-xml 0.37.5",
  "r2d2",
  "r2d2_sqlite",
- "rand 0.8.5",
+ "rand 0.9.2",
  "rayon",
  "refinery",
  "regex",
