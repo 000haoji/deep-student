@@ -65,7 +65,7 @@ dirs = "4.0"
 image = "0.24"
 zerocopy = "0.7"
 backon = "0.4"
-config = { version = "0.14", features = ["toml"] }
+config = { version = "0.15", features = ["toml"] }
 dotenvy = "0.15"
 sha1 = "0.10"
 html2text = "0.16.7"
