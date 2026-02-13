@@ -2931,7 +2931,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
- "tungstenite 0.21.0",
+ "tungstenite 0.28.0",
  "ulid",
  "url",
  "urlencoding",

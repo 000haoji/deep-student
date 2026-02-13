@@ -101,7 +101,7 @@ sentry = { version = "0.32", default-features = false, features = ["backtrace", 
 sentry-tracing = { version = "0.32", default-features = false }
 futures = "0.3"
 tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-tungstenite = { version = "0.21", default-features = false }
+tungstenite = { version = "0.28", default-features = false }
 
 # Optional: LanceDB backend for vectors (feature-gated)
 lancedb = { version = "0.22.1", optional = true, default-features = false }
