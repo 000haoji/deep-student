@@ -2858,7 +2858,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-s3",
  "backon",
- "base64 0.21.7",
+ "base64 0.22.1",
  "bincode",
  "calamine",
  "chrono",
