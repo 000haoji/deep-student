@@ -182,7 +182,7 @@
     "autoprefixer": "^10.4.21",
     "class-variance-authority": "^0.7.1",
     "eslint": "^9.18.0",
-    "globals": "^15.14.0",
+    "globals": "^17.3.0",
     "jsdom": "^24.0.0",
     "postcss": "^8.4.45",
     "sharp": "^0.34.2",
