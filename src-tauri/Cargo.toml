@@ -40,7 +40,7 @@ base64 = "0.21.7"
 tempfile = "3.10.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 anyhow = "1.0.80"
-thiserror = "1.0"
+thiserror = "2.0"
 async-trait = "0.1.77"
 futures-util = "0.3"
 r2d2 = "0.8.9"
