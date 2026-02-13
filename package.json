@@ -127,7 +127,7 @@
     "react-i18next": "^15.5.3",
     "react-markdown": "^10.1.0",
     "react-pdf": "^10.2.0",
-    "react-resizable-panels": "^3.0.6",
+    "react-resizable-panels": "^4.6.2",
     "react-tooltip": "^5.30.0",
     "react-zoom-pan-pinch": "^3.4.4",
     "recharts": "^3.1.0",
