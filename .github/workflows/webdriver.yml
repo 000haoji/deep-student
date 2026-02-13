@@ -121,7 +121,7 @@ jobs:
       # ============================================
       - name: Upload screenshots on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: e2e-screenshots-${{ matrix.platform }}
           path: |
