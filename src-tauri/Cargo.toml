@@ -158,7 +158,7 @@ mockito = "1.0"
 # 临时目录（用于测试）
 tempfile = "3.0"
 # 基准测试
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]
 name = "tool_performance"
