@@ -89,7 +89,7 @@ csv = "1.3"          # CSV 解析
 encoding_rs = "0.8"  # 多编码支持（UTF-8/GBK）
 quick-xml = "0.37"   # XML 解析
 # 序列化支持
-bincode = "1.3"
+bincode = "3.0"
 # 并行计算优化
 rayon = "1.8"
 # 高性能并发哈希表
