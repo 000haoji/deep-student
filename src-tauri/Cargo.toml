@@ -130,7 +130,7 @@ aws-config = { version = "1.5", optional = true, default-features = false, featu
 
 # MCP SSE和OAuth支持
 eventsource-stream = "0.2"
-reqwest-eventsource = "0.5"
+reqwest-eventsource = "0.6"
 zstd = "0.13.3"
 
 # OAuth2 在 Android 上暂不支持（会引入 native-tls）
