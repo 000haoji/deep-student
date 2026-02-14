@@ -60,6 +60,25 @@ export const mindmapToolsSkill: SkillDefinition = {
 - \`delete_node\`: 删除节点
 - \`move_node\`: 移动节点到新父节点下
 
+**示例 — 绑定资源到节点**：
+使用 \`update_node\` 操作的 \`resources\` 字段来绑定或更新资源引用：
+\`\`\`json
+{
+  "mindmap_id": "mm_xxx",
+  "operations": [
+    {
+      "type": "update_node",
+      "node_id": "n1",
+      "patch": {
+        "resources": [
+          { "type": "note", "id": "res_123", "title": "相关笔记：Python 进阶" }
+        ]
+      }
+    }
+  ]
+}
+\`\`\`
+
 **示例 — 将节点设为红色高亮+加粗+添加备注**：
 \`\`\`json
 {
@@ -202,6 +221,7 @@ export const mindmapToolsSkill: SkillDefinition = {
     'builtin-mindmap_update',
     'builtin-mindmap_delete',
     'builtin-mindmap_edit_nodes',
+    'builtin-mindmap_bind_resource',
     'builtin-mindmap_versions',
     'builtin-mindmap_diff_versions',
   ],
@@ -437,6 +457,24 @@ export const mindmapToolsSkill: SkillDefinition = {
                         required: ['start', 'end'],
                       },
                     },
+                    resources: {
+                      type: 'array',
+                      description: '关联资源列表（如笔记、文件、题库等）',
+                      items: {
+                        type: 'object',
+                        properties: {
+                          type: {
+                            type: 'string',
+                            enum: ['note', 'file', 'qbank', 'url'],
+                            description: '资源类型',
+                          },
+                          id: { type: 'string', description: '资源 ID 或 URL' },
+                          title: { type: 'string', description: '显示标题' },
+                          preview: { type: 'string', description: '预览摘要（可选）' },
+                        },
+                        required: ['type', 'id', 'title'],
+                      },
+                    },
                   },
                 },
                 data: {
@@ -484,6 +522,32 @@ export const mindmapToolsSkill: SkillDefinition = {
           },
         },
         required: ['mindmap_id', 'operations'],
+      },
+    },
+    {
+      name: 'builtin-mindmap_bind_resource',
+      description: '将 VFS 资源（笔记、文件、题库等）绑定到指定的思维导图节点。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          mindmap_id: { type: 'string', description: '思维导图 ID' },
+          node_id: { type: 'string', description: '目标节点 ID' },
+          resource: {
+            type: 'object',
+            properties: {
+              type: {
+                type: 'string',
+                enum: ['note', 'file', 'qbank', 'url'],
+                description: '资源类型',
+              },
+              id: { type: 'string', description: '资源 ID 或 URL' },
+              title: { type: 'string', description: '显示标题' },
+              preview: { type: 'string', description: '预览摘要（可选）' },
+            },
+            required: ['type', 'id', 'title'],
+          },
+        },
+        required: ['mindmap_id', 'node_id', 'resource'],
       },
     },
     {

@@ -26,6 +26,14 @@ export type NodeId = string;
 /** 主题 ID */
 export type ThemeId = 'default' | 'dark' | 'minimal' | 'colorful' | string;
 
+/** 关联资源引用 */
+export interface ResourceReference {
+  type: 'note' | 'file' | 'qbank' | 'url';
+  id: string;        // VFS Resource ID 或外部 URL
+  title: string;     // 显示标题
+  preview?: string;  // 可选的预览文本或摘要
+}
+
 /** 节点样式 */
 export interface NodeStyle {
   bgColor?: string;
@@ -49,6 +57,8 @@ export interface MindMapNode {
   style?: NodeStyle;
   /** 挖空区间（背诵模式） */
   blankedRanges?: BlankRange[];
+  /** 关联资源列表 */
+  resources?: ResourceReference[];
   // 运行时注入属性
   branchColor?: string;
 }
@@ -68,6 +78,7 @@ export interface UpdateNodeParams {
   completed?: boolean;
   style?: NodeStyle;
   blankedRanges?: BlankRange[];
+  resources?: ResourceReference[];
 }
 
 /** 节点路径（从根到当前节点的 ID 数组） */

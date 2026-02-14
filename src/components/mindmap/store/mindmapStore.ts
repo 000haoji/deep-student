@@ -216,6 +216,9 @@ interface MindMapStoreState {
   cutNodes: (nodeIds: string[]) => void;
   pasteNodes: (targetId: string) => void;
 
+  /** 绑定资源到节点 */
+  bindResourceToNode: (nodeId: string, resource: import('../types').ResourceReference) => void;
+
   // 保存
   save: () => Promise<void>;
   markDirty: () => void;
@@ -716,6 +719,7 @@ export const useMindMapStore = create<MindMapStoreState>()(
               delete node.blankedRanges;
               delete state.revealedBlanks[nodeId];
             }
+            // 确保 resources 字段能被正确处理
             Object.assign(node, patch);
           }
         }, options);
@@ -924,6 +928,19 @@ export const useMindMapStore = create<MindMapStoreState>()(
 
       canUndo: () => get().history.past.length > 0,
       canRedo: () => get().history.future.length > 0,
+
+      bindResourceToNode: (nodeId, resource) => {
+        applyMutation((state) => {
+          const node = findNodeById(state.document.root, nodeId);
+          if (node) {
+            if (!node.resources) node.resources = [];
+            // 避免重复绑定
+            if (!node.resources.find((r) => r.id === resource.id)) {
+              node.resources.push(resource);
+            }
+          }
+        });
+      },
 
       // 保存（防竞态 + 冲突检测 + 自动重试）
       save: async () => {
