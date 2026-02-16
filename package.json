@@ -68,7 +68,7 @@
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-toast": "^1.2.15",
     "@reactour/tour": "^3.8.0",
-    "@sentry/browser": "^8.50.0",
+    "@sentry/browser": "^10.39.0",
     "@tanstack/react-virtual": "^3.13.12",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.6.0",
