@@ -183,7 +183,7 @@
     "class-variance-authority": "^0.7.1",
     "eslint": "^9.18.0",
     "globals": "^15.14.0",
-    "jsdom": "^24.0.0",
+    "jsdom": "^28.1.0",
     "postcss": "^8.4.45",
     "sharp": "^0.34.2",
     "tailwind-merge": "^3.3.1",
