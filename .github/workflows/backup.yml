@@ -1,0 +1,48 @@
+# 仓库镜像备份工作流
+#
+# 每日自动将主仓库完整镜像（所有分支、标签、历史）推送到私有备份仓库。
+# 也可手动触发（workflow_dispatch）。
+#
+# 备份目标: 000haoji/deep-student-backup (private)
+#
+# 需要在主仓库 Settings → Secrets 中配置:
+#   BACKUP_DEPLOY_KEY — 备份仓库的 SSH deploy key（已配置，write 权限）
+
+name: Backup Mirror
+
+on:
+  schedule:
+    # 每天 UTC 04:00（北京时间 12:00）执行
+    - cron: '0 4 * * *'
+  # 支持手动触发
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    name: Mirror to backup
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (bare clone)
+        run: git clone --bare https://github.com/${{ github.repository }}.git repo.git
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.BACKUP_DEPLOY_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config << EOF
+          Host github.com
+            IdentityFile ~/.ssh/deploy_key
+            StrictHostKeyChecking no
+          EOF
+
+      - name: Mirror push
+        run: |
+          cd repo.git
+          git push --mirror git@github.com:000haoji/deep-student-backup.git
+          echo "✅ Mirror push completed at $(date -u)"
+
+      - name: Cleanup
+        if: always()
+        run: rm -rf ~/.ssh/deploy_key repo.git
