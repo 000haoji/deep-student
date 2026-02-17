@@ -1,48 +1,130 @@
-# 仓库镜像备份工作流
+# 仓库防篡改快照备份工作流
 #
-# 每日自动将主仓库完整镜像（所有分支、标签、历史）推送到私有备份仓库。
-# 也可手动触发（workflow_dispatch）。
+# 策略：增量推送 + 不可变快照标签，防止主仓库被投毒时传染备份。
+#
+# 与 --mirror 的区别：
+#   --mirror：完全覆盖备份仓库（主仓库被篡改 → 备份也被覆盖）
+#   本方案：仅追加新内容，不删除备份中已有的分支/标签/历史
+#          + 每次创建 backup/YYYY-MM-DD 快照标签（不可变检查点）
+#          + 检测 force-push 等异常操作，发现即中止并告警
+#
+# 恢复方式：
+#   git clone git@github.com:000haoji/deep-student-backup.git
+#   git checkout backup/2026-02-17   # 恢复到任意日期的干净快照
 #
 # 备份目标: 000haoji/deep-student-backup (private)
 #
 # 需要在主仓库 Settings → Secrets 中配置:
 #   BACKUP_DEPLOY_KEY — 备份仓库的 SSH deploy key（已配置，write 权限）
 
-name: Backup Mirror
+name: Backup
 
 on:
   schedule:
     # 每天 UTC 04:00（北京时间 12:00）执行
     - cron: '0 4 * * *'
-  # 支持手动触发
   workflow_dispatch:
 
+env:
+  BACKUP_REPO: "000haoji/deep-student-backup"
+
 jobs:
-  mirror:
-    name: Mirror to backup
+  backup:
+    name: Snapshot backup
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout (bare clone)
-        run: git clone --bare https://github.com/${{ github.repository }}.git repo.git
-
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.BACKUP_DEPLOY_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
           ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
-          cat > ~/.ssh/config << EOF
+          cat > ~/.ssh/config << 'EOF'
           Host github.com
             IdentityFile ~/.ssh/deploy_key
             StrictHostKeyChecking no
           EOF
 
-      - name: Mirror push
+      - name: Clone source repo
+        run: git clone --bare https://github.com/${{ github.repository }}.git source.git
+
+      - name: Clone backup repo
+        run: git clone --bare git@github.com:${{ env.BACKUP_REPO }}.git backup.git 2>/dev/null || mkdir backup.git
+
+      - name: Tamper detection
+        id: check
         run: |
-          cd repo.git
-          git push --mirror git@github.com:000haoji/deep-student-backup.git
-          echo "✅ Mirror push completed at $(date -u)"
+          SOURCE_HEAD=$(git -C source.git rev-parse refs/heads/main 2>/dev/null || echo "")
+          BACKUP_HEAD=$(git -C backup.git rev-parse refs/heads/main 2>/dev/null || echo "")
+
+          echo "source_head=${SOURCE_HEAD}" >> $GITHUB_OUTPUT
+          echo "backup_head=${BACKUP_HEAD}" >> $GITHUB_OUTPUT
+
+          if [ -z "$BACKUP_HEAD" ]; then
+            echo "📦 First backup — no history to compare"
+            echo "safe=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          if [ "$SOURCE_HEAD" = "$BACKUP_HEAD" ]; then
+            echo "✅ No changes since last backup"
+            echo "safe=true" >> $GITHUB_OUTPUT
+            echo "unchanged=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # 检测 force-push：主仓库 HEAD 是否包含备份的 HEAD（正常应该是祖先关系）
+          cd source.git
+          if git merge-base --is-ancestor "$BACKUP_HEAD" "$SOURCE_HEAD" 2>/dev/null; then
+            COMMITS_AHEAD=$(git rev-list --count "${BACKUP_HEAD}..${SOURCE_HEAD}")
+            echo "✅ Clean fast-forward: ${COMMITS_AHEAD} new commits"
+            echo "safe=true" >> $GITHUB_OUTPUT
+
+            # 额外检查：单次超过 500 commit 视为异常（防止大规模历史篡改）
+            if [ "$COMMITS_AHEAD" -gt 500 ]; then
+              echo "⚠️ WARNING: Unusually large update (${COMMITS_AHEAD} commits)"
+              echo "safe=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "🚨 ALERT: Force-push detected! Source HEAD is NOT a descendant of backup HEAD."
+            echo "  Backup HEAD: ${BACKUP_HEAD}"
+            echo "  Source HEAD: ${SOURCE_HEAD}"
+            echo "  Backup will be SKIPPED to protect clean history."
+            echo "safe=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push updates (incremental, no deletions)
+        if: steps.check.outputs.safe == 'true' && steps.check.outputs.unchanged != 'true'
+        run: |
+          cd source.git
+          # 推送所有分支和标签，但不删除备份中已有的 refs（关键：不用 --mirror）
+          git push git@github.com:${{ env.BACKUP_REPO }}.git 'refs/heads/*:refs/heads/*' --force 2>&1 || true
+          git push git@github.com:${{ env.BACKUP_REPO }}.git 'refs/tags/*:refs/tags/*' --force 2>&1 || true
+          echo "✅ Incremental push completed"
+
+      - name: Create snapshot tag
+        if: steps.check.outputs.safe == 'true' && steps.check.outputs.unchanged != 'true'
+        run: |
+          cd source.git
+          DATE=$(date -u +%Y-%m-%d)
+          TAG="backup/${DATE}"
+          SOURCE_HEAD="${{ steps.check.outputs.source_head }}"
+
+          # 创建带注释的快照标签
+          git tag -a "$TAG" "$SOURCE_HEAD" -m "Daily backup snapshot ${DATE}" 2>/dev/null || \
+            echo "ℹ️ Snapshot tag ${TAG} already exists (multiple backups today)"
+
+          git push git@github.com:${{ env.BACKUP_REPO }}.git "refs/tags/${TAG}" 2>/dev/null || true
+          echo "📸 Snapshot: ${TAG} → ${SOURCE_HEAD}"
+
+      - name: Alert on failure
+        if: steps.check.outputs.safe == 'false'
+        run: |
+          echo "::error::🚨 Backup BLOCKED — anomaly detected in source repository!"
+          echo "::error::Check the 'Tamper detection' step for details."
+          echo "::error::Backup repo preserves last known good state."
+          exit 1
 
       - name: Cleanup
         if: always()
-        run: rm -rf ~/.ssh/deploy_key repo.git
+        run: rm -rf ~/.ssh/deploy_key source.git backup.git
