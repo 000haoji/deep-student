@@ -106,16 +106,20 @@ jobs:
         if: steps.check.outputs.safe == 'true' && steps.check.outputs.unchanged != 'true'
         run: |
           cd source.git
+          git config user.name "backup-bot"
+          git config user.email "backup@deep-student"
+
           DATE=$(date -u +%Y-%m-%d)
           TAG="backup/${DATE}"
           SOURCE_HEAD="${{ steps.check.outputs.source_head }}"
 
-          # 创建带注释的快照标签
-          git tag -a "$TAG" "$SOURCE_HEAD" -m "Daily backup snapshot ${DATE}" 2>/dev/null || \
+          # 创建快照标签（如果今天已存在则跳过）
+          if git tag -a "$TAG" "$SOURCE_HEAD" -m "Daily backup snapshot ${DATE}" 2>&1; then
+            git push git@github.com:${{ env.BACKUP_REPO }}.git "refs/tags/${TAG}" 2>&1
+            echo "📸 Snapshot created: ${TAG} → ${SOURCE_HEAD}"
+          else
             echo "ℹ️ Snapshot tag ${TAG} already exists (multiple backups today)"
-
-          git push git@github.com:${{ env.BACKUP_REPO }}.git "refs/tags/${TAG}" 2>/dev/null || true
-          echo "📸 Snapshot: ${TAG} → ${SOURCE_HEAD}"
+          fi
 
       - name: Alert on failure
         if: steps.check.outputs.safe == 'false'
