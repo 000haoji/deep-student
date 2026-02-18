@@ -9,10 +9,10 @@
 #          + 检测 force-push 等异常操作，发现即中止并告警
 #
 # 恢复方式：
-#   git clone git@github.com:000haoji/deep-student-backup.git
+#   git clone git@github.com:helixnow/deep-student-backup.git
 #   git checkout backup/2026-02-17   # 恢复到任意日期的干净快照
 #
-# 备份目标: 000haoji/deep-student-backup (private)
+# 备份目标: helixnow/deep-student-backup (private)
 #
 # 需要在主仓库 Settings → Secrets 中配置:
 #   BACKUP_DEPLOY_KEY — 备份仓库的 SSH deploy key（已配置，write 权限）
@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
 
 env:
-  BACKUP_REPO: "000haoji/deep-student-backup"
+  BACKUP_REPO: "helixnow/deep-student-backup"
 
 jobs:
   backup:
