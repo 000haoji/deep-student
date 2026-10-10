@@ -527,14 +527,18 @@ impl VlmGroundingService {
             .llm_manager
             .decrypt_api_key_if_needed(&config.api_key)?;
 
-        let prompt = r#"请详细描述这张图片的内容。这是一份试题/学习材料中的配图。
+        let prompt = format!(
+            "{}\n\n{}",
+            r#"请详细描述这张图片的内容。这是一份试题/学习材料中的配图。
 
 要求：
 1. 如果是数学/物理/化学等图形，精确描述图中的坐标、标注、数值、方程
 2. 如果是表格，用文字或 Markdown 表格转录完整内容
 3. 如果是示意图/流程图，描述各部分的关系和标注
-4. 如果包含文字，完整转录（数学公式用 LaTeX 格式）
-5. 只输出描述，不要其他多余内容"#;
+4. 如果包含文字，完整转录；公式格式遵循下方的 LaTeX 公式契约
+5. 只输出描述，不要其他多余内容"#,
+            crate::prompt_contracts::LATEX_OUTPUT_BRIEF
+        );
 
         let messages = vec![json!({
             "role": "user",
@@ -1143,7 +1147,7 @@ impl VlmGroundingService {
 - 参考信号（按优先级）：计算复杂度 > 干扰项迷惑性 > 是否跨章节 > 知识点冷门程度；文档中靠后的大题通常不低于 "hard"。
 
 **重要规则**：
-1. 所有数学/化学/物理公式必须用 LaTeX 格式
+1. 公式格式：{latex_brief}
 2. 每张图片最多归属一道题目（装饰性图片如水印/页眉不需要归属）
 3. 如果图片本身就是题目内容（整道题是图片），在 content 中用文字描述图片内容
 4. 如果多道题共享一张图片（题组），将图片归属到题组的第一道题
@@ -1157,6 +1161,7 @@ impl VlmGroundingService {
             count = image_count,
             last = image_count.saturating_sub(1),
             text = text_section,
+            latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF,
         )
     }
 
@@ -1352,7 +1357,7 @@ impl VlmGroundingService {
 - `continues_to_next`: 此题是否在下一页继续（页面末尾的不完整题目）
 
 **重要规则**：
-1. 所有数学公式必须用 LaTeX 格式：行内 $E=mc^2$，独立 $$\int_0^1 f(x)dx$$
+1. 公式格式：{latex_brief}
 2. 每道题的 raw_text 必须包含完整内容（题干+选项+答案+解析，如果页面上有的话）
 3. 如果多道题共享一张配图（如阅读理解），将它们标记为 is_group=true
 4. bbox 坐标格式为 [x1, y1, x2, y2]：(x1,y1) 是左上角，(x2,y2) 是右下角，值域 0-1
@@ -1360,7 +1365,8 @@ impl VlmGroundingService {
 6. 注意区分题目配图和装饰性元素（页眉页脚、水印等不需要标记）
 7. 如果页面开头的内容明显是上一页题目的延续（如选项 C/D 开头、答案解析开头），标记 continues_from_previous=true
 8. 如果页面末尾的题目明显未结束（题干不完整、选项缺失），标记 continues_to_next=true"#,
-            hint_section
+            hint_section,
+            latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF,
         )
     }
 

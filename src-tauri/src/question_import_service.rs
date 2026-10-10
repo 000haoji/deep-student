@@ -3030,7 +3030,7 @@ fn build_text_parse_prompt(chunk: &str) -> String {
 **规则**：
 1. 选择题必须将选项拆分到 options 数组，content 只保留题干
 2. 题型: single_choice=单选, multiple_choice=多选, fill_blank=填空, short_answer=简答
-3. 所有数学公式用 LaTeX: 行内 $...$, 独立 $$...$$
+3. 公式格式：{latex_brief}
 4. difficulty 默认 "medium"
 5. tags 根据知识点自动生成
 
@@ -3041,7 +3041,8 @@ fn build_text_parse_prompt(chunk: &str) -> String {
 - "very_hard"：需要复杂推导、创造性综合或冷门细节。特征：压轴题、多过程计算、高度综合的论述、竞赛级难度。
 - 参考信号（按优先级）：计算复杂度 > 干扰项迷惑性 > 是否跨章节 > 知识点冷门程度；试卷中靠后的大题通常不低于 "hard"。
 - 若题目标注了分值/来源（如高考真题、竞赛题），可将其作为难度佐证。"#,
-        chunk
+        chunk,
+        latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF
     )
 }
 
@@ -3084,7 +3085,7 @@ fn build_text_parse_prompt_with_images(chunk: &str) -> String {
 **规则**：
 1. 选择题必须将选项拆分到 options 数组，content 只保留题干
 2. 题型: single_choice=单选, multiple_choice=多选, fill_blank=填空, short_answer=简答
-3. 所有数学公式用 LaTeX: 行内 $...$, 独立 $$...$$
+3. 公式格式：{latex_brief}
 4. difficulty 默认 "medium"
 5. tags 根据知识点自动生成
 6. **<<IMG:N:...>> 标记必须原样保留**，不要删除、修改或翻译
@@ -3097,7 +3098,8 @@ fn build_text_parse_prompt_with_images(chunk: &str) -> String {
 - "very_hard"：需要复杂推导、创造性综合或冷门细节。特征：压轴题、多过程计算、高度综合的论述、竞赛级难度。
 - 参考信号（按优先级）：计算复杂度 > 干扰项迷惑性 > 是否跨章节 > 知识点冷门程度；试卷中靠后的大题通常不低于 "hard"。
 - 若题目标注了分值/来源（如高考真题、竞赛题），可将其作为难度佐证。"#,
-        chunk
+        chunk,
+        latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF
     )
 }
 

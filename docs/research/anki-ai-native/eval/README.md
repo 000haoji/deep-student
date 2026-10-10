@@ -138,6 +138,7 @@ Rust 新增码必须先在 ALIGNED / RUST_ONLY 两表之一归类，契约测试
 | `duplicate_in_document` | 同文档归一化 front 精确重复 | 需跨卡 FingerprintTracker 状态 |
 | `near_duplicate` | 同文档近重复（bigram Jaccard） | 同上 |
 | `mixed_language` | 中英大量混杂（Info，低置信） | Info 级提示，不参与基线断言 |
+| `bare_latex` | 公式未被 `$...$` 包裹（Warn） | 分隔符判定需与渲染层定界符规则同步演进，仅生产侧维护 |
 | `mcq_too_few_options` | 选择题非空选项 <2 | 需选择题模板上下文 |
 | `mcq_answer_not_in_options` | 答案不在选项中 | 同上 |
 | `mcq_missing_answer` | 缺答案字段 | 同上 |
