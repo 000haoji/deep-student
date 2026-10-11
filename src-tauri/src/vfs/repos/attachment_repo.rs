@@ -1980,6 +1980,78 @@ impl VfsAttachmentRepo {
     // 获取内容
     // ========================================================================
 
+    /// 把任意附件/引用 ID 解析到可加载的 `files.id`（SSOT）。
+    ///
+    /// 支持两种 ID 空间：
+    /// - `file_/att_/tb_/img_`：直接命中 `files.id`（或 `files.resource_id`）；
+    /// - `res_*`：`files.resource_id` 直接命中，或经 `resources.source_id`
+    ///   → `files.id` / `files.resource_id` 间接解析。
+    ///
+    /// 返回 `Ok(None)` 表示该 ID 没有对应的 `files` 行（例如纯文本/笔记资源，
+    /// 其内容只在 `resources.data`），调用方需自行回退。
+    ///
+    /// 收敛点：`vfs_get_attachment_content`、`attachment_read`、题库图片写入校验
+    /// 都必须走这里，避免三处各自为政（issue #465 / #468）。
+    pub fn resolve_to_file_id(conn: &Connection, attachment_id: &str) -> VfsResult<Option<String>> {
+        if let Some(file_id) = conn
+            .query_row(
+                "SELECT id FROM files WHERE id = ?1 AND deleted_at IS NULL",
+                params![attachment_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(Some(file_id));
+        }
+
+        if let Some(file_id) = conn
+            .query_row(
+                "SELECT id FROM files WHERE resource_id = ?1 AND deleted_at IS NULL LIMIT 1",
+                params![attachment_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok(Some(file_id));
+        }
+
+        if attachment_id.starts_with("res_") {
+            let source_id: Option<String> = conn
+                .query_row(
+                    "SELECT COALESCE(source_id, '') FROM resources WHERE id = ?1",
+                    params![attachment_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .filter(|s: &String| !s.is_empty());
+
+            if let Some(source_id) = source_id {
+                if let Some(file_id) = conn
+                    .query_row(
+                        "SELECT id FROM files WHERE id = ?1 AND deleted_at IS NULL",
+                        params![source_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                {
+                    return Ok(Some(file_id));
+                }
+                if let Some(file_id) = conn
+                    .query_row(
+                        "SELECT id FROM files WHERE resource_id = ?1 AND deleted_at IS NULL LIMIT 1",
+                        params![source_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()?
+                {
+                    return Ok(Some(file_id));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
     /// 获取附件内容（Base64 编码）
     pub fn get_content(db: &VfsDatabase, id: &str) -> VfsResult<Option<String>> {
         let conn = db.get_conn_safe()?;

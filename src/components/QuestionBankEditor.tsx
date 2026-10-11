@@ -306,6 +306,45 @@ const QuestionContentBlock = React.memo<{ content: string }>(({ content }) => (
 ));
 QuestionContentBlock.displayName = 'QuestionContentBlock';
 
+/**
+ * 题目图片缩略图（三态）。
+ *
+ * `vfs_get_attachment_content` 解析失败时（例如 AI 写入的 `res_*` 引用无法解析、
+ * 附件 blob 缺失）加载 effect 会把该 id 标记为 `'error'`。这里必须把它渲染成
+ * 可见的错误占位，而不是继续显示 spinner——否则图片会永久转圈且没有任何提示
+ * （issue #465）。
+ */
+const QuestionImageThumb: React.FC<{
+  src?: string;
+  alt: string;
+  collapsedClassName: string;
+  placeholderClassName: string;
+}> = ({ src, alt, collapsedClassName, placeholderClassName }) => {
+  const { t } = useTranslation('exam_sheet');
+
+  if (src && src !== 'error') {
+    return <InlineZoomImage src={src} alt={alt} collapsedClassName={collapsedClassName} />;
+  }
+  if (src === 'error') {
+    return (
+      <div
+        className={cn(
+          'w-full flex flex-col items-center justify-center gap-1 text-muted-foreground',
+          placeholderClassName
+        )}
+      >
+        <WarningCircle size={20} />
+        <span className="text-xs">{t('image.load_failed')}</span>
+      </div>
+    );
+  }
+  return (
+    <div className={cn('w-full flex items-center justify-center text-muted-foreground', placeholderClassName)}>
+      <CircleNotch size={16} className="animate-spin" />
+    </div>
+  );
+};
+
 /** 自动关联的原始图片折叠气泡 — 默认展开 */
 const SourceImagesBubble: React.FC<{
   images: QuestionImage[];
@@ -336,17 +375,12 @@ const SourceImagesBubble: React.FC<{
         )}>
           {images.map((img) => (
             <div key={img.id} className="rounded-lg overflow-hidden border border-border/30 bg-muted/20">
-              {imageUrls[img.id] ? (
-                <InlineZoomImage
-                  src={imageUrls[img.id]}
-                  alt={img.name}
-                  collapsedClassName="max-h-64"
-/>
-              ) : (
-                <div className="w-full h-24 flex items-center justify-center text-muted-foreground">
-                  <CircleNotch size={16} className="animate-spin" />
-                </div>
-              )}
+              <QuestionImageThumb
+                src={imageUrls[img.id]}
+                alt={img.name}
+                collapsedClassName="max-h-64"
+                placeholderClassName="h-24"
+              />
             </div>
           ))}
         </div>
@@ -1043,14 +1077,26 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
             if (result.found && result.content) {
               return { id: img.id, url: `data:${img.mime};base64,${result.content}` };
             }
-            return null;
+            return { id: img.id, url: 'error' };
           })
         );
         if (cancelled) return;
         const urls: Record<string, string> = { ...cachedUrls };
-        results.forEach(r => {
+        results.forEach((r, index) => {
           if (r.status === 'fulfilled' && r.value) {
             urls[r.value.id] = r.value.url;
+          } else {
+            // invoke 抛错（Invalid attachment ID format / 附件缺失等）：
+            // 写 'error' 哨兵让 UI 显示可见占位，并在下次切题时重试。
+            const failed = imagesToLoad[index];
+            if (failed) {
+              urls[failed.id] = 'error';
+              console.warn(
+                '[QuestionBankEditor] 题目图片加载失败，标记为 error 占位',
+                failed.id,
+                r.status === 'rejected' ? r.reason : undefined
+              );
+            }
           }
         });
         setQuestionImageUrls(prev => {
@@ -2615,17 +2661,12 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                             )}>
                               {confirmedImages.map((img) => (
                                 <div key={img.id} className="rounded-lg overflow-hidden border border-border/40 bg-muted/20">
-                                  {questionImageUrls[img.id] ? (
-                                    <InlineZoomImage
-                                      src={questionImageUrls[img.id]}
-                                      alt={img.name}
-                                      collapsedClassName="max-h-48"
-/>
-                                  ) : (
-                                    <div className="w-full h-24 flex items-center justify-center text-muted-foreground">
-                                      <CircleNotch size={16} className="animate-spin" />
-                                    </div>
-                                  )}
+                                  <QuestionImageThumb
+                                    src={questionImageUrls[img.id]}
+                                    alt={img.name}
+                                    collapsedClassName="max-h-48"
+                                    placeholderClassName="h-24"
+                                  />
                                 </div>
                               ))}
                             </div>
@@ -2974,17 +3015,12 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                       )}>
                         {confirmedImgs.map((img) => (
                           <div key={img.id} className="rounded-lg overflow-hidden border border-border/40 bg-muted/20">
-                            {questionImageUrls[img.id] ? (
-                              <InlineZoomImage
-                                src={questionImageUrls[img.id]}
-                                alt={img.name}
-                                collapsedClassName="max-h-64"
-/>
-                            ) : (
-                              <div className="w-full h-32 flex items-center justify-center text-muted-foreground">
-                                <CircleNotch size={20} className="animate-spin" />
-                              </div>
-                            )}
+                            <QuestionImageThumb
+                              src={questionImageUrls[img.id]}
+                              alt={img.name}
+                              collapsedClassName="max-h-64"
+                              placeholderClassName="h-32"
+                            />
                           </div>
                         ))}
                       </div>

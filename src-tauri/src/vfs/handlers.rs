@@ -1789,10 +1789,49 @@ pub struct VfsAttachmentContentResult {
     pub error: Option<String>,
 }
 
+/// 把 `res_*` 引用资源解析到底层 `files.id`（委托 `VfsAttachmentRepo` 的 SSOT 实现）。
+///
+/// 返回 `Ok(None)` 表示该资源没有对应的 files 行（如纯文本/笔记资源），
+/// 调用方应回退到 `resources.data`。
+fn resolve_res_ref_to_file_id(
+    vfs_db: &VfsDatabase,
+    res_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = vfs_db.get_conn_safe().map_err(|e| e.to_string())?;
+    VfsAttachmentRepo::resolve_to_file_id(&conn, res_id).map_err(|e| e.to_string())
+}
+
+/// 读取 `resources.data`（无 files 行时的兜底）。
+///
+/// 返回 `Ok(None)` 表示资源不存在或 data 为空；`data:` URL 会剥离前缀只留 base64。
+fn read_inline_resource_data(vfs_db: &VfsDatabase, res_id: &str) -> Result<Option<String>, String> {
+    let conn = vfs_db.get_conn_safe().map_err(|e| e.to_string())?;
+    let data: Option<String> = conn
+        .query_row(
+            "SELECT data FROM resources WHERE id = ?1 AND deleted_at IS NULL",
+            rusqlite::params![res_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .filter(|d: &String| !d.trim().is_empty());
+
+    Ok(data.map(|d| {
+        if d.starts_with("data:") {
+            d.split_once(',')
+                .map(|(_, right)| right.to_string())
+                .unwrap_or_default()
+        } else {
+            d
+        }
+    }))
+}
+
 /// 获取附件内容（Base64 编码）
 ///
 /// ## 参数
-/// - `attachment_id`: 附件/文件/教材 ID（att_xxx / file_xxx / tb_xxx）
+/// - `attachment_id`: 附件/文件/教材 ID（att_xxx / file_xxx / tb_xxx / res_xxx）
 ///
 /// ## 返回
 /// - `Ok(VfsAttachmentContentResult)`: 包含 content/found（以及可选 error）字段
@@ -1810,11 +1849,12 @@ pub async fn vfs_get_attachment_content(
         attachment_id
     );
 
-    // 验证附件 ID 格式（支持 att_、file_、tb_ 和 img_ 前缀）
+    // 验证附件 ID 格式（支持 att_、file_、tb_、img_ 和 res_ 前缀）
     if !attachment_id.starts_with("att_")
         && !attachment_id.starts_with("file_")
         && !attachment_id.starts_with("tb_")
         && !attachment_id.starts_with("img_")
+        && !attachment_id.starts_with("res_")
     {
         log::error!(
             "[VFS::handlers] Invalid attachment ID format: {}",
@@ -1822,6 +1862,59 @@ pub async fn vfs_get_attachment_content(
         );
         return Err(format!("Invalid attachment ID format: {}", attachment_id));
     }
+
+    // ★ issue #465：`res_*` 引用资源不是 files.id，直接查 files 必然落空。
+    // 先解析到底层 files.id 再走既有链路；没有 files 行时退回 resources.data。
+    let attachment_id = if attachment_id.starts_with("res_") {
+        match resolve_res_ref_to_file_id(&vfs_db, &attachment_id) {
+            Ok(Some(file_id)) => {
+                log::info!(
+                    "[VFS::handlers] vfs_get_attachment_content: res_ {} → files {}",
+                    attachment_id,
+                    file_id
+                );
+                file_id
+            }
+            Ok(None) => match read_inline_resource_data(&vfs_db, &attachment_id) {
+                Ok(Some(data)) => {
+                    log::info!(
+                            "[VFS::handlers] vfs_get_attachment_content: res_ {} 无 files 行，回退 resources.data（len={}）",
+                            attachment_id,
+                            data.len()
+                        );
+                    return Ok(VfsAttachmentContentResult {
+                        content: Some(data),
+                        found: true,
+                        error: None,
+                    });
+                }
+                _ => {
+                    log::warn!(
+                            "[VFS::handlers] vfs_get_attachment_content: res_ {} 无法解析（无 files 行且 resources.data 为空）",
+                            attachment_id
+                        );
+                    return Ok(VfsAttachmentContentResult {
+                        content: None,
+                        found: false,
+                        error: Some(format!(
+                            "resource ref has no resolvable backing file: {}",
+                            attachment_id
+                        )),
+                    });
+                }
+            },
+            Err(e) => {
+                log::error!(
+                    "[VFS::handlers] vfs_get_attachment_content: res_ {} 解析失败: {}",
+                    attachment_id,
+                    e
+                );
+                return Err(e);
+            }
+        }
+    } else {
+        attachment_id
+    };
 
     // ★ img_ 前缀：DOCX VLM 直提路径产生的图片 ID，blob hash 存在 questions.images_json 中
     if attachment_id.starts_with("img_") {

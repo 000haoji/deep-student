@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::sync::LazyLock;
 use tauri::{Emitter, Manager};
@@ -26,7 +27,8 @@ use crate::question_bank_service::{
 use crate::vfs::repos::{
     CreateQuestionParams, Difficulty, Question, QuestionFilters, QuestionImage, QuestionOption,
     QuestionSearchFilters, QuestionStatus, QuestionType as RepoQuestionType, SearchSortBy,
-    SourceType as RepoSourceType, UpdateQuestionParams, VfsExamRepo, VfsQuestionRepo,
+    SourceType as RepoSourceType, UpdateQuestionParams, VfsAttachmentRepo, VfsExamRepo,
+    VfsQuestionRepo,
 };
 
 static QBANK_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1139,6 +1141,72 @@ fn parse_question_images(value: &Value) -> Result<Vec<QuestionImage>, String> {
         .collect()
 }
 
+/// 把题目图片 ID 归一化为 `vfs_get_attachment_content` 可解析的附件 ID（issue #465）。
+///
+/// AI 常把检索上下文里的 `res_*`（`unified_search` 返回的 `resourceId`）当作附件 ID
+/// 传入，而 `res_*` 不是 `files.id`：前端按它取图会得到
+/// `Invalid attachment ID format`，图片永久转圈。这里统一解析：
+/// - `file_/att_/tb_/img_` 原样保留；
+/// - `res_*` 解析到底层 `files.id`，并回填 `hash`（blob hash）与 `mime`；
+/// - 无法解析的 ID 直接报错（不落库），避免产生永远加载不出的题目图片。
+///
+/// 解析走 `VfsAttachmentRepo::resolve_to_file_id`（SSOT），与读取侧同口径。
+fn normalize_question_images(
+    ctx: &ExecutionContext,
+    images: Vec<QuestionImage>,
+) -> Result<Vec<QuestionImage>, String> {
+    let Some(vfs_db) = ctx.vfs_db.as_ref() else {
+        // 无 VFS 库（如部分单测/无库上下文）时无法校验：保持既有行为，不阻断写题。
+        return Ok(images);
+    };
+    let conn = vfs_db.get_conn_safe().map_err(|e| e.to_string())?;
+
+    images
+        .into_iter()
+        .map(|mut image| {
+            let raw_id = image.id.clone();
+            if !raw_id.starts_with("res_") {
+                return Ok(image);
+            }
+
+            let file_id = VfsAttachmentRepo::resolve_to_file_id(&conn, &raw_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| {
+                    qbank_error(
+                        "INVALID_ARGS",
+                        format!("images 中的引用资源无法解析为附件: {raw_id}"),
+                        "res_* 必须指向 VFS 中真实存在的文件；先用 resource_list 确认，或改用 file_* 附件 ID",
+                    )
+                })?;
+
+            let (blob_hash, mime): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT blob_hash, mime_type FROM files WHERE id = ?1",
+                    rusqlite::params![file_id.as_str()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|e| e.to_string())?
+                .unwrap_or((None, None));
+
+            log::info!(
+                "[QbankExecutor] 归一化题目图片引用: {} → {}",
+                raw_id,
+                file_id
+            );
+
+            image.id = file_id;
+            if let Some(hash) = blob_hash.filter(|h| !h.is_empty()) {
+                image.hash = hash;
+            }
+            if let Some(mime) = mime.filter(|m| !m.is_empty()) {
+                image.mime = mime;
+            }
+            Ok(image)
+        })
+        .collect()
+}
+
 fn parse_qbank_grading_mode(args: &Value) -> Result<QbankGradingMode, String> {
     match args.get("mode").and_then(Value::as_str).unwrap_or("grade") {
         "grade" => Ok(QbankGradingMode::Grade),
@@ -1817,6 +1885,8 @@ impl QBankExecutor {
             .arguments
             .get("images")
             .map(parse_question_images)
+            .transpose()?
+            .map(|images| normalize_question_images(ctx, images))
             .transpose()?;
         let difficulty = call
             .arguments
@@ -2823,7 +2893,10 @@ impl QBankExecutor {
             changed_fields.push("status");
         }
         if let Some(value) = call.arguments.get("images") {
-            params.images = Some(parse_question_images(value)?);
+            params.images = Some(normalize_question_images(
+                ctx,
+                parse_question_images(value)?,
+            )?);
             changed_fields.push("images");
         }
         if call
@@ -5250,6 +5323,76 @@ mod occ_contract_tests {
             let structured: Value = serde_json::from_str(&error).expect("structured error");
             assert_eq!(structured["code"], "INVALID_ARGS");
         }
+    }
+
+    /// issue #465 回归：AI 传入的 `res_*` 引用必须归一化为可加载的 `file_*`，
+    /// 否则前端按它取图会永久转圈；无法解析的 `res_*` 必须结构化报错而不是落库。
+    #[test]
+    fn normalize_question_images_rewrites_res_refs_to_file_ids() {
+        let (_temp_dir, db) = crate::vfs::database::setup_migrated_test_db();
+        {
+            let conn = db.get_conn_safe().expect("open migrated VFS test database");
+            conn.execute(
+                "INSERT INTO blobs (hash, relative_path, size, ref_count, created_at) \
+                 VALUES ('blob_norm_hash', 'ab/blob_norm_hash.png', 10, 0, 1)",
+                [],
+            )
+            .expect("insert blob");
+            conn.execute(
+                "INSERT INTO resources (id, hash, type, storage_mode, data, created_at, updated_at) \
+                 VALUES ('res_norm_img', 'res_norm_hash', 'image', 'inline', '{}', 1, 1)",
+                [],
+            )
+            .expect("insert resource");
+            conn.execute(
+                "INSERT INTO files (id, resource_id, blob_hash, sha256, file_name, size, tags_json, status, created_at, updated_at, type, name, mime_type) \
+                 VALUES ('file_norm_img', 'res_norm_img', 'blob_norm_hash', 'sha_norm', 'norm.png', 10, '[]', 'active', \
+                         '2026-09-04T00:00:00Z', '2026-09-04T00:00:00Z', 'image', 'norm.png', 'image/png')",
+                [],
+            )
+            .expect("insert files row");
+        }
+
+        let emitter = std::sync::Arc::new(
+            crate::chat_v2::events::ChatV2EventEmitter::new_headless("sess-norm".to_string()),
+        );
+        let registry = std::sync::Arc::new(crate::tools::ToolRegistry::new());
+        let mut ctx = ExecutionContext::new(
+            "sess-norm".to_string(),
+            "msg-norm".to_string(),
+            "blk-norm".to_string(),
+            emitter,
+            registry,
+            None,
+        );
+        ctx.vfs_db = Some(std::sync::Arc::new(db));
+
+        let normalized = normalize_question_images(
+            &ctx,
+            vec![QuestionImage {
+                id: "res_norm_img".to_string(),
+                name: "norm".to_string(),
+                mime: "image/png".to_string(),
+                hash: String::new(),
+            }],
+        )
+        .expect("res_* image should normalize to its files.id");
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].id, "file_norm_img");
+        assert_eq!(normalized[0].hash, "blob_norm_hash");
+
+        let error = normalize_question_images(
+            &ctx,
+            vec![QuestionImage {
+                id: "res_ghost".to_string(),
+                name: "ghost".to_string(),
+                mime: "image/png".to_string(),
+                hash: String::new(),
+            }],
+        )
+        .expect_err("unresolvable res_* must fail instead of persisting");
+        let structured: Value = serde_json::from_str(&error).expect("structured error");
+        assert_eq!(structured["code"], "INVALID_ARGS");
     }
 
     #[test]

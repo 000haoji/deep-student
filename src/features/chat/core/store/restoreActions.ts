@@ -91,6 +91,56 @@ function getReplayRuntimeSnapshots(
   return snapshots.filter((snapshot): snapshot is ReplaySkillPayloadSnapshot => !!snapshot);
 }
 
+/** 每条消息的「工具名来源」索引：把 O(块数 × 快照数 × schema 数) 的扫描降为 O(1) 查表。 */
+interface ReplayToolNameIndex {
+  /** 出现在外部 MCP schema（serverId 已设置）中的短名——命中即拒绝 remap。 */
+  external: Set<string>;
+  /** 出现在本地 schema（无 serverId）中的短名。 */
+  trustedLocal: Set<string>;
+  /** 由内置技能 embeddedTools 提供的短名。 */
+  builtinSkill: Set<string>;
+}
+
+function buildReplayToolNameIndex(
+  message?: LoadSessionResponseType['messages'][number],
+): ReplayToolNameIndex {
+  const external = new Set<string>();
+  const trustedLocal = new Set<string>();
+  const builtinSkill = new Set<string>();
+
+  for (const snapshot of getReplayRuntimeSnapshots(message)) {
+    for (const schema of snapshot.mcpToolSchemas ?? []) {
+      const shortName = normalizeHistoricalToolName(schema.name);
+      (schema.serverId !== undefined ? external : trustedLocal).add(shortName);
+    }
+    for (const [skillId, tools] of Object.entries(snapshot.skillEmbeddedTools ?? {})) {
+      if (!CURRENT_BUILTIN_SKILL_IDS.has(skillId)) continue;
+      for (const tool of tools) {
+        builtinSkill.add(normalizeHistoricalToolName(tool.name));
+      }
+    }
+  }
+
+  return { external, trustedLocal, builtinSkill };
+}
+
+// 会话加载时逐块调用 remapLegacyBuiltinToolName；按消息对象缓存索引，
+// 避免对每个 mcp_ 块重复遍历全部快照与工具 schema（issue #469）。
+const replayToolNameIndexCache = new WeakMap<object, ReplayToolNameIndex>();
+
+function getReplayToolNameIndex(
+  message?: LoadSessionResponseType['messages'][number],
+): ReplayToolNameIndex {
+  if (!message) {
+    return { external: new Set(), trustedLocal: new Set(), builtinSkill: new Set() };
+  }
+  const cached = replayToolNameIndexCache.get(message);
+  if (cached) return cached;
+  const index = buildReplayToolNameIndex(message);
+  replayToolNameIndexCache.set(message, index);
+  return index;
+}
+
 /**
  * Very old sessions persisted trusted local tools with the generic `mcp_`
  * prefix. Remap only when replay metadata proves that the tool came from a
@@ -106,29 +156,10 @@ function remapLegacyBuiltinToolName(
   const shortName = normalizeHistoricalToolName(toolName);
   if (!CURRENT_BUILTIN_TOOL_NAMES.has(shortName)) return toolName;
 
-  const snapshots = getReplayRuntimeSnapshots(message);
-  const hasExternalSource = snapshots.some((snapshot) =>
-    (snapshot.mcpToolSchemas ?? []).some((schema) =>
-      normalizeHistoricalToolName(schema.name) === shortName
-      && schema.serverId !== undefined,
-    ),
-  );
-  if (hasExternalSource) return toolName;
+  const index = getReplayToolNameIndex(message);
+  if (index.external.has(shortName)) return toolName;
 
-  const hasTrustedLocalSchema = snapshots.some((snapshot) =>
-    (snapshot.mcpToolSchemas ?? []).some((schema) =>
-      normalizeHistoricalToolName(schema.name) === shortName
-      && schema.serverId === undefined,
-    ),
-  );
-  const hasBuiltinSkillEvidence = snapshots.some((snapshot) =>
-    Object.entries(snapshot.skillEmbeddedTools ?? {}).some(([skillId, tools]) =>
-      CURRENT_BUILTIN_SKILL_IDS.has(skillId)
-      && tools.some((tool) => normalizeHistoricalToolName(tool.name) === shortName),
-    ),
-  );
-
-  return hasTrustedLocalSchema || hasBuiltinSkillEvidence
+  return index.trustedLocal.has(shortName) || index.builtinSkill.has(shortName)
     ? `builtin-${shortName}`
     : toolName;
 }

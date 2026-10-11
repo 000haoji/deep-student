@@ -24,6 +24,7 @@ use crate::chat_v2::repo::ChatV2Repo;
 use crate::chat_v2::resource_types::ContextRef;
 use crate::chat_v2::types::{ToolCall, ToolResultInfo};
 use crate::document_parser::DocumentParser;
+use crate::vfs::repos::attachment_repo::VfsAttachmentRepo;
 
 pub(crate) fn attachment_error(
     code: &str,
@@ -501,6 +502,55 @@ fn map_context_ref_to_mime(type_id: &str) -> &'static str {
     }
 }
 
+/// 一条可读取的 VFS 文件行（`files` + 其内联资源 `resources.data`）。
+///
+/// 注意列名是 `resources.data` 而非 `content`——vfs schema 里没有 `content` 列，
+/// 历史实现写成 `COALESCE(r.content, '')` 会让每次 `res_*` 读取都以
+/// `no such column: r.content` 失败（issue #468）。
+struct ContextRefFileRow {
+    file_id: String,
+    name: String,
+    mime_type: String,
+    /// `resources.data`：inline 模式下可能是 base64 内容，也可能是引用 JSON（图片资源）。
+    data: String,
+}
+
+/// 把 context_ref 的 `resource_id` 解析成一条 `files` 行。
+///
+/// ID → `files.id` 的解析走 `VfsAttachmentRepo::resolve_to_file_id`（SSOT），
+/// 与 `vfs_get_attachment_content`、题库图片写入校验同一口径：`file_/att_/tb_/img_`
+/// 直接命中，`res_*` 经 `files.resource_id` / `resources.source_id` 间接解析。
+fn resolve_context_ref_file_row(
+    conn: &rusqlite::Connection,
+    resource_id: &str,
+) -> Result<Option<ContextRefFileRow>, String> {
+    let file_id =
+        VfsAttachmentRepo::resolve_to_file_id(conn, resource_id).map_err(|e| e.to_string())?;
+    let Some(file_id) = file_id else {
+        return Ok(None);
+    };
+
+    conn.query_row(
+        "SELECT f.id, COALESCE(f.file_name, f.id), COALESCE(f.mime_type, ''), COALESCE(r.data, '') \
+         FROM files f \
+         LEFT JOIN resources r ON f.resource_id = r.id \
+         WHERE f.id = ?1 \
+           AND f.deleted_at IS NULL \
+           AND (r.deleted_at IS NULL OR r.id IS NULL)",
+        rusqlite::params![file_id.as_str()],
+        |row| {
+            Ok(ContextRefFileRow {
+                file_id: row.get(0)?,
+                name: row.get(1)?,
+                mime_type: row.get(2)?,
+                data: row.get(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
 fn read_context_ref_content(
     ctx: &ExecutionContext,
     context_ref: &ContextRef,
@@ -516,115 +566,86 @@ fn read_context_ref_content(
         return Err("Folder context reference is not readable via attachment_read".to_string());
     }
 
-    let row = conn
-        .query_row(
-            r#"
-            SELECT COALESCE(f.file_name, f.id) AS name, COALESCE(f.mime_type, ''), COALESCE(r.content, '')
-            FROM files f
-            LEFT JOIN resources r ON f.resource_id = r.id
-            WHERE f.id = ?1
-              AND f.deleted_at IS NULL
-              AND (r.deleted_at IS NULL OR r.id IS NULL)
-            "#,
-            rusqlite::params![context_ref.resource_id.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(|e| e.to_string())?;
-
-    // ★ 2026-09 修复（PDF 二次读取）：context_ref.resource_id 可能是"引用资源"
-    // （inline，data=refs，source_id 指向 att_*/file_* 或另一 resources 行），
-    // files 表没有它的行。经 resources.source_id 间接解析到真实 files.id 后重试。
-    let row = match row {
-        Some(row) => Some(row),
-        None if context_ref.resource_id.starts_with("res_") => {
-            let source_id: Option<String> = conn
-                .query_row(
-                    "SELECT COALESCE(source_id, '') FROM resources WHERE id = ?1",
-                    rusqlite::params![context_ref.resource_id.as_str()],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .ok()
-                .flatten()
-                .filter(|s: &String| !s.is_empty());
-            match source_id {
-                Some(sid) if sid.starts_with("att_") || sid.starts_with("file_") => {
-                    conn.query_row(
-                        r#"
-                        SELECT COALESCE(f.file_name, f.id) AS name, COALESCE(f.mime_type, ''), COALESCE(r.content, '')
-                        FROM files f
-                        LEFT JOIN resources r ON f.resource_id = r.id
-                        WHERE f.id = ?1
-                          AND f.deleted_at IS NULL
-                          AND (r.deleted_at IS NULL OR r.id IS NULL)
-                        "#,
-                        rusqlite::params![sid],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(|e| e.to_string())?
-                }
-                Some(sid) => conn
-                    .query_row(
-                        r#"
-                        SELECT COALESCE(f.file_name, f.id) AS name, COALESCE(f.mime_type, ''), COALESCE(r.content, '')
-                        FROM files f
-                        LEFT JOIN resources r ON f.resource_id = r.id
-                        WHERE f.resource_id = ?1
-                          AND f.deleted_at IS NULL
-                          AND (r.deleted_at IS NULL OR r.id IS NULL)
-                        "#,
-                        rusqlite::params![sid],
-                        |row| {
-                            Ok((
-                                row.get::<_, String>(0)?,
-                                row.get::<_, String>(1)?,
-                                row.get::<_, String>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(|e| e.to_string())?,
-                None => None,
-            }
-        }
-        None => None,
-    };
-
-    let (name, mime_type, raw_content) = row.ok_or_else(|| {
+    let row = resolve_context_ref_file_row(&conn, &context_ref.resource_id)?.ok_or_else(|| {
         format!(
             "Resource not found in VFS: {}（可尝试用 resource_list 确认资源，或重新上传附件）",
             context_ref.resource_id
         )
     })?;
 
-    let is_image_ref = context_ref.type_id == "image" || mime_type.starts_with("image/");
-    if is_image_ref && !parse_content {
-        return Ok((name, mime_type, raw_content));
-    }
+    log::debug!(
+        "[AttachmentToolExecutor] read_context_ref_content: resource_id={}, file_id={}, mime_type={}, data_len={}",
+        context_ref.resource_id,
+        row.file_id,
+        row.mime_type,
+        row.data.len()
+    );
 
-    if is_image_ref && raw_content.starts_with("data:") {
-        let base64_content = raw_content
+    let is_image_ref = context_ref.type_id == "image" || row.mime_type.starts_with("image/");
+
+    // 图片的字节必须走 blob / 内联 base64，而不是 `resources.data`——后者对图片资源
+    // 存的是引用 JSON（`{"refs":[…]}`），直接当内容返回会让模型拿到一串 JSON。
+    // `VfsAttachmentRepo::get_content_with_conn` 是 UI 命令同款解析器：
+    // 内联 base64 → resources.data，外部文件 → original_path / blob_hash。
+    let raw_content = if is_image_ref {
+        match VfsAttachmentRepo::get_content_with_conn(&conn, vfs_db.blobs_dir(), &row.file_id) {
+            Ok(Some(content)) if !content.is_empty() => content,
+            Ok(_) => {
+                log::warn!(
+                    "[AttachmentToolExecutor] 图片内容为空: file_id={}, resource_id={}",
+                    row.file_id,
+                    context_ref.resource_id
+                );
+                return Err(attachment_error(
+                    "ATTACHMENT_BLOB_MISSING",
+                    format!(
+                        "图片内容缺失：{}（file_id={}）",
+                        context_ref.resource_id, row.file_id
+                    ),
+                    format!(
+                        "Image content missing: {} (file_id={})",
+                        context_ref.resource_id, row.file_id
+                    ),
+                    "该图片的 blob 已丢失，请重新上传；不要反复重试同一附件",
+                    "The image blob is missing; re-upload it instead of retrying",
+                    false,
+                ));
+            }
+            Err(e) => {
+                log::warn!(
+                    "[AttachmentToolExecutor] 图片内容读取失败: file_id={}, error={}",
+                    row.file_id,
+                    e
+                );
+                return Err(attachment_error(
+                    "ATTACHMENT_BLOB_MISSING",
+                    format!("图片内容读取失败：{}（{}）", context_ref.resource_id, e),
+                    format!(
+                        "Failed to read image content: {} ({})",
+                        context_ref.resource_id, e
+                    ),
+                    "该图片的 blob 已丢失，请重新上传；不要反复重试同一附件",
+                    "The image blob is missing; re-upload it instead of retrying",
+                    false,
+                ));
+            }
+        }
+    } else {
+        row.data.clone()
+    };
+
+    // 兼容历史数据：部分图片内容以 `data:` URL 形式内联，剥离前缀只留 base64。
+    let content = if is_image_ref && raw_content.starts_with("data:") {
+        raw_content
             .split_once(',')
             .map(|(_, right)| right.to_string())
-            .unwrap_or_default();
-        return Ok((name, mime_type, base64_content));
-    }
+            .unwrap_or_default()
+    } else {
+        raw_content
+    };
 
-    Ok((name, mime_type, raw_content))
+    let _ = parse_content; // 图片始终返回 base64；文本内容已由上方分支决定
+    Ok((row.name, row.mime_type, content))
 }
 
 impl Default for AttachmentToolExecutor {
@@ -912,5 +933,122 @@ mod tests {
             .await
             .expect("read attachment from ChatV2 database");
         assert_eq!(read["content"], "hello");
+    }
+
+    /// issue #468 回归：`res_*` 图片引用必须能读回 base64 内容。
+    ///
+    /// 历史实现把 SQL 写成 `COALESCE(r.content, '')`，而 vfs `resources` 表的列名是
+    /// `data`——每次 `res_*` 读取都以 `no such column: r.content` 失败。这里同时验证
+    /// 「res_* → files.resource_id → blob」的完整解析链。
+    fn setup_res_image_ctx(
+        res_id: &str,
+        file_id: &str,
+        link_via_source_id: bool,
+    ) -> (tempfile::TempDir, ExecutionContext, String) {
+        use crate::vfs::repos::VfsBlobRepo;
+
+        let (temp_dir, vfs_db) = crate::vfs::database::setup_migrated_test_db();
+        let vfs_db = Arc::new(vfs_db);
+
+        let image_bytes: &[u8] = b"\x89PNG\r\n\x1a\nres-image-bytes";
+        let expected_base64 = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(image_bytes)
+        };
+
+        {
+            let conn = vfs_db.get_conn_safe().expect("get VFS connection");
+            let blob = VfsBlobRepo::store_blob_with_conn(
+                &conn,
+                vfs_db.blobs_dir(),
+                image_bytes,
+                Some("image/png"),
+                Some("png"),
+            )
+            .expect("store blob");
+
+            // 引用资源：data 存的是引用 JSON（不是 base64），字节在 blob 里。
+            // source_id 指向 files.id（link_via_source_id 时）或留空（经 files.resource_id 关联）。
+            conn.execute(
+                "INSERT INTO resources (id, hash, type, source_id, storage_mode, data, created_at, updated_at) \
+                 VALUES (?1, ?2, 'image', ?3, 'inline', ?4, 1, 1)",
+                rusqlite::params![
+                    res_id,
+                    format!("{res_id}_hash"),
+                    if link_via_source_id { Some(file_id) } else { None },
+                    "{\"refs\":[]}"
+                ],
+            )
+            .expect("insert resource");
+
+            conn.execute(
+                "INSERT INTO files (id, resource_id, blob_hash, sha256, file_name, size, tags_json, status, created_at, updated_at, type, name, mime_type) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, '[]', 'active', '2026-09-04T00:00:00Z', '2026-09-04T00:00:00Z', 'image', ?5, 'image/png')",
+                rusqlite::params![
+                    file_id,
+                    if link_via_source_id { None } else { Some(res_id) },
+                    blob.hash,
+                    format!("{file_id}_sha"),
+                    "ref.png",
+                    image_bytes.len() as i64
+                ],
+            )
+            .expect("insert files row");
+        }
+
+        let session_id = format!("sess_{res_id}");
+        let emitter = Arc::new(ChatV2EventEmitter::new_windowless_for_test(
+            session_id.clone(),
+        ));
+        let ctx = ExecutionContext::new(
+            session_id.clone(),
+            format!("msg_{res_id}"),
+            format!("blk_{res_id}"),
+            emitter,
+            Arc::new(ToolRegistry::new()),
+            None,
+        )
+        .with_vfs_db(Some(vfs_db));
+
+        (temp_dir, ctx, expected_base64)
+    }
+
+    #[test]
+    fn reads_res_context_ref_image_linked_by_files_resource_id() {
+        let (_temp, ctx, expected_base64) = setup_res_image_ctx("res_img_a", "file_img_a", false);
+        let context_ref = ContextRef::new("res_img_a", "res_img_a_hash", "image");
+
+        let (name, mime, content) = read_context_ref_content(&ctx, &context_ref, true)
+            .expect("res_* image (files.resource_id) must be readable");
+
+        assert_eq!(name, "ref.png");
+        assert_eq!(mime, "image/png");
+        assert_eq!(content, expected_base64);
+    }
+
+    #[test]
+    fn reads_res_context_ref_image_linked_by_resources_source_id() {
+        let (_temp, ctx, expected_base64) = setup_res_image_ctx("res_img_b", "file_img_b", true);
+        let context_ref = ContextRef::new("res_img_b", "res_img_b_hash", "image");
+
+        let (name, mime, content) = read_context_ref_content(&ctx, &context_ref, true)
+            .expect("res_* image (resources.source_id → files.id) must be readable");
+
+        assert_eq!(name, "ref.png");
+        assert_eq!(mime, "image/png");
+        assert_eq!(content, expected_base64);
+    }
+
+    #[test]
+    fn unresolvable_res_context_ref_reports_not_found() {
+        let (_temp, ctx, _expected) = setup_res_image_ctx("res_img_c", "file_img_c", false);
+        let context_ref = ContextRef::new("res_missing", "res_missing_hash", "image");
+
+        let error = read_context_ref_content(&ctx, &context_ref, true)
+            .expect_err("missing res_* must fail");
+        assert!(
+            error.contains("Resource not found in VFS"),
+            "unexpected error: {error}"
+        );
     }
 }

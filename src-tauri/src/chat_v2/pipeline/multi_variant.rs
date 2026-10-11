@@ -467,7 +467,8 @@ impl ChatV2Pipeline {
                     skill_snapshot_before: None,
                     skill_snapshot_after: None,
                     skill_runtime_before: build_replay_skill_payload_snapshot(&options),
-                    skill_runtime_after: build_replay_skill_payload_snapshot(&options),
+                    // issue #469：与 before 同源，只存一份；读侧 after.or(before)
+                    skill_runtime_after: None,
                     replay_source: None,
                     response_reasoning_items: None,
                     skill_injection_anchors: None,
@@ -3445,7 +3446,8 @@ impl ChatV2Pipeline {
                     skill_snapshot_before: None,
                     skill_snapshot_after: None,
                     skill_runtime_before: build_replay_skill_payload_snapshot(options),
-                    skill_runtime_after: build_replay_skill_payload_snapshot(options),
+                    // issue #469：与 before 同源，只存一份；读侧 after.or(before)
+                    skill_runtime_after: None,
                     replay_source: None,
                     response_reasoning_items: None,
                     skill_injection_anchors: None,

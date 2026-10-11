@@ -156,6 +156,21 @@ fn build_replay_skill_payload_snapshot(
     snapshot.has_replay_metadata().then_some(snapshot)
 }
 
+/// issue #469：生成结束时 `skill_runtime_before/after` 取自同一份 `ctx.options`，
+/// 逐字节相同；两条都落库会让 `meta_json` 白涨一倍（实测全库 ~6.1MB 纯冗余）。
+///
+/// 这里只存一份（落在 `before`），读侧统一 `after.or(before)`
+/// （`send_message.rs` / `TauriAdapter.ts` 已是该语义）；运行中确有技能加载时，
+/// `skills_executor` 会覆盖 `skill_runtime_after` 为真实的后置快照。
+fn build_skill_runtime_fields(
+    options: &SendOptions,
+) -> (
+    Option<crate::chat_v2::types::ReplaySkillPayloadSnapshot>,
+    Option<crate::chat_v2::types::ReplaySkillPayloadSnapshot>,
+) {
+    (build_replay_skill_payload_snapshot(options), None)
+}
+
 /// 从最终回复文本与工具结果中解析"实际被引用的记忆 note_id"（引用级使用信号）。
 ///
 /// - 回复中的引用标记形如 `[记忆-N]`（编号由后端 CitationLedger 分配、前端直接
@@ -267,6 +282,23 @@ mod tests {
         };
 
         assert!(build_replay_skill_payload_snapshot(&options).is_none());
+    }
+
+    /// issue #469 回归：before/after 同源，持久化时只能落一份，
+    /// 避免 meta_json 体量翻倍（读侧统一 after.or(before)）。
+    #[test]
+    fn skill_runtime_snapshot_is_persisted_once() {
+        let options = SendOptions {
+            active_skill_ids: Some(vec!["manual-a".to_string()]),
+            ..Default::default()
+        };
+
+        let (before, after) = build_skill_runtime_fields(&options);
+        assert!(before.is_some(), "before 必须保留回放快照");
+        assert!(
+            after.is_none(),
+            "before/after 同源时必须只存一份（issue #469）"
+        );
     }
 
     fn make_tool_result(output: serde_json::Value) -> ToolResultInfo {
@@ -1285,6 +1317,7 @@ impl ChatV2Pipeline {
         // 构建助手消息元数据
         // 🔧 Bug修复：model_id 使用模型显示名称（如 "Qwen/Qwen3-8B"），而不是 API 配置 ID
         // 这确保刷新后前端能正确显示模型名称和图标
+        let (skill_runtime_before, skill_runtime_after) = build_skill_runtime_fields(&ctx.options);
         let assistant_meta = MessageMeta {
             model_id: ctx
                 .model_display_name
@@ -1333,8 +1366,8 @@ impl ChatV2Pipeline {
             },
             skill_snapshot_before: None,
             skill_snapshot_after: None,
-            skill_runtime_before: build_replay_skill_payload_snapshot(&ctx.options),
-            skill_runtime_after: build_replay_skill_payload_snapshot(&ctx.options),
+            skill_runtime_before,
+            skill_runtime_after,
             replay_source: None,
             // V20260806 B 层：Responses reasoning item 随消息 meta 持久化，
             // history 重放按 tool_call_id 回填，跨轮不丢 encrypted reasoning
