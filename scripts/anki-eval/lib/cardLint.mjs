@@ -61,6 +61,8 @@ export const RUST_ONLY_CODES = Object.freeze({
   NEAR_DUPLICATE: 'near_duplicate',
   /** Info 级低置信提示（合法中英术语混排即触发），不参与基线断言 */
   MIXED_LANGUAGE: 'mixed_language',
+  /** Warn 级；公式分隔符判定需与渲染层定界符规则同步演进，仅生产侧维护 */
+  BARE_LATEX: 'bare_latex',
   /** 需选择题模板上下文（extra_fields 的 option 槽位约定） */
   MCQ_TOO_FEW_OPTIONS: 'mcq_too_few_options',
   MCQ_ANSWER_NOT_IN_OPTIONS: 'mcq_answer_not_in_options',

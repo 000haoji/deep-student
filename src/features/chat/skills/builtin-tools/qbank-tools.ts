@@ -87,6 +87,11 @@ export const qbankToolsSkill: SkillDefinition = {
 \`builtin-qbank_ai_grade\`。评判工具会真实调用模型并持久化 grade 结果；没有工具回执时
 不得自行宣称已完成 AI 批改。
 
+## 补解析
+
+给题目补解析用 \`builtin-qbank_ai_grade\`（\`mode: "analyze"\`，不传 \`submission_id\`），不要伪造作答。
+\`explanation_written=false\` 表示已有解析未覆盖，用户要求替换时再用 \`builtin-qbank_update_question\`。
+
 ## 引用格式
 
 创建或导入题目集后，**必须**在回复中使用引用让用户可以直接点击打开：
@@ -498,7 +503,7 @@ export const qbankToolsSkill: SkillDefinition = {
     },
     {
       name: 'builtin-qbank_ai_grade',
-      description: '对已提交答案执行真实 AI 评判（grade，持久化 verdict/score 并更新统计）或解析（analyze）。先 qbank_submit_answer 取得 submission_id。',
+      description: '真实 AI 评判（grade，持久化评分，需先 qbank_submit_answer 取得 submission_id）或解析（analyze；不传 submission_id 时生成通用解析，原解析为空则写入 explanation，已有解析不会被覆盖）。',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
@@ -510,7 +515,7 @@ export const qbankToolsSkill: SkillDefinition = {
           question_id: { type: 'string', description: 'questions 表题目 ID' },
           session_id: { type: 'string', description: '题目集 ID' },
           card_id: { type: 'string', description: '题目卡片 ID' },
-          submission_id: { type: 'string', minLength: 1, description: 'qbank_submit_answer 返回的提交记录 ID' },
+          submission_id: { type: 'string', minLength: 1, description: 'qbank_submit_answer 返回的提交记录 ID；grade 必填' },
           mode: {
             type: 'string',
             enum: ['grade', 'analyze'],
@@ -519,7 +524,6 @@ export const qbankToolsSkill: SkillDefinition = {
           },
           model_config_id: { type: 'string', description: '可选模型配置 ID' },
         },
-        required: ['submission_id'],
       },
     },
     {

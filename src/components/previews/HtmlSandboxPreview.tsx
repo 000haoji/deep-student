@@ -28,6 +28,8 @@ export interface HtmlSandboxPreviewProps {
    * 宿主需要据此自行滚动统一 viewport。
    */
   onFrameWheel?: (deltaY: number, deltaMode: number) => void;
+  /** 应用自有样式（不经 CSS 净化），见 buildHtmlSandboxDocument 的 trustedCss */
+  trustedCss?: string;
 }
 
 /** srcDoc 的轻量指纹（djb2），仅用作 React key */
@@ -50,6 +52,7 @@ export const HtmlSandboxPreview: React.FC<HtmlSandboxPreviewProps> = ({
   style,
   onFrameClick,
   onFrameWheel,
+  trustedCss,
 }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [iframeHeight, setIframeHeight] = useState<number>(typeof height === 'number' ? height : 200);
@@ -64,8 +67,9 @@ export const HtmlSandboxPreview: React.FC<HtmlSandboxPreviewProps> = ({
       compact,
       height,
       fidelity,
+      trustedCss,
     });
-  }, [compact, cssContent, fidelity, height, htmlContent, mode]);
+  }, [compact, cssContent, fidelity, height, htmlContent, mode, trustedCss]);
 
   useEffect(() => {
     if (typeof height === 'number') {

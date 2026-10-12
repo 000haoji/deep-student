@@ -364,7 +364,31 @@
     "captureNotReady": "The video frame hasn't loaded yet",
     "captureTainted": "This video source doesn't allow reading frames",
     "frameTitle": "{{name}} · ▶ {{time}}",
-    "resumed": "Resumed from {{time}}"
+    "resumed": "Resumed from {{time}}",
+    "selectMode": "Select lines",
+    "selectDone": "Done selecting",
+    "selectSegment": "Select {{time}}",
+    "selectionToolbar": "Actions for selected lines",
+    "selectedCount": "Selected: {{count}}",
+    "selectHint": "Tap lines to select; Shift-click selects a range",
+    "quoteSelection": "Quote in chat",
+    "cardsFromSelection": "Make cards",
+    "quoteIntro": "Transcript of “{{name}}” from {{ref}}:",
+    "quoteFailed": "Couldn't quote in chat",
+    "textSize": "Transcript text size: {{size}} (click to change)",
+    "textSizeLabel": {
+      "sm": "small",
+      "base": "medium",
+      "lg": "large"
+    }
+  },
+  "mediaCards": {
+    "deckName": "Media",
+    "tooShort": "Not enough transcript to make cards",
+    "started": "Making cards. They'll go into flashcard review, with a link back to the lecture on the back",
+    "failed": "Couldn't make cards",
+    "openTaskDashboard": "View task",
+    "selectionRequirement": "Only make cards from the selected lines; don't go beyond them."
   },
   "mediaBilibili": {
     "fromLink": "Get subtitles from a Bilibili link…",
@@ -1571,7 +1595,8 @@
       "renameTagMergeHint": "A tag with this name already exists; confirming will merge them",
       "renameTagSuccess": "Tag renamed",
       "renameTagFailed": "Failed to rename tag",
-      "viewQuestion": "View question"
+      "viewQuestion": "View question",
+      "viewAnswer": "View answer"
     }
   },
   "diagnostic": {
@@ -1729,5 +1754,29 @@
       "emptyHint": "They may have been deleted. Refresh the mistake book to check.",
       "skipped": "Skipped deleted: {{count}}"
     }
+  },
+  "mediaCheckpoint": {
+    "title": "Checkpoint · {{time}}",
+    "pauseAt": "Pause here",
+    "later": "Later",
+    "submit": "Submit",
+    "showAnswer": "Show reference answer",
+    "referenceAnswer": "Reference answer: {{answer}}",
+    "selfCorrect": "I got it",
+    "selfWrong": "I missed it",
+    "correct": "Correct",
+    "wrong": "Not quite",
+    "correctAnswer": "Answer: {{answer}}",
+    "manualGrading": "Submitted. Compare with the reference answer",
+    "rewatch": "Rewatch this part",
+    "resume": "Keep watching",
+    "submitFailed": "Couldn't submit the answer",
+    "true": "True",
+    "false": "False",
+    "toolbar": "Checkpoints {{done}}/{{total}}",
+    "toolbarTitle": "{{total}} questions are anchored to moments in this lecture and pop up as you watch. Click to do the next one"
+  },
+  "mediaChapters": {
+    "current": "Chapter: {{title}}"
   }
 }

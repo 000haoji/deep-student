@@ -302,6 +302,15 @@ jobs:
           cmp -s "$SRC" "$DST" || { echo "::error::HeicDecoderPlugin.kt sync verification failed"; exit 1; }
           echo "✅ HeicDecoderPlugin.kt synced from managed copy"
 
+          # 沉浸式全屏（#472）：插件只转发到 MainActivity.setImmersiveMode。缺失时
+          # set_android_immersive_mode 在 register_android_plugin 阶段即启动失败，fail-closed。
+          SRC="src-tauri/mobile/android/SystemBarsPlugin.kt"
+          DST="src-tauri/gen/android/app/src/main/java/com/deepstudent/app/SystemBarsPlugin.kt"
+          test -f "$SRC" || { echo "::error::managed SystemBarsPlugin.kt missing at $SRC"; exit 1; }
+          cp "$SRC" "$DST"
+          cmp -s "$SRC" "$DST" || { echo "::error::SystemBarsPlugin.kt sync verification failed"; exit 1; }
+          echo "✅ SystemBarsPlugin.kt synced from managed copy"
+
           # 应用内 APK 安装器：插件类 + FileProvider 路径配置 + manifest provider。
           # 缺失时 install_apk 命令在运行期才报错（用户点了"下载并安装"才发现装不了），
           # 因此这里 fail-closed。与 build_android.sh 的 sync_apk_installer_files /
@@ -490,7 +499,32 @@ jobs:
             --in /tmp/aligned.apk \
             --out /tmp/signed.apk
 
-          "${BUILD_TOOLS}/apksigner" verify --print-certs /tmp/signed.apk
+          "${BUILD_TOOLS}/apksigner" verify --print-certs /tmp/signed.apk | tee /tmp/apk-certs.txt
+
+          # 发布守卫（#471）：签名证书必须与受控指纹一致。v0.9.61 曾随 keystore secret
+          # 更换静默换了签名证书，存量用户覆盖安装一律报"与现有软件包存在冲突"，只能
+          # 卸载重装。这里 fail-closed，防止 secret 被误替换后再次发出不可升级的 APK。
+          EXPECTED_CERT=$(grep -v '^#' src-tauri/mobile/android/release-signing-cert.sha256 | tr -d '[:space:]' | tr 'A-F' 'a-f')
+          ACTUAL_CERT=$(awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}' /tmp/apk-certs.txt | tr -d '[:space:]' | tr 'A-F' 'a-f')
+          echo "APK signing cert SHA-256: ${ACTUAL_CERT:-unknown} (expected: ${EXPECTED_CERT})"
+          if [ -z "$EXPECTED_CERT" ] || [ "$ACTUAL_CERT" != "$EXPECTED_CERT" ]; then
+            echo "::error::APK signing certificate does not match src-tauri/mobile/android/release-signing-cert.sha256."
+            echo "::error::Existing installs could not upgrade (INSTALL_FAILED_UPDATE_INCOMPATIBLE). Check the ANDROID_KEYSTORE_* secrets."
+            rm -f /tmp/release.keystore
+            exit 1
+          fi
+
+          # 发布守卫（#471）：versionCode 必须等于生成器的稳定值且高于已发布基线，
+          # 否则覆盖安装会被系统当作降级拒绝。
+          EXPECTED_VERSION_CODE=$(node scripts/generate-version.mjs --print-android-version-code)
+          PUBLISHED_VERSION_CODE=$(node --input-type=module -e "import('./scripts/generate-version.mjs').then((m) => console.log(m.PUBLISHED_ANDROID_VERSION_CODE))")
+          ACTUAL_VERSION_CODE=$("${BUILD_TOOLS}/aapt" dump badging /tmp/signed.apk | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)
+          echo "APK versionCode: ${ACTUAL_VERSION_CODE:-unknown} (expected: ${EXPECTED_VERSION_CODE}, published floor: ${PUBLISHED_VERSION_CODE})"
+          if [ -z "$ACTUAL_VERSION_CODE" ] || [ "$ACTUAL_VERSION_CODE" != "$EXPECTED_VERSION_CODE" ] || [ "$ACTUAL_VERSION_CODE" -le "$PUBLISHED_VERSION_CODE" ]; then
+            echo "::error::APK versionCode ${ACTUAL_VERSION_CODE:-missing} is not the expected monotonic value ${EXPECTED_VERSION_CODE} (> ${PUBLISHED_VERSION_CODE})."
+            rm -f /tmp/release.keystore
+            exit 1
+          fi
 
           # Android 8+ requires this declaration for the in-app APK installer.
           # Check the packaged manifest, not only the generated source manifest.

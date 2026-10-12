@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { QuestionFollowUpBar } from './practice/QuestionFollowUpBar';
 import { useTranslation } from 'react-i18next';
-import { invoke } from '@tauri-apps/api/core';
 import { cn } from '../lib/utils';
 import { CustomScrollArea } from './custom-scroll-area';
 import { DsButton } from '@/components/ui/DsButton';
@@ -21,8 +20,11 @@ import { isKeyEventFromOtherModal } from '@/utils/modalKeyGuard';
 import { MarkdownRenderer, StreamingMarkdownRenderer } from '@/features/chat/components/renderers';
 import { LatexText } from '@/components/LatexText';
 import { ImageCropDialog } from '@/components/ImageCropDialog';
+import { loadQuestionImageUrls, QUESTION_IMAGE_LOAD_ERROR } from '@/components/questionImageLoader';
 import { registerBackHandler, BACK_PRIORITY } from '@/app/navigation/androidBackCoordinator';
 import DsAnalysisIconMuted from '@/components/icons/DsAnalysisIconMuted';
+import { AiExplanationWriteButton } from './practice/AiExplanationWriteButton';
+import { resolveAiExplanationWrite } from './practice/aiExplanation';
 import {
   CaretLeft,
   CaretRight,
@@ -119,8 +121,13 @@ export interface QuestionBankEditorProps {
   currentIndex?: number;
   isLoading?: boolean;
   error?: string | null;
-  /** 编辑模式（true=编辑题目信息，false=做题模式） */
-  editMode?: boolean;
+  /**
+   * 只读浏览（#466）：直接显示选项正确项、参考答案与解析，不作答、不计时、不记录练习进度；
+   * 提供 onRefreshQuestion（可写）时附带 AI 解析入口。false = 做题模式。
+   */
+  browseMode?: boolean;
+  /** 浏览模式：从当前题进入做题 */
+  onPracticeQuestion?: (questionId: string) => void;
   /** 练习模式（从 store 传入，SSOT） */
   practiceMode?: PracticeMode;
   /** 当前标签（用于按标签练习的同步） */
@@ -307,6 +314,37 @@ const QuestionContentBlock = React.memo<{ content: string }>(({ content }) => (
 QuestionContentBlock.displayName = 'QuestionContentBlock';
 
 /** 自动关联的原始图片折叠气泡 — 默认展开 */
+/** 题目图片占位：已加载显示图片，失败显示错误占位，其余显示加载动画 */
+const QuestionImageSlot: React.FC<{
+  url: string | undefined;
+  alt: string;
+  collapsedClassName: string;
+  placeholderClassName: string;
+  iconSize: number;
+}> = ({ url, alt, collapsedClassName, placeholderClassName, iconSize }) => {
+  const { t } = useTranslation('exam_sheet');
+  if (url && url !== QUESTION_IMAGE_LOAD_ERROR) {
+    return <InlineZoomImage src={url} alt={alt} collapsedClassName={collapsedClassName} />;
+  }
+  if (url === QUESTION_IMAGE_LOAD_ERROR) {
+    return (
+      <div
+        role="img"
+        aria-label={t('image.load_failed')}
+        className={cn('w-full flex flex-col items-center justify-center gap-1 text-xs text-muted-foreground', placeholderClassName)}
+      >
+        <WarningCircle size={iconSize} />
+        <span>{t('image.load_failed')}</span>
+      </div>
+    );
+  }
+  return (
+    <div className={cn('w-full flex items-center justify-center text-muted-foreground', placeholderClassName)}>
+      <CircleNotch size={iconSize} className="animate-spin" />
+    </div>
+  );
+};
+
 const SourceImagesBubble: React.FC<{
   images: QuestionImage[];
   imageUrls: Record<string, string>;
@@ -336,17 +374,13 @@ const SourceImagesBubble: React.FC<{
         )}>
           {images.map((img) => (
             <div key={img.id} className="rounded-lg overflow-hidden border border-border/30 bg-muted/20">
-              {imageUrls[img.id] ? (
-                <InlineZoomImage
-                  src={imageUrls[img.id]}
-                  alt={img.name}
-                  collapsedClassName="max-h-64"
-/>
-              ) : (
-                <div className="w-full h-24 flex items-center justify-center text-muted-foreground">
-                  <CircleNotch size={16} className="animate-spin" />
-                </div>
-              )}
+              <QuestionImageSlot
+                url={imageUrls[img.id]}
+                alt={img.name}
+                collapsedClassName="max-h-64"
+                placeholderClassName="h-24"
+                iconSize={16}
+              />
             </div>
           ))}
         </div>
@@ -530,7 +564,8 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
   timerRunning,
   onTimerRunningChange,
   allowTimerControl = true,
-  editMode = false,
+  browseMode = false,
+  onPracticeQuestion,
   focusMode: focusModeProp,
   onFocusModeChange,
   settingsPanelOpen,
@@ -1027,32 +1062,18 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
       const loadImages = async () => {
         const cachedSnapshot = questionImageUrlsRef.current;
         const imagesToLoad = currentQuestion.images!.filter(
-          img => !cachedSnapshot[img.id] || cachedSnapshot[img.id] === 'error'
+          img => !cachedSnapshot[img.id] || cachedSnapshot[img.id] === QUESTION_IMAGE_LOAD_ERROR
         );
         const cachedUrls: Record<string, string> = {};
         currentQuestion.images!.forEach(img => {
-          if (cachedSnapshot[img.id] && cachedSnapshot[img.id] !== 'error') {
+          if (cachedSnapshot[img.id] && cachedSnapshot[img.id] !== QUESTION_IMAGE_LOAD_ERROR) {
             cachedUrls[img.id] = cachedSnapshot[img.id];
           }
         });
-        const results = await Promise.allSettled(
-          imagesToLoad.map(async (img) => {
-            const result = await invoke<{ content: string | null; found: boolean }>('vfs_get_attachment_content', {
-              attachmentId: img.id,
-            });
-            if (result.found && result.content) {
-              return { id: img.id, url: `data:${img.mime};base64,${result.content}` };
-            }
-            return null;
-          })
-        );
+        // 失败也写入 'error' 哨兵，占位显示加载失败而不是无限转圈（#465）
+        const loadedUrls = await loadQuestionImageUrls(imagesToLoad);
         if (cancelled) return;
-        const urls: Record<string, string> = { ...cachedUrls };
-        results.forEach(r => {
-          if (r.status === 'fulfilled' && r.value) {
-            urls[r.value.id] = r.value.url;
-          }
-        });
+        const urls: Record<string, string> = { ...cachedUrls, ...loadedUrls };
         setQuestionImageUrls(prev => {
           const merged = { ...prev, ...urls };
           const keys = Object.keys(merged);
@@ -1466,14 +1487,17 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
   const handleNavigate = useCallback((direction: 'prev' | 'next') => {
     const newIndex = direction === 'prev'
       ? Math.max(0, currentIndex - 1)
-      : getNextQuestionIndex(questions, currentIndex, practiceMode, selectedTag);
+      : browseMode
+        // 浏览按题目顺序逐题看，不受练习模式（随机/错题优先等）影响
+        ? Math.min(currentIndex + 1, Math.max(questions.length - 1, 0))
+        : getNextQuestionIndex(questions, currentIndex, practiceMode, selectedTag);
     requestNavigate(newIndex);
-  }, [currentIndex, practiceMode, questions, requestNavigate, selectedTag]);
+  }, [browseMode, currentIndex, practiceMode, questions, requestNavigate, selectedTag]);
 
   // ========== 键盘快捷键支持 ==========
   useEffect(() => {
-    // 编辑模式和移动端不启用快捷键；窗口/标签页非激活时不监听（多窗做题与复习评分共用数字键，避免互扰）
-    if (editMode || isSmallScreen || isActive === false) return;
+    // 移动端不启用快捷键；窗口/标签页非激活时不监听（多窗做题与复习评分共用数字键，避免互扰）
+    if (isSmallScreen || isActive === false) return;
     
     const handleKeyDown = (e: KeyboardEvent) => {
       // 带修饰键的组合（Ctrl+R 刷新、Ctrl+数字切标签等）不拦截
@@ -1490,7 +1514,19 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
       if (isKeyEventFromOtherModal(e, containerRef.current)) {
         return;
       }
-      
+
+      // 浏览模式只有 ← → 切题
+      if (browseMode) {
+        if (e.key === 'ArrowLeft' && currentIndex > 0) {
+          e.preventDefault();
+          handleNavigate('prev');
+        } else if (e.key === 'ArrowRight' && currentIndex < totalQuestions - 1) {
+          e.preventDefault();
+          handleNavigate('next');
+        }
+        return;
+      }
+
       const isChoiceQuestion = currentQuestion?.questionType === 'single_choice' 
         || currentQuestion?.questionType === 'multiple_choice'
         || currentQuestion?.questionType === 'indefinite_choice';
@@ -1577,7 +1613,7 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
-    editMode, isSmallScreen, isActive, currentQuestion, qType, submitResult, canSubmit, isSubmitting,
+    browseMode, isSmallScreen, isActive, currentQuestion, qType, submitResult, canSubmit, isSubmitting,
     currentIndex, totalQuestions, showTimer, hideAnswerMode, answerRevealed,
     handleOptionClick, handleSubmit, handleNavigate, handleRetry, toggleTimer,
     handleHideAnswerModeChange, handleToggleFavorite
@@ -1666,6 +1702,106 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
 
   // 提交结果里的 explanation 可能缺失（会话 hook 不返回该字段），回退到题目自身解析
   const effectiveExplanation = submitResult?.explanation || currentQuestion.explanation || '';
+
+  // ========== 浏览模式：AI 解析（#467，无需作答） ==========
+  // 本次流式结果 > 本地缓存（比 prop 新）> 题目上持久化的 ai_feedback
+  const browseAiText = aiGrading.state.feedback
+    || aiFeedbackCacheRef.current.get(currentQuestion.id)
+    || currentQuestion.ai_feedback
+    || '';
+
+  const startBrowseAiExplanation = () => {
+    if (!onRefreshQuestion) return;
+    const qId = currentQuestion.id;
+    resetAiGrading();
+    // 不带作答记录：后端生成通用解析，原解析为空时直接写入题目解析
+    startAiGrading(qId, null, 'analyze', undefined, (_verdict, _score, feedback) => {
+      if (feedback) aiFeedbackCacheRef.current.set(qId, feedback);
+      onRefreshQuestion(qId).catch((err) => {
+        debugLog.warn('[QuestionBankEditor] refresh after AI explanation failed:', err);
+      });
+    }).catch((err) => { debugLog.error('[QuestionBankEditor] AI explanation failed:', err); });
+  };
+
+  const renderBrowseAiSection = () => {
+    // 只读宿主（不可写题目）不提供 AI 解析：生成结果会写库
+    if (!browseMode || !onRefreshQuestion) return null;
+    const refreshCurrent = () => onRefreshQuestion(currentQuestion.id);
+    if (aiGrading.state.isGrading) {
+      return (
+        <div className="pt-3 border-t border-foreground/[0.06] space-y-2">
+          <div className="flex items-center gap-2">
+            <DsAnalysisIconMuted className="w-4 h-4 text-info animate-pulse" />
+            <span className="text-sm text-info">{t('editor.aiAnalyzing')}</span>
+            <DsButton variant="ghost" size="sm" onClick={() => aiGrading.cancelGrading()} className="ml-auto !h-auto !p-0 text-xs text-muted-foreground hover:text-foreground">
+              {t('common:cancel')}
+            </DsButton>
+          </div>
+          {aiGrading.state.feedback && (
+            <div className="text-sm text-muted-foreground leading-relaxed">
+              <StreamingMarkdownRenderer content={aiGrading.state.feedback} isStreaming={true} />
+            </div>
+          )}
+        </div>
+      );
+    }
+    // 与题目解析相同（刚回填进去）时不重复展示
+    const showAiText = resolveAiExplanationWrite(currentQuestion.explanation, browseAiText) !== 'none';
+    return (
+      <div className="pt-3 border-t border-foreground/[0.06] space-y-2">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {showAiText ? (
+            <span className="flex items-center gap-1.5 text-sm text-info">
+              <DsAnalysisIconMuted className="w-4 h-4" />
+              {t('editor.aiAnalysis')}
+            </span>
+          ) : (
+            <DsButton variant="ghost" size="sm" onClick={startBrowseAiExplanation} className="!h-auto !p-0 text-info hover:underline">
+              <DsAnalysisIconMuted className="w-4 h-4" />
+              {t('editor.aiAnalysis')}
+            </DsButton>
+          )}
+          {showAiText && (
+            <div className="ml-auto flex items-center gap-1">
+              <AiExplanationWriteButton
+                questionId={currentQuestion.id}
+                explanation={currentQuestion.explanation}
+                aiText={browseAiText}
+                onWritten={refreshCurrent}
+              />
+              <DsButton variant="ghost" size="sm" onClick={startBrowseAiExplanation} className="!h-auto !px-1.5 !py-0.5 text-xs text-muted-foreground hover:text-foreground">
+                <ArrowClockwise size={12} />
+                {t('editor.aiRegenerate')}
+              </DsButton>
+            </div>
+          )}
+        </div>
+        {aiGrading.state.error && (
+          <div className="flex items-center gap-1.5 text-xs text-warning">
+            <WarningCircle size={12} />
+            {aiGrading.state.error}
+          </div>
+        )}
+        {showAiText && (
+          <div className="text-sm text-muted-foreground leading-relaxed">
+            <StreamingMarkdownRenderer content={browseAiText} isStreaming={false} />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  const browsePracticeButton = browseMode && onPracticeQuestion ? (
+    <DsButton
+      variant="ghost"
+      size="sm"
+      onClick={() => onPracticeQuestion(currentQuestion.id)}
+      className="ml-auto !h-auto !px-2 !py-1 text-xs text-primary hover:bg-primary/10"
+    >
+      <PaperPlaneRight size={14} />
+      {t('editor.practiceThisQuestion')}
+    </DsButton>
+  ) : null;
 
   // 题目切换滑动过渡：key 变化触发重新挂载 + 方向化滑入
   const questionTransitionStyle = {
@@ -2156,7 +2292,7 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
   // ========== 提交结果卡片（移动端与桌面端共用） ==========
   // 包含：AI 判分流式结果 / 失败重试 / 手动批改兜底 / 解析折叠 / 客观题 AI 解析
   const renderSubmitResultCard = (extraClassName?: string) => {
-    if (!submitResult || editMode) return null;
+    if (!submitResult || browseMode) return null;
     return (
       <div
         className={cn(
@@ -2449,6 +2585,15 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                   <div className="flex items-center gap-1.5 text-sm text-info">
                     <DsAnalysisIconMuted className="w-4 h-4" />
                     {t('editor.aiAnalysis')}
+                    {onRefreshQuestion && !aiGrading.state.error && (
+                      <AiExplanationWriteButton
+                        className="ml-auto"
+                        questionId={currentQuestion.id}
+                        explanation={currentQuestion.explanation}
+                        aiText={aiGrading.state.feedback}
+                        onWritten={() => onRefreshQuestion(currentQuestion.id)}
+                      />
+                    )}
                   </div>
                   {aiGrading.state.error && (
                     <div className="flex items-center gap-1.5 text-xs text-warning">
@@ -2482,6 +2627,15 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                   <div className="flex items-center gap-1.5 text-sm text-info">
                     <DsAnalysisIconMuted className="w-4 h-4" />
                     {t('editor.aiAnalysis')}
+                    {onRefreshQuestion && (
+                      <AiExplanationWriteButton
+                        className="ml-auto"
+                        questionId={currentQuestion.id}
+                        explanation={currentQuestion.explanation}
+                        aiText={currentQuestion.ai_feedback || aiFeedbackCacheRef.current.get(currentQuestion.id)}
+                        onWritten={() => onRefreshQuestion(currentQuestion.id)}
+                      />
+                    )}
                   </div>
                   <div className="text-sm text-muted-foreground leading-relaxed">
                     <StreamingMarkdownRenderer
@@ -2581,17 +2735,19 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                           {t(`questionBank.difficulty.${DIFFICULTY_I18N_KEY[currentQuestion.difficulty]}`)}
                         </Badge>
                       )}
-                      <DsButton
-                        variant="ghost"
-                        size="icon"
-                        iconOnly
-                        onClick={() => setShowSettingsPanel(true)}
-                        className="ml-auto [@media(pointer:coarse)]:!min-h-11 [@media(pointer:coarse)]:!min-w-11"
-                        aria-label={t('questionBank.settings', 'Settings')}
-                        title={t('questionBank.settings', 'Settings')}
-                      >
-                        <GearSix size={18} />
-                      </DsButton>
+                      {browseMode ? browsePracticeButton : (
+                        <DsButton
+                          variant="ghost"
+                          size="icon"
+                          iconOnly
+                          onClick={() => setShowSettingsPanel(true)}
+                          className="ml-auto [@media(pointer:coarse)]:!min-h-11 [@media(pointer:coarse)]:!min-w-11"
+                          aria-label={t('questionBank.settings', 'Settings')}
+                          title={t('questionBank.settings', 'Settings')}
+                        >
+                          <GearSix size={18} />
+                        </DsButton>
+                      )}
                     </div>
                   </CardHeader>
                   <CardContent className="space-y-4">
@@ -2615,17 +2771,13 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                             )}>
                               {confirmedImages.map((img) => (
                                 <div key={img.id} className="rounded-lg overflow-hidden border border-border/40 bg-muted/20">
-                                  {questionImageUrls[img.id] ? (
-                                    <InlineZoomImage
-                                      src={questionImageUrls[img.id]}
-                                      alt={img.name}
-                                      collapsedClassName="max-h-48"
-/>
-                                  ) : (
-                                    <div className="w-full h-24 flex items-center justify-center text-muted-foreground">
-                                      <CircleNotch size={16} className="animate-spin" />
-                                    </div>
-                                  )}
+                                  <QuestionImageSlot
+                                    url={questionImageUrls[img.id]}
+                                    alt={img.name}
+                                    collapsedClassName="max-h-48"
+                                    placeholderClassName="h-24"
+                                    iconSize={16}
+                                  />
                                 </div>
                               ))}
                             </div>
@@ -2652,8 +2804,8 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                       {t('common:question_bank.source_images')}
                     </DsButton>
 
-                    {/* 答题区域 */}
-                    {editMode ? (
+                    {/* 答题区域（浏览模式：只读答案与解析） */}
+                    {browseMode ? (
                       <div className="space-y-3">
                         {isChoiceQuestion && currentQuestion.options && (
                           <div className="space-y-2">
@@ -2704,6 +2856,12 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                             </div>
                           </div>
                         )}
+                        {!structuredAnswerSummaryNode && !currentQuestion.answer && !currentQuestion.explanation && (
+                          <div className="rounded-md bg-muted/50 p-3 text-center">
+                            <p className="text-sm text-muted-foreground">{t('editor.noAnswerOrExplanation')}</p>
+                          </div>
+                        )}
+                        {renderBrowseAiSection()}
                       </div>
                     ) : (
                       <>
@@ -2843,8 +3001,8 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
         <div className="max-w-3xl mx-auto px-3 py-3 sm:p-4 space-y-3 sm:space-y-4">
           {/* 完成庆祝（内联） */}
           {renderCompletionCelebration()}
-          {/* 统计卡片 - 专注模式下隐藏 */}
-          {stats && !focusMode && (
+          {/* 统计卡片 - 专注模式 / 浏览模式下隐藏 */}
+          {stats && !focusMode && !browseMode && (
             <>
               {/* 移动端：单行摘要 */}
               <div className="flex sm:hidden items-center justify-between px-3 py-2 rounded-lg bg-muted/30 text-xs">
@@ -2924,18 +3082,20 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                     {t(`questionBank.status.${STATUS_I18N_KEY[currentQuestion.status]}`)}
                   </span>
                 )}
-                <DsButton
-                  variant="ghost"
-                  size="sm"
-                  iconOnly
-                  onClick={() => setShowSettingsPanel(!showSettingsPanel)}
-                  aria-label={t('editor.settings')}
-                  aria-pressed={showSettingsPanel}
-                  title={t('editor.settings')}
-                  className="ml-auto [@media(pointer:coarse)]:!min-h-11 [@media(pointer:coarse)]:!min-w-11"
-                >
-                  <GearSix size={16} />
-                </DsButton>
+                {browseMode ? browsePracticeButton : (
+                  <DsButton
+                    variant="ghost"
+                    size="sm"
+                    iconOnly
+                    onClick={() => setShowSettingsPanel(!showSettingsPanel)}
+                    aria-label={t('editor.settings')}
+                    aria-pressed={showSettingsPanel}
+                    title={t('editor.settings')}
+                    className="ml-auto [@media(pointer:coarse)]:!min-h-11 [@media(pointer:coarse)]:!min-w-11"
+                  >
+                    <GearSix size={16} />
+                  </DsButton>
+                )}
               </div>
 
               {/* 标签 - 专注模式下隐藏 */}
@@ -2974,17 +3134,13 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                       )}>
                         {confirmedImgs.map((img) => (
                           <div key={img.id} className="rounded-lg overflow-hidden border border-border/40 bg-muted/20">
-                            {questionImageUrls[img.id] ? (
-                              <InlineZoomImage
-                                src={questionImageUrls[img.id]}
-                                alt={img.name}
-                                collapsedClassName="max-h-64"
-/>
-                            ) : (
-                              <div className="w-full h-32 flex items-center justify-center text-muted-foreground">
-                                <CircleNotch size={20} className="animate-spin" />
-                              </div>
-                            )}
+                            <QuestionImageSlot
+                              url={questionImageUrls[img.id]}
+                              alt={img.name}
+                              collapsedClassName="max-h-64"
+                              placeholderClassName="h-32"
+                              iconSize={20}
+                            />
                           </div>
                         ))}
                       </div>
@@ -3007,8 +3163,8 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                 {t('common:question_bank.source_images')}
               </DsButton>
 
-              {/* 编辑模式：直接显示答案和解析 */}
-              {editMode ? (
+              {/* 浏览模式：直接显示答案和解析（只读） */}
+              {browseMode ? (
                 <div className="space-y-4">
                   {/* 选项展示（只读） */}
                   {isChoiceQuestion && currentQuestion.options && (
@@ -3074,6 +3230,8 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                       <p className="text-sm text-muted-foreground">{t('editor.noAnswerOrExplanation')}</p>
                     </div>
                   )}
+
+                  {renderBrowseAiSection()}
                 </div>
               ) : (
                 /* 做题模式：答题 UI */
@@ -3134,7 +3292,7 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
               {renderSubmitResultCard()}
 
               {/* 用户笔记：内联展开编辑，失焦自动保存 */}
-              {!editMode && (
+              {!browseMode && (
                 <div className="pt-4 border-t border-border/30">
                   {isEditingNote ? (
                     <div className="ui-rise-in space-y-2">

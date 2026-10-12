@@ -26,7 +26,8 @@ use crate::question_bank_service::{
 use crate::vfs::repos::{
     CreateQuestionParams, Difficulty, Question, QuestionFilters, QuestionImage, QuestionOption,
     QuestionSearchFilters, QuestionStatus, QuestionType as RepoQuestionType, SearchSortBy,
-    SourceType as RepoSourceType, UpdateQuestionParams, VfsExamRepo, VfsQuestionRepo,
+    SourceType as RepoSourceType, UpdateQuestionParams, VfsAttachmentRepo, VfsExamRepo,
+    VfsQuestionRepo,
 };
 
 static QBANK_WRITE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -1139,6 +1140,56 @@ fn parse_question_images(value: &Value) -> Result<Vec<QuestionImage>, String> {
         .collect()
 }
 
+/// 把题目图片里的 `res_*` 资源 ID 归一为 files 主键（#465）
+///
+/// 前端按 images_json[].id 调 `vfs_get_attachment_content` 取图；模型常把检索/
+/// 上下文里的 `resourceId`（res_*）当附件 ID 传进来。与裁剪入库、文档导入一致，
+/// 落库前换成 files 主键并补齐 blob hash / mime / 文件名；解析不到文件的资源
+/// （笔记、题目集等）直接拒绝，避免写入永远加载不出的图片。
+fn normalize_question_image_ids(
+    vfs_db: Option<&crate::vfs::database::VfsDatabase>,
+    images: &mut [QuestionImage],
+) -> Result<(), String> {
+    if !images.iter().any(|image| image.id.starts_with("res_")) {
+        return Ok(());
+    }
+    // 无 VFS 连接时保持原样：读取侧 vfs_get_attachment_content 同样能解析 res_*
+    let Some(vfs_db) = vfs_db else {
+        return Ok(());
+    };
+    let conn = vfs_db.get_conn_safe().map_err(|error| error.to_string())?;
+    for (index, image) in images.iter_mut().enumerate() {
+        if !image.id.starts_with("res_") {
+            continue;
+        }
+        let record = VfsAttachmentRepo::resolve_file_id_with_conn(&conn, &image.id)
+            .map_err(|error| error.to_string())?
+            .map(|file_id| VfsAttachmentRepo::get_by_id_with_conn(&conn, &file_id))
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .flatten()
+            .filter(|record| record.deleted_at.is_none())
+            .ok_or_else(|| {
+                qbank_error(
+                    "INVALID_ARGS",
+                    format!("images[{index}].id={} 不是可加载的图片文件", image.id),
+                    "该资源未关联图片文件；用 attachment_list 取 att_/file_ 开头的附件 ID 后重试",
+                )
+            })?;
+        image.id = record.id;
+        if let Some(blob_hash) = record.blob_hash.filter(|hash| !hash.is_empty()) {
+            image.hash = blob_hash;
+        }
+        if record.mime_type.starts_with("image/") {
+            image.mime = record.mime_type;
+        }
+        if image.name.trim().is_empty() {
+            image.name = record.name;
+        }
+    }
+    Ok(())
+}
+
 fn parse_qbank_grading_mode(args: &Value) -> Result<QbankGradingMode, String> {
     match args.get("mode").and_then(Value::as_str).unwrap_or("grade") {
         "grade" => Ok(QbankGradingMode::Grade),
@@ -1149,6 +1200,28 @@ fn parse_qbank_grading_mode(args: &Value) -> Result<QbankGradingMode, String> {
             "mode 只能是 grade 或 analyze",
         )),
     }
+}
+
+/// AI 评判的 submission_id：grade 必填；analyze 可省略（#467：省略时生成与作答无关的
+/// 通用解析，题目原解析为空时回填 explanation，不必为补解析伪造作答记录）。
+fn parse_ai_grade_submission_id(
+    args: &Value,
+    mode: &QbankGradingMode,
+) -> Result<Option<String>, String> {
+    let submission_id = args
+        .get("submission_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if submission_id.is_none() && *mode == QbankGradingMode::Grade {
+        return Err(qbank_error(
+            "INVALID_ARGS",
+            "grade 模式缺少 submission_id",
+            "先调用 qbank_submit_answer 并传入其返回的 submission_id；只想生成解析请用 mode=analyze",
+        ));
+    }
+    Ok(submission_id)
 }
 
 /// R1-04 / R2-01 / docs/dev/acr/DESIGN.md §5.6：题库写操作成功后通知前端刷新。
@@ -1813,11 +1886,14 @@ impl QBankExecutor {
             .get("tags")
             .map(|value| parse_string_array(value, "tags", 50, 100))
             .transpose()?;
-        let images = call
+        let mut images = call
             .arguments
             .get("images")
             .map(parse_question_images)
             .transpose()?;
+        if let Some(images) = images.as_mut() {
+            normalize_question_image_ids(ctx.vfs_db.as_deref(), images)?;
+        }
         let difficulty = call
             .arguments
             .get("difficulty")
@@ -2823,7 +2899,9 @@ impl QBankExecutor {
             changed_fields.push("status");
         }
         if let Some(value) = call.arguments.get("images") {
-            params.images = Some(parse_question_images(value)?);
+            let mut images = parse_question_images(value)?;
+            normalize_question_image_ids(ctx.vfs_db.as_deref(), &mut images)?;
+            params.images = Some(images);
             changed_fields.push("images");
         }
         if call
@@ -2936,20 +3014,8 @@ impl QBankExecutor {
             .ok_or("LLM manager not available")?
             .clone();
 
-        let submission_id = call
-            .arguments
-            .get("submission_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                qbank_error(
-                    "INVALID_ARGS",
-                    "缺少 submission_id",
-                    "先调用 qbank_submit_answer，并传入其返回的 submission_id",
-                )
-            })?
-            .to_string();
+        let mode = parse_qbank_grading_mode(&call.arguments)?;
+        let submission_id = parse_ai_grade_submission_id(&call.arguments, &mode)?;
 
         let question_id = if let Some(question_id) = call
             .arguments
@@ -3001,7 +3067,6 @@ impl QBankExecutor {
             question.id
         };
 
-        let mode = parse_qbank_grading_mode(&call.arguments)?;
         let stream_session_id = format!("agent-{}-{}", ctx.session_id, call.id);
         let stream_event = format!("qbank_grading_stream_{stream_session_id}");
         let request = QbankGradingRequest {
@@ -3041,7 +3106,17 @@ impl QBankExecutor {
         match response {
             Some(response) => {
                 emit_qbank_changed(ctx, "ai_grade", &[question_id]);
-                serde_json::to_value(response).map_err(|error| error.to_string())
+                let standalone_kept_existing =
+                    response.submission_id.is_none() && !response.explanation_written;
+                let mut value =
+                    serde_json::to_value(response).map_err(|error| error.to_string())?;
+                if standalone_kept_existing {
+                    // 已有解析不被静默覆盖：告诉模型如何显式替换
+                    value["explanation_hint"] = json!(
+                        "题目已有解析，本次结果只存为 AI 解析（ai_feedback）；如需替换题目解析，用 qbank_update_question 写 explanation"
+                    );
+                }
+                Ok(value)
             }
             None => Ok(json!({
                 "cancelled": true,
@@ -5252,6 +5327,47 @@ mod occ_contract_tests {
         }
     }
 
+    // ★ #465 回归：AI 传入的 res_* 资源 ID 落库前归一为可加载的 files 主键
+    #[test]
+    fn question_image_resource_ids_are_normalized_to_file_ids() {
+        let (_tmp, db) = crate::vfs::database::setup_migrated_test_db();
+        {
+            let conn = db.get_conn().expect("conn");
+            let now = chrono::Utc::now().timestamp_millis();
+            conn.execute(
+                r#"INSERT INTO files (id, sha256, blob_hash, file_name, name, mime_type, type, size, created_at, updated_at)
+                   VALUES ('att_fig', 'sha-fig', NULL, 'fig.jpg', 'fig.jpg', 'image/jpeg', 'image', 1, '2026-10-11', '2026-10-11')"#,
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                r#"INSERT INTO resources (id, hash, type, storage_mode, data, source_id, ref_count, created_at, updated_at)
+                   VALUES ('res_fig', 'h-fig', 'image', 'inline', '{"refs":[]}', 'att_fig', 1, ?1, ?1),
+                          ('res_note', 'h-note', 'note', 'inline', '# note', 'note_1', 1, ?1, ?1)"#,
+                rusqlite::params![now],
+            )
+            .unwrap();
+        }
+
+        let mut images = parse_question_images(&json!([
+            {"id": "res_fig"},
+            {"id": "file_keep", "name": "keep.png", "hash": "abc"}
+        ]))
+        .expect("valid images");
+        normalize_question_image_ids(Some(&db), &mut images).expect("normalize");
+        assert_eq!(images[0].id, "att_fig");
+        assert_eq!(images[0].mime, "image/jpeg");
+        assert_eq!(images[0].name, "fig.jpg");
+        assert_eq!(images[1].id, "file_keep");
+        assert_eq!(images[1].hash, "abc");
+
+        let mut unresolvable = parse_question_images(&json!([{"id": "res_note"}])).unwrap();
+        let error = normalize_question_image_ids(Some(&db), &mut unresolvable)
+            .expect_err("non-file resource must be rejected");
+        let structured: Value = serde_json::from_str(&error).expect("structured error");
+        assert_eq!(structured["code"], "INVALID_ARGS");
+    }
+
     #[test]
     fn unsafe_preview_update_error_is_fail_closed() {
         let error: Value = serde_json::from_str(&qbank_error(
@@ -5323,6 +5439,33 @@ mod occ_contract_tests {
         assert_eq!(
             QBankExecutor::new().sensitivity_level("builtin-qbank_ai_grade"),
             ToolSensitivity::Medium
+        );
+    }
+
+    #[test]
+    fn ai_grade_submission_is_required_only_for_grade_mode() {
+        let missing: Value = serde_json::from_str(
+            &parse_ai_grade_submission_id(&json!({}), &QbankGradingMode::Grade).unwrap_err(),
+        )
+        .expect("structured missing submission");
+        assert_eq!(missing["code"], "INVALID_ARGS");
+        assert!(parse_ai_grade_submission_id(
+            &json!({"submission_id": "  "}),
+            &QbankGradingMode::Grade
+        )
+        .is_err());
+        assert_eq!(
+            parse_ai_grade_submission_id(&json!({}), &QbankGradingMode::Analyze).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_ai_grade_submission_id(
+                &json!({"submission_id": " sub-1 "}),
+                &QbankGradingMode::Analyze
+            )
+            .unwrap()
+            .as_deref(),
+            Some("sub-1")
         );
     }
 
