@@ -177,6 +177,15 @@ export const ReviewCardSurface: React.FC<ReviewCardSurfaceProps> = ({
   }, [scrollElement]);
   const templateMode = Boolean(template);
 
+  // 交互式卡面（含提示折叠 / 音频 / 链接 / 脚本）的 iframe 会吃掉指针事件，
+  // 文档自身滚不动时由卡面辅助脚本把滚轮转发出来：落到统一 viewport 上。
+  // WebKit 不会把 iframe 里的滚轮链回宿主，不转发就只能拖滚动条。
+  const handleFrameWheel = React.useCallback((deltaY: number, deltaMode: number) => {
+    if (!scrollElement || !deltaY) return;
+    const factor = deltaMode === 1 ? 16 : deltaMode === 2 ? scrollElement.clientHeight : 1;
+    scrollElement.scrollBy(0, deltaY * factor);
+  }, [scrollElement]);
+
   const swipeState = swipe?.state ?? null;
   const band = swipeState && swipeState.dragging && swipeState.direction
     ? SWIPE_BANDS[swipeState.direction]
@@ -247,6 +256,7 @@ export const ReviewCardSurface: React.FC<ReviewCardSurfaceProps> = ({
                 stageHeight={templateMode ? stageHeight : undefined}
                 interactiveFrame
                 onFrameClick={disabled ? undefined : onFlip}
+                onFrameWheel={handleFrameWheel}
                 className={cn('flex min-h-0 flex-1', templateMode ? 'flex-col' : 'items-center justify-center')}
               />
             </div>

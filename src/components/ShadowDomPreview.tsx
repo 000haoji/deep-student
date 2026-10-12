@@ -13,6 +13,8 @@ interface ShadowDomPreviewProps {
   fidelity?: 'default' | 'anki';
   minHeight?: number;
   onFrameClick?: () => void;
+  /** iframe 文档滚不动时的滚轮转发（复习卡面统一 viewport 滚动） */
+  onFrameWheel?: (deltaY: number, deltaMode: number) => void;
 }
 
 export const ShadowDomPreview: React.FC<ShadowDomPreviewProps> = ({
@@ -23,6 +25,7 @@ export const ShadowDomPreview: React.FC<ShadowDomPreviewProps> = ({
   fidelity = 'default',
   minHeight,
   onFrameClick,
+  onFrameWheel,
 }) => {
   const props: HtmlSandboxPreviewProps = {
     mode: 'template-safe',
@@ -34,6 +37,7 @@ export const ShadowDomPreview: React.FC<ShadowDomPreviewProps> = ({
     title: 'card-preview',
     minHeight,
     onFrameClick,
+    onFrameWheel,
   };
 
   return <HtmlSandboxPreview {...props} />;
