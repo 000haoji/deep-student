@@ -132,6 +132,7 @@ export function looksLikeHtml(text: string): boolean {
  * - 收到 `sdp-replay-audio` 消息时从头重播；
  * - 点击非交互区域时通知宿主 `sdp-click`（宿主据此翻面）；
  * - 文档自身滚不动时把滚轮转发给宿主 `sdp-wheel`（见下）。
+ * 脚本内容的 SHA-256 须与宿主 CSP 白名单同步；cspContract 测试按实际渲染文本校验。
  */
 export const CARD_FACE_HELPER_SCRIPT = `<script>(function(){
   var audios = Array.prototype.slice.call(document.querySelectorAll('audio.anki-audio'));
