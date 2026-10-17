@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.7](https://github.com/helixnow/deep-student/compare/v0.10.6...v0.10.7) (2026-10-17)
+
+
+### Bug Fixes
+
+* **flashcards:** 查看出处直接打开笔记 markdown 原文，不再开进聊天画布 ([#482](https://github.com/helixnow/deep-student/issues/482)) ([ddf5f1c](https://github.com/helixnow/deep-student/commit/ddf5f1c6f32e73640772a751013a0db95554598e))
+
 ## [0.10.6](https://github.com/helixnow/deep-student/compare/v0.10.5...v0.10.6) (2026-10-17)
 
 
