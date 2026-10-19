@@ -98,23 +98,33 @@ fn is_blank(text: &str) -> bool {
     text.trim().is_empty()
 }
 
-/// 两个题干是否指向同一道题
-fn same_question(a: &str, b: &str) -> bool {
-    let na = normalize(a);
-    let nb = normalize(b);
+/// 两个条目是否指向同一道题
+///
+/// 只做**保守**合并，宁可漏合并也不误合并：
+/// - 归一化后完全相同 → 合并；
+/// - 互相包含时，要求长度比 ≥ 0.8 **且** 恰好只有一方有答案
+///   （典型的「题目区无答案 / 答案区有答案」成对出现）。
+///   两条都没有答案的近似题干（如「简述 X 的不良反应」vs「简述 X 的不良反应与禁忌证」）
+///   不会被吞并。
+fn same_question(a: &MergeItem, b: &MergeItem) -> bool {
+    let na = normalize(a.content());
+    let nb = normalize(b.content());
     if na.is_empty() || nb.is_empty() {
         return false;
     }
     if na == nb {
         return true;
     }
+
     let (short, long) = if na.len() <= nb.len() {
         (na.as_str(), nb.as_str())
     } else {
         (nb.as_str(), na.as_str())
     };
-    // 互相包含且长度接近（避免「简述奎尼丁」误吞「简述奎尼丁与利多卡因的比较」）
-    short.len() >= 6 && long.contains(short) && (short.len() as f32 / long.len() as f32) >= 0.5
+    let ratio = short.len() as f32 / long.len() as f32;
+    let only_one_has_answer = is_blank(a.answer()) != is_blank(b.answer());
+
+    short.len() >= 6 && long.contains(short) && ratio >= 0.8 && only_one_has_answer
 }
 
 fn merge_missing_fields(keeper: &mut Value, donor: &Value) {
@@ -166,7 +176,7 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
             if items[j].removed || is_blank(items[j].content()) {
                 continue;
             }
-            if !same_question(items[i].content(), items[j].content()) {
+            if !same_question(&items[i], &items[j]) {
                 continue;
             }
 
@@ -394,5 +404,17 @@ mod tests {
         let outcome = merge_answer_sections(&mut items);
         assert_eq!(items[0].json["answer"], "D");
         assert_eq!(outcome.answers_from_block, 0);
+    }
+
+    // 守卫：两条相似题干都没有答案时不得互相吞并
+    #[test]
+    fn does_not_merge_similar_stems_without_answers() {
+        let mut items = vec![
+            item("Q1", "简述奎尼丁的不良反应", "short_answer", ""),
+            item("Q2", "简述奎尼丁的不良反应与禁忌证", "short_answer", ""),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.duplicates, 0);
+        assert!(!items[1].removed);
     }
 }
