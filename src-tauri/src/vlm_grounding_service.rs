@@ -1360,7 +1360,9 @@ impl VlmGroundingService {
 5. 如果题目没有配图，figures 留空数组
 6. 注意区分题目配图和装饰性元素（页眉页脚、水印等不需要标记）
 7. 如果页面开头的内容明显是上一页题目的延续（如选项 C/D 开头、答案解析开头），标记 continues_from_previous=true
-8. 如果页面末尾的题目明显未结束（题干不完整、选项缺失），标记 continues_to_next=true"#,
+8. 如果页面末尾的题目明显未结束（题干不完整、选项缺失），标记 continues_to_next=true
+9. 如果当前页面是「答案/解析区」（成片的题号+答案，没有题干或选项），把每条答案作为独立条目输出：label 填写它对应的题号，raw_text 以 `[答案区] ` 开头并原样保留答案正文，**不要为它编造题干**
+10. 如果同一道题的题干与答案分处不同页面，两页分别输出即可（题干一条、答案区一条），后端会按题号合并"#,
             hint_section,
             latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF,
         )

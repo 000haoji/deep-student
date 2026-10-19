@@ -494,10 +494,10 @@ impl LlmStructurer {
 
         let strict_rules = if strict {
             "\n**重要（上一次输出无法解析，请严格遵守）**：\n\
-             8. 只输出 JSON 数组本身：不要 markdown 代码块、不要解释、不要前后缀文字\n\
-             9. 每个题目对象必须完整闭合后再输出下一个；宁可精简 tags/explanation，也不要中途截断\n\
-             10. `options` 必须是对象数组 {\"key\":\"A\",\"content\":\"...\"}，不要输出字符串数组\n\
-             11. 数组长度必须严格等于输入题目数量，不要遗漏、不要合并题目\n"
+             9. 只输出 JSON 数组本身：不要 markdown 代码块、不要解释、不要前后缀文字\n\
+             10. 每个题目对象必须完整闭合后再输出下一个；宁可精简 tags/explanation，也不要中途截断\n\
+             11. `options` 必须是对象数组 {\"key\":\"A\",\"content\":\"...\"}，不要输出字符串数组\n\
+             12. 数组长度必须严格等于输入题目数量，不要遗漏、不要合并题目\n"
         } else {
             ""
         };
@@ -534,8 +534,9 @@ impl LlmStructurer {
 4. 公式格式：{latex_brief}
 5. 没有答案/解析的字段输出 null
 6. difficulty 按下方判定标准逐题判断
-7. 输出数组长度必须等于输入题目数量 ({}){}
-{difficulty_rubric}"#,
+7. 输出数组长度必须等于输入题目数量 ({})
+8. 若某条原始文本是「答案/解析区」条目（以 `[答案区]` 开头，或只有题号+答案而没有题干/选项），把 `content` 输出为空字符串 ""、`answer` 输出答案正文、`question_type` 输出 "other"，**不要编造题干**
+{}{difficulty_rubric}"#,
             batch.len(),
             questions_text,
             batch.len(),

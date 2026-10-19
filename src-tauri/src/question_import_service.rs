@@ -1070,17 +1070,78 @@ impl QuestionImportService {
             );
         }
 
+        // ===== Stage 5.5: 答案区合并 + 同题干去重 =====
+        //
+        // 习题册/答案册常把「题目区」和「答案区」分两段排版，VLM 会把答案区也当成
+        // 题目输出。这里把答案按题号/顺序回填到题干上，并去掉重复题干，避免
+        // 「一半题目没答案 + 答案区条目被当成新题」的脏数据。
+        let (structured_questions, merge_outcome) = Self::merge_answer_sections(&outcome.questions);
+
+        if merge_outcome.duplicates > 0
+            || merge_outcome.answers_from_duplicates > 0
+            || merge_outcome.answers_from_block > 0
+        {
+            log::info!(
+                "[QuestionImport] 答案合并: 去重 {} 条, 去重回填答案 {} 条, 答案块回填 {} 条, 剩余未匹配答案条目 {} 条",
+                merge_outcome.duplicates,
+                merge_outcome.answers_from_duplicates,
+                merge_outcome.answers_from_block,
+                merge_outcome.unmatched_answer_entries
+            );
+        }
+        if merge_outcome.unmatched_answer_entries > 0 {
+            log::warn!(
+                "[QuestionImport] {} 条答案区条目无法自动对齐题号，将保留为独立条目（不丢弃）",
+                merge_outcome.unmatched_answer_entries
+            );
+        }
+
+        let degenerate = structured_questions
+            .iter()
+            .filter(|sq| sq.origin != crate::llm_structurer::StructureSource::Llm)
+            .count()
+            + merge_outcome.unmatched_answer_entries;
+
         // ===== Stage 6: 持久化 =====
         self.persist_structured_questions(
             vfs_db,
             session_id,
             qbank_name,
-            &outcome.questions,
-            outcome.local_split,
-            outcome.raw_fallback,
+            &structured_questions,
+            degenerate,
             pages,
             progress_tx,
         )
+    }
+
+    /// 对结构化结果做答案区合并与同题干去重（纯函数，便于单测）
+    fn merge_answer_sections(
+        source: &[crate::llm_structurer::StructuredQuestion],
+    ) -> (
+        Vec<crate::llm_structurer::StructuredQuestion>,
+        crate::answer_merge::MergeOutcome,
+    ) {
+        use crate::answer_merge::{merge_answer_sections, MergeItem};
+
+        let mut items: Vec<MergeItem> = source
+            .iter()
+            .map(|sq| MergeItem::new(sq.source.merged.question.label.clone(), sq.json.clone()))
+            .collect();
+
+        let outcome = merge_answer_sections(&mut items);
+
+        let merged = source
+            .iter()
+            .zip(items.into_iter())
+            .filter(|(_, item)| !item.removed)
+            .map(|(sq, item)| crate::llm_structurer::StructuredQuestion {
+                json: item.json,
+                source: sq.source.clone(),
+                origin: sq.origin,
+            })
+            .collect();
+
+        (merged, outcome)
     }
 
     // ====== 内部方法 ======
@@ -2489,8 +2550,7 @@ impl QuestionImportService {
         session_id: &str,
         qbank_name: &str,
         structured: &[crate::llm_structurer::StructuredQuestion],
-        local_split: usize,
-        raw_fallback: usize,
+        degenerate: usize,
         pages: &[PageSlice],
         progress_tx: Option<&UnboundedSender<QuestionImportProgress>>,
     ) -> Result<ImportResult, AppError> {
@@ -2501,21 +2561,51 @@ impl QuestionImportService {
         conn.execute("SAVEPOINT persist_questions", [])
             .map_err(|e| AppError::database(format!("创建 SAVEPOINT 失败: {}", e)))?;
 
-        let result = (|| -> Result<usize, AppError> {
+        let result = (|| -> Result<(usize, usize), AppError> {
             let mut total_saved = 0;
+            // ★ 不再静默丢题：content 为空但有原文的，用原文兜底入库并计数
+            let mut recovered_from_raw = 0usize;
+            let mut skipped_empty = 0usize;
 
             for (idx, sq) in structured.iter().enumerate() {
-                let content = sq
+                let raw_content = sq
                     .json
                     .get("content")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                if content.trim().is_empty() {
-                    continue;
+                    .unwrap_or("")
+                    .to_string();
+
+                // content 为空时用 VLM 原文兜底（去掉可能的 [答案区] 标记），
+                // 保证「答案区条目 / 结构化缺字段」不会凭空消失。
+                let mut question_json = sq.json.clone();
+                if raw_content.trim().is_empty() {
+                    let fallback = sq
+                        .source
+                        .merged
+                        .question
+                        .raw_text
+                        .trim()
+                        .trim_start_matches("[答案区]")
+                        .trim()
+                        .to_string();
+                    if fallback.is_empty() {
+                        skipped_empty += 1;
+                        log::warn!(
+                            "[QuestionImport] 跳过空题目: label={}, 结构化 content 与 VLM 原文都为空",
+                            sq.source.merged.question.label
+                        );
+                        continue;
+                    }
+                    log::warn!(
+                        "[QuestionImport] 结构化 content 为空，改用 VLM 原文兜底: label={}",
+                        sq.source.merged.question.label
+                    );
+                    question_json["content"] = Value::String(fallback);
+                    recovered_from_raw += 1;
                 }
 
                 let card_id = format!("card_{}", nanoid::nanoid!(12));
-                let mut params = json_to_question_params(&sq.json, session_id, &card_id, idx);
+                let mut params = json_to_question_params(&question_json, session_id, &card_id, idx);
                 if !sq.source.images.is_empty() {
                     params.images = Some(sq.source.images.clone());
                 }
@@ -2527,11 +2617,19 @@ impl QuestionImportService {
 
                 if let Some(tx) = progress_tx {
                     let _ = tx.send(QuestionImportProgress::QuestionParsed {
-                        question: sq.json.clone(),
+                        question: question_json,
                         question_index: idx,
                         total_parsed: total_saved,
                     });
                 }
+            }
+
+            if recovered_from_raw > 0 || skipped_empty > 0 {
+                log::warn!(
+                    "[QuestionImport] 落库兜底: 原文回填 {} 道, 彻底空题目跳过 {} 道",
+                    recovered_from_raw,
+                    skipped_empty
+                );
             }
 
             // 更新 preview_json（带页面图片和题目卡片）
@@ -2585,11 +2683,11 @@ impl QuestionImportService {
             VfsExamRepo::update_status_with_conn(&conn, session_id, "completed")
                 .map_err(|e| AppError::database(format!("更新状态失败: {}", e)))?;
 
-            Ok(total_saved)
+            Ok((total_saved, skipped_empty))
         })();
 
         match result {
-            Ok(total_saved) => {
+            Ok((total_saved, skipped_empty)) => {
                 conn.execute("RELEASE persist_questions", [])
                     .map_err(|e| AppError::database(format!("RELEASE 失败: {}", e)))?;
 
@@ -2603,14 +2701,12 @@ impl QuestionImportService {
 
                 // ★ P2 修复：降级不再静默。旧实现无论多少题回退原文都只发
                 // `partial: false`，前端摘要与日志都看不出「选择题没被结构化」。
-                let degenerate = local_split + raw_fallback;
+                let degenerate = degenerate + skipped_empty;
                 let partial = degenerate > 0;
                 if partial {
                     log::warn!(
-                        "[QuestionImport] 导入完成但有 {} 道题目未完成 LLM 结构化（本地拆选项 {} 道，原文回退 {} 道），共入库 {} 题",
+                        "[QuestionImport] 导入完成但有 {} 道题目未拿到完整结构化结果（含答案区未对齐/原文兜底），共入库 {} 题",
                         degenerate,
-                        local_split,
-                        raw_fallback,
                         total_saved
                     );
                 }
@@ -2641,7 +2737,6 @@ impl QuestionImportService {
         }
     }
 
-    /// JSON 直接导入
     /// ★ P2 修复：就地修复"未结构化"的题目（只补选项拆分，不改题干语义）
     ///
     /// 历史导入中，LLM 失败的批次以 `question_type=other` + 选项留在 `content`
@@ -2742,6 +2837,7 @@ impl QuestionImportService {
         Ok(repaired)
     }
 
+    /// JSON 直接导入
     async fn import_json_directly(
         &self,
         vfs_db: &VfsDatabase,

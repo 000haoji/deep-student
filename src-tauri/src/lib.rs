@@ -16,6 +16,7 @@ pub mod anki_model_routing; // Anki 制卡 Sidekick 模型分层路由（Planner
 pub mod anki_preference_memory; // 用户制卡偏好记忆（Mem0 风格 ADD-only 纯逻辑，接线见模块文档）
 pub mod anki_protocol; // Anki 制卡输出协议（分隔符常量 / Structured Output / schema 生成）
 pub mod anki_qa_lint; // 确定性卡片质检 lint（零 LLM 成本，Round 3 #3）
+pub mod answer_merge; // 答案区合并与同题干去重（题目区/答案区两段式文档）
 pub mod apk_installer;
 #[allow(dead_code)]
 pub mod apkg_exporter_service;
