@@ -559,6 +559,10 @@
     "add_more_images": "添加更多图片",
     "replace_file": "更换文件",
     "incomplete_warning": "识别中途有页面或题目失败，可能缺题，请核对",
+    "degenerate_warning": "{{count}} 道题目未能完成 AI 结构化（已保留原文），选择题可能显示为普通文本",
+    "repair_degenerate": "本地修复 {{count}} 道选择题",
+    "repair_degenerate_done": "已修复 {{count}} 道选择题的题干与选项",
+    "repair_degenerate_failed": "修复未结构化题目失败",
     "import_another": "再导入一份"
   },
   "questionTypes": {

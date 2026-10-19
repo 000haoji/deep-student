@@ -1778,6 +1778,8 @@ pub fn run() {
             // 断点续导
             crate::commands::resume_question_import,
             crate::commands::list_importing_sessions,
+            // 未结构化题目本地修复
+            crate::commands::repair_exam_questions,
             // 题目集原始图片管理
             crate::commands::qbank_get_source_images,
             crate::commands::qbank_crop_source_image,

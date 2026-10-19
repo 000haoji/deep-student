@@ -123,6 +123,11 @@ pub enum QuestionImportProgress {
         /// serde 默认 0 以兼容旧前端反序列化。
         #[serde(default)]
         failed_count: usize,
+        /// ★ P2 修复：未完成 LLM 结构化的题目数（本地兜底 + 原文回退）。
+        /// 旧实现只在日志里写「结构化完成 N/N」，降级对用户完全不可见。
+        /// serde 默认 0 以兼容旧前端反序列化。
+        #[serde(default)]
+        degenerate_count: usize,
     },
     /// 导入失败
     Failed {
@@ -578,6 +583,7 @@ impl QuestionImportService {
                         total_questions: already_saved,
                         partial: false,
                         failed_count: 0,
+                        degenerate_count: 0,
                     });
                 }
                 return Ok(ImportResult {
@@ -659,6 +665,7 @@ impl QuestionImportService {
                     total_questions: total_saved,
                     partial: vlm_partial || save_failed > 0,
                     failed_count: save_failed,
+                    degenerate_count: 0,
                 });
             }
             return Ok(ImportResult {
@@ -852,6 +859,7 @@ impl QuestionImportService {
                     total_questions: total_parsed,
                     partial: total_save_failed > 0,
                     failed_count: total_save_failed,
+                    degenerate_count: 0,
                 });
             }
 
@@ -1039,7 +1047,7 @@ impl QuestionImportService {
         }
 
         let structurer = LlmStructurer::new(self.llm_manager.clone());
-        let (batches_done, batch_jsons, structured) = structurer
+        let outcome = structurer
             .structure_questions(
                 &questions_with_figures,
                 checkpoint.model_config_id.as_deref(),
@@ -1048,16 +1056,28 @@ impl QuestionImportService {
             )
             .await?;
 
-        checkpoint.structuring_batches_completed = batches_done;
-        checkpoint.structured_batch_results = batch_jsons;
+        checkpoint.structuring_batches_completed = outcome.batches_completed;
+        checkpoint.structured_batch_results = outcome.batch_results.clone();
         save_checkpoint(vfs_db, session_id, checkpoint);
+
+        if outcome.is_degraded() {
+            log::warn!(
+                "[QuestionImport] 结构化降级: 共 {} 题, LLM {} 题, 本地拆选项 {} 题, 原文回退 {} 题",
+                outcome.total,
+                outcome.llm_structured,
+                outcome.local_split,
+                outcome.raw_fallback
+            );
+        }
 
         // ===== Stage 6: 持久化 =====
         self.persist_structured_questions(
             vfs_db,
             session_id,
             qbank_name,
-            &structured,
+            &outcome.questions,
+            outcome.local_split,
+            outcome.raw_fallback,
             pages,
             progress_tx,
         )
@@ -1325,6 +1345,7 @@ impl QuestionImportService {
                 total_questions: total_saved,
                 partial: vlm_partial || save_failed > 0,
                 failed_count: save_failed,
+                degenerate_count: 0,
             });
         }
 
@@ -2027,6 +2048,7 @@ impl QuestionImportService {
                 total_questions: total_parsed,
                 partial: total_save_failed > 0,
                 failed_count: total_save_failed,
+                degenerate_count: 0,
             });
         }
 
@@ -2391,6 +2413,7 @@ impl QuestionImportService {
                 total_questions: total_parsed,
                 partial: total_save_failed > 0,
                 failed_count: total_save_failed,
+                degenerate_count: 0,
             });
         }
 
@@ -2459,12 +2482,15 @@ impl QuestionImportService {
     }
 
     /// Stage 6: 持久化结构化后的题目
+    #[allow(clippy::too_many_arguments)]
     fn persist_structured_questions(
         &self,
         vfs_db: &VfsDatabase,
         session_id: &str,
         qbank_name: &str,
         structured: &[crate::llm_structurer::StructuredQuestion],
+        local_split: usize,
+        raw_fallback: usize,
         pages: &[PageSlice],
         progress_tx: Option<&UnboundedSender<QuestionImportProgress>>,
     ) -> Result<ImportResult, AppError> {
@@ -2575,13 +2601,28 @@ impl QuestionImportService {
 
                 let _ = VfsExamRepo::clear_import_state(vfs_db, session_id);
 
+                // ★ P2 修复：降级不再静默。旧实现无论多少题回退原文都只发
+                // `partial: false`，前端摘要与日志都看不出「选择题没被结构化」。
+                let degenerate = local_split + raw_fallback;
+                let partial = degenerate > 0;
+                if partial {
+                    log::warn!(
+                        "[QuestionImport] 导入完成但有 {} 道题目未完成 LLM 结构化（本地拆选项 {} 道，原文回退 {} 道），共入库 {} 题",
+                        degenerate,
+                        local_split,
+                        raw_fallback,
+                        total_saved
+                    );
+                }
+
                 if let Some(tx) = progress_tx {
                     let _ = tx.send(QuestionImportProgress::Completed {
                         session_id: session_id.to_string(),
                         name: qbank_name.to_string(),
                         total_questions: total_saved,
-                        partial: false,
+                        partial,
                         failed_count: 0,
+                        degenerate_count: degenerate,
                     });
                 }
 
@@ -2601,6 +2642,106 @@ impl QuestionImportService {
     }
 
     /// JSON 直接导入
+    /// ★ P2 修复：就地修复"未结构化"的题目（只补选项拆分，不改题干语义）
+    ///
+    /// 历史导入中，LLM 失败的批次以 `question_type=other` + 选项留在 `content`
+    /// 的形式落库，前端不会按选择题渲染，用户看到的就是「明明 20 道选择题只识别出
+    /// 8 道」。这里复用导入兜底同一套本地拆分规则原地修复：
+    /// - 不调用 LLM，零成本；
+    /// - 幂等：已有 options 的题目直接跳过，可反复执行；
+    /// - 只改 `content` / `options_json` / `question_type`，不动答案与用户作答。
+    pub fn repair_unstructured_questions(
+        &self,
+        vfs_db: &VfsDatabase,
+        exam_id: &str,
+    ) -> Result<usize, AppError> {
+        use crate::vfs::repos::{QuestionOption, QuestionType, UpdateQuestionParams};
+
+        let conn = vfs_db
+            .get_conn_safe()
+            .map_err(|e| AppError::database(format!("获取数据库连接失败: {}", e)))?;
+
+        let rows: Vec<(String, String, Option<String>)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, content, options_json FROM questions \
+                     WHERE exam_id = ?1 AND deleted_at IS NULL",
+                )
+                .map_err(|e| AppError::database(format!("查询题目失败: {}", e)))?;
+            let mapped = stmt
+                .query_map([exam_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })
+                .map_err(|e| AppError::database(format!("查询题目失败: {}", e)))?;
+            mapped.filter_map(|row| row.ok()).collect()
+        };
+
+        let mut repaired = 0usize;
+        for (question_id, content, options_json) in rows {
+            let has_options = options_json
+                .as_deref()
+                .map(|raw| {
+                    let trimmed = raw.trim();
+                    !trimmed.is_empty() && trimmed != "[]" && trimmed != "null"
+                })
+                .unwrap_or(false);
+            if has_options {
+                continue;
+            }
+
+            let Some((stem, options)) =
+                crate::llm_structurer::split_options_from_raw_text(&content)
+            else {
+                continue;
+            };
+
+            let options: Vec<QuestionOption> = options
+                .iter()
+                .filter_map(|opt| {
+                    let key = opt.get("key").and_then(|v| v.as_str())?.to_string();
+                    let text = opt.get("content").and_then(|v| v.as_str())?.to_string();
+                    Some(QuestionOption { key, content: text })
+                })
+                .collect();
+            if options.len() < 2 {
+                continue;
+            }
+
+            let params = UpdateQuestionParams {
+                content: Some(stem),
+                options: Some(options),
+                question_type: Some(QuestionType::SingleChoice),
+                ..Default::default()
+            };
+            crate::vfs::repos::VfsQuestionRepo::update_question_with_conn(
+                &conn,
+                &question_id,
+                &params,
+            )
+            .map_err(|e| AppError::database(format!("更新题目 {} 失败: {}", question_id, e)))?;
+            repaired += 1;
+        }
+
+        if repaired > 0 {
+            if let Err(e) =
+                crate::vfs::repos::VfsQuestionRepo::refresh_stats_with_conn(&conn, exam_id)
+            {
+                log::warn!("[QuestionImport] 修复后统计刷新失败: {}", e);
+            }
+            log::info!(
+                "[QuestionImport] 本地修复完成: exam={}, 修复 {} 道未结构化选择题",
+                exam_id,
+                repaired
+            );
+        }
+
+        Ok(repaired)
+    }
+
     async fn import_json_directly(
         &self,
         vfs_db: &VfsDatabase,

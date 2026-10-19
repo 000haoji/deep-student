@@ -715,6 +715,7 @@ commands.allow = [
   "reload_mcp_client",
   "remove_ocr_engine",
   "rename_exam_sheet_session",
+  "repair_exam_questions",
   "report_frontend_log",
   "reset_model_adapter_options",
   "reset_test_database",

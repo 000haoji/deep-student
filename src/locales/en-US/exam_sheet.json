@@ -559,6 +559,10 @@
     "add_more_images": "Add more images",
     "replace_file": "Replace file",
     "incomplete_warning": "Some pages or questions failed during recognition, so questions may be missing. Please check.",
+    "degenerate_warning": "{{count}} question(s) could not be fully structured by AI (raw text kept). Choice questions may render as plain text.",
+    "repair_degenerate": "Repair {{count}} choice question(s) locally",
+    "repair_degenerate_done": "Repaired {{count}} choice question(s)",
+    "repair_degenerate_failed": "Failed to repair unstructured questions",
     "import_another": "Import another"
   },
   "questionTypes": {

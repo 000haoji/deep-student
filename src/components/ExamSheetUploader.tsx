@@ -245,6 +245,9 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
   // 完成页：用户取消勾选不需要录入的题目
   const [excludedCardIds, setExcludedCardIds] = useState<Set<string>>(new Set());
   const [isConfirming, setIsConfirming] = useState(false);
+  // ★ P2 修复：未完成 LLM 结构化的题目数（本地兜底 + 原文回退），用于完成页告警与一键本地修复
+  const [degenerateCount, setDegenerateCount] = useState(0);
+  const [isRepairing, setIsRepairing] = useState(false);
 
   const isCurrentImportAttempt = useCallback((attempt: ImportAttempt): boolean => {
     const activeAttempt = activeImportAttemptRef.current;
@@ -267,6 +270,8 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     setShowCancelConfirm(false);
     setLlmProgress({ percent: 0, message: t('exam_sheet:uploader.reading_document') });
     setImportIncomplete(false);
+    setDegenerateCount(0);
+    setIsRepairing(false);
     setResumableSession(null);
     setIsResumeRun(false);
     parsedCountRef.current = 0;
@@ -349,6 +354,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
         total_questions?: number;
         partial?: boolean;
         failed_count?: number;
+        degenerate_count?: number;
         total_images?: number;
         total_chars?: number;
         image_index?: number;
@@ -470,7 +476,13 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
             // ★ #6(round2): VLM 中途失败但已存部分题时 partial=true；写库失败 failed_count>0。
             // 两者都意味着「可能缺题」，在完成页提示（非阻塞，不触发失败态）
             parsedCountRef.current = payload.total_questions || 0;
-            setImportIncomplete(Boolean(payload.partial) || (payload.failed_count || 0) > 0);
+            // ★ P2：未完成结构化的题目数单独计数。有 degenerate_count 时用更精确的
+            // 「未结构化」提示，避免与通用「可能缺题」告警重复；旧后端仍走 partial 分支。
+            setImportIncomplete(
+              (payload.failed_count || 0) > 0
+              || (Boolean(payload.partial) && (payload.degenerate_count || 0) === 0),
+            );
+            setDegenerateCount(payload.degenerate_count || 0);
             setLlmProgress({
               percent: 100,
               message: t('exam_sheet:uploader.import_done', { count: payload.total_questions }),
@@ -813,6 +825,8 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     setParsedQuestions([]);
     setLlmProgress({ percent: 0, message: '' });
     setImportIncomplete(false);
+    setDegenerateCount(0);
+    setIsRepairing(false);
     setResumableSession(null);
     setIsResumeRun(false);
     parsedCountRef.current = 0;
@@ -900,6 +914,26 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
       }
     }
   }, [resumableSession, isLLMProcessing, beginImportAttempt, isCurrentImportAttempt, showSummary, t]);
+
+  // ★ P2：原地修复「LLM 未结构化」的选择题（后端本地拆分选项，不调 LLM、可重复执行）
+  const handleRepairDegenerate = useCallback(async () => {
+    const examId = pendingDetail?.summary.id;
+    if (!examId || isRepairing) return;
+
+    setIsRepairing(true);
+    try {
+      const repaired = await TauriAPI.repairExamQuestions(examId);
+      const detail = await TauriAPI.getExamSheetSessionDetail(examId);
+      showSummary(detail);
+      setDegenerateCount(prev => Math.max(0, prev - repaired));
+      showGlobalNotification('success', t('exam_sheet:uploader.repair_degenerate_done', { count: repaired }));
+    } catch (err: unknown) {
+      debugLog.error('[ExamSheetUploader] 修复未结构化题目失败:', err);
+      showGlobalNotification('error', t('exam_sheet:uploader.repair_degenerate_failed'));
+    } finally {
+      setIsRepairing(false);
+    }
+  }, [pendingDetail, isRepairing, showSummary, t]);
 
   const hasFiles = selectedFiles.length > 0;
   const fileInputs = (
@@ -1187,6 +1221,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
             if (total === 0) notes.push(t('exam_sheet:uploader.no_questions_warning'));
             if (importSummary.emptyQuestions > 0) notes.push(t('exam_sheet:uploader.empty_warning', { count: importSummary.emptyQuestions }));
             if (importIncomplete) notes.push(t('exam_sheet:uploader.incomplete_warning'));
+            if (degenerateCount > 0) notes.push(t('exam_sheet:uploader.degenerate_warning', { count: degenerateCount }));
             return (
               <div className="flex flex-1 min-h-0 flex-col gap-3 ui-slide-fade-in [--ui-enter-x:24px]" data-testid="exam-uploader-summary">
                 <div className="flex-shrink-0 space-y-1 text-center">
@@ -1204,11 +1239,27 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
                 </div>
 
                 {notes.length > 0 && (
-                  <div className="flex flex-shrink-0 items-start gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
-                    <Info size={16} className="mt-0.5 flex-shrink-0" />
-                    <ul className="space-y-0.5">
-                      {notes.map((note) => <li key={note}>{note}</li>)}
-                    </ul>
+                  <div className="flex flex-shrink-0 flex-col gap-2 rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
+                    <div className="flex items-start gap-2">
+                      <Info size={16} className="mt-0.5 flex-shrink-0" />
+                      <ul className="space-y-0.5">
+                        {notes.map((note) => <li key={note}>{note}</li>)}
+                      </ul>
+                    </div>
+                    {degenerateCount > 0 && pendingDetail && (
+                      <DsButton
+                        variant="warning"
+                        size="sm"
+                        className="!h-7 self-start text-xs"
+                        onClick={() => void handleRepairDegenerate()}
+                        disabled={isRepairing}
+                      >
+                        {isRepairing
+                          ? <CircleNotch size={14} className="mr-1 animate-spin" />
+                          : <ArrowClockwise size={14} className="mr-1" />}
+                        {t('exam_sheet:uploader.repair_degenerate', { count: degenerateCount })}
+                      </DsButton>
+                    )}
                   </div>
                 )}
 

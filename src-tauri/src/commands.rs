@@ -1321,6 +1321,26 @@ pub async fn list_importing_sessions(
         .map_err(|e| AppError::database(format!("查询中断会话失败: {}", e)))
 }
 
+/// 修复题目集中「未完成结构化」的选择题
+///
+/// ★ P2 修复：LLM 结构化失败的批次会以 `question_type=other` + 选项留在正文的
+/// 形式落库，前端不按选择题渲染。这里用本地选项拆分规则原地补齐（不调用 LLM、
+/// 可重复执行），返回本次修复的题数。
+#[tauri::command]
+pub async fn repair_exam_questions(exam_id: String, state: State<'_, AppState>) -> Result<usize> {
+    use crate::question_import_service::QuestionImportService;
+
+    let vfs_db = state
+        .vfs_db
+        .as_ref()
+        .ok_or_else(|| AppError::validation("VFS 数据库未初始化"))?;
+
+    let service = QuestionImportService::new(state.llm_manager.clone(), state.file_manager.clone());
+    service
+        .repair_unstructured_questions(vfs_db, &exam_id)
+        .map_err(|e| AppError::database(format!("修复未结构化题目失败: {}", e)))
+}
+
 // ============================================================================
 // CSV 导入导出命令
 // ============================================================================

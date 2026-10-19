@@ -401,6 +401,19 @@ export async function resumeQuestionImport(sessionId: string): Promise<ExamSheet
   );
 }
 
+/**
+ * 修复题目集中未完成 AI 结构化的选择题
+ *
+ * 后端用本地选项拆分规则原地补齐题干/选项（不调用 LLM、幂等），返回修复题数。
+ */
+export async function repairExamQuestions(examId: string): Promise<number> {
+  return invokeWithDebug<number>(
+    'repair_exam_questions',
+    { examId },
+    { tag: 'repair_exam_questions' }
+  );
+}
+
 // =================================================
 // 包管理器检测和安装
 // =================================================

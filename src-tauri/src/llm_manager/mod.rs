@@ -8841,6 +8841,32 @@ impl LLMManager {
         }
     }
 
+    /// 题目解析请求的输出预算（★ P0 修复）。
+    ///
+    /// 此前这里硬编码 `4096`。作业场景常用的 reasoning 模型（如
+    /// `tree-deepseek-v4.1-flash`，profile 声明 `maxOutputTokens=128000`）会把
+    /// 思考 token 和 JSON 输出算进同一份 max_tokens：一批 8 题的 JSON 写到一半
+    /// 就被截断，日志表现为 `EOF while parsing an object`，整批题目静默降级成
+    /// `question_type=other`。
+    ///
+    /// 现在按模型声明的 `max_output_tokens` 给预算：
+    /// - 声明值 ≤ 0（配置缺失）时退化为旧值 4096；
+    /// - 上限 8192，避免超出网关允许的单请求输出上限导致整批调用失败；
+    /// - 不主动放大到超过模型声明值的预算，尊重模型自身限制。
+    ///
+    /// 配合 `llm_structurer::BATCH_SIZE = 4`，单批输出约为预算的 1/3，留足余量。
+    const QUESTION_PARSING_FALLBACK_TOKENS: u32 = 4_096;
+    const QUESTION_PARSING_MAX_TOKENS_CAP: u32 = 8_192;
+
+    fn question_parsing_max_tokens(api_config: &ApiConfig) -> u32 {
+        if api_config.max_output_tokens == 0 {
+            return Self::QUESTION_PARSING_FALLBACK_TOKENS;
+        }
+        api_config
+            .max_output_tokens
+            .min(Self::QUESTION_PARSING_MAX_TOKENS_CAP)
+    }
+
     fn question_parsing_request_body(
         api_config: &ApiConfig,
         prompt: &str,
@@ -8886,7 +8912,8 @@ impl LLMManager {
             .resolve_question_parsing_config(model_config_id)
             .await?;
         let api_key = self.decrypt_api_key_if_needed(&api_config.api_key)?;
-        let request_body = Self::question_parsing_request_body(&api_config, prompt, 8192);
+        let max_tokens = Self::question_parsing_max_tokens(&api_config);
+        let request_body = Self::question_parsing_request_body(&api_config, prompt, max_tokens);
 
         let mut all_questions: Vec<Value> = Vec::new();
         let mut json_parser = IncrementalJsonArrayParser::new();
@@ -8952,7 +8979,8 @@ impl LLMManager {
             .resolve_question_parsing_config(model_config_id)
             .await?;
         let api_key = self.decrypt_api_key_if_needed(&api_config.api_key)?;
-        let request_body = Self::question_parsing_request_body(&api_config, prompt, 4096);
+        let max_tokens = Self::question_parsing_max_tokens(&api_config);
+        let request_body = Self::question_parsing_request_body(&api_config, prompt, max_tokens);
 
         // 流式传输：长输出/推理模型不再被网关或固定总超时掐断
         let opts =
@@ -9063,6 +9091,47 @@ mod proxy_env_tests {
         assert!(
             head.starts_with("GET http://proxy-verify.invalid"),
             "HTTP client must honor proxy env; proxy saw: {head}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod question_parsing_token_tests {
+    use super::{ApiConfig, LLMManager};
+
+    fn config_with_max_output(max_output_tokens: u32) -> ApiConfig {
+        ApiConfig {
+            max_output_tokens,
+            ..Default::default()
+        }
+    }
+
+    // ★ P0 回归：题目解析的输出预算不再硬编码 4096
+    #[test]
+    fn large_declared_budget_is_capped_not_ignored() {
+        // 生产配置：tree-deepseek-v4.1-flash 声明 128000，旧代码只给 4096
+        assert_eq!(
+            LLMManager::question_parsing_max_tokens(&config_with_max_output(128_000)),
+            8_192
+        );
+        // 中等预算保持模型声明值
+        assert_eq!(
+            LLMManager::question_parsing_max_tokens(&config_with_max_output(8_192)),
+            8_192
+        );
+    }
+
+    #[test]
+    fn small_or_missing_declared_budget_does_not_overflow_model_limit() {
+        // 模型自身限制更小时不得放大
+        assert_eq!(
+            LLMManager::question_parsing_max_tokens(&config_with_max_output(2_048)),
+            2_048
+        );
+        // 配置缺失时退回旧默认值
+        assert_eq!(
+            LLMManager::question_parsing_max_tokens(&config_with_max_output(0)),
+            4_096
         );
     }
 }
