@@ -1882,6 +1882,16 @@ const ExamContentView: React.FC<ContentViewProps> = ({
 
   // ★ 断点续导：检测 importing 状态
   const isImportingSession = sessionDetail?.summary.status === 'importing';
+  const importReport = sessionDetail?.summary.metadata?.import_report;
+  const hasImportQualityWarning = Boolean(importReport && (
+    importReport.status !== 'completed' || importReport.degenerate_count > 0
+    || importReport.failed_pages?.length || importReport.failed_chunks?.length
+    || importReport.quarantined_entries?.length || importReport.conflicts?.length
+  ));
+  // A quality warning is not itself a checkpoint. Never offer an impossible retry.
+  const canResumeImport = importReport
+    ? importReport.status !== 'completed' && importReport.resume_available === true
+    : isImportingSession;
   const [isResuming, setIsResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
 
@@ -1892,7 +1902,7 @@ const ExamContentView: React.FC<ContentViewProps> = ({
   }, [sessionId]);
 
   const handleResumeImport = useCallback(async () => {
-    if (!sessionId || isResuming) return;
+    if (!sessionId || isResuming || !canResumeImport) return;
     setIsResuming(true);
     setResumeError(null);
     try {
@@ -1911,7 +1921,7 @@ const ExamContentView: React.FC<ContentViewProps> = ({
         setIsResuming(false);
       }
     }
-  }, [sessionId, isResuming, loadQuestions, t]);
+  }, [sessionId, isResuming, canResumeImport, loadQuestions, t]);
 
   const isEmptySession = sessionDetail?.summary.status === 'empty' && 
     (!sessionDetail?.preview.pages || sessionDetail.preview.pages.length === 0);
@@ -2291,15 +2301,24 @@ const ExamContentView: React.FC<ContentViewProps> = ({
 
   return (
     <div ref={agentFlashRootRef} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-background">
-      {/* ★ 断点续导：importing 状态横幅 */}
-      {isImportingSession && (
-        <div className="flex-shrink-0 border-b border-warning/30 bg-warning/10 px-3 py-2 sm:px-4">
+      {/* Persisted quality remains visible after a completed session is reopened. */}
+      {(isImportingSession || hasImportQualityWarning) && (
+        <div data-testid="exam-import-quality" role="status" className="flex-shrink-0 border-b border-warning/30 bg-warning/10 px-3 py-2 sm:px-4">
           {/* 📱 flex-wrap：375px 下右侧「恢复导入」按钮组换行到第二行，避免把提示文案挤到不可读 */}
           <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5">
             <div className="flex items-center gap-2 min-w-0">
               <WarningCircle size={16} className="flex-shrink-0 text-warning" />
               <span className="truncate text-sm text-warning">
-                {t('exam_sheet:uploader.import_interrupted', { count: questions.length })}
+                {hasImportQualityWarning
+                  ? t('exam_sheet:uploader.quality_review', {
+                    defaultValue: '导入需要核对：失败页 {{pages}}，失败分块 {{chunks}}，未结构化 {{degenerate}}，隔离条目 {{quarantined}}，冲突 {{conflicts}}。',
+                    pages: importReport?.failed_pages?.length || 0,
+                    chunks: importReport?.failed_chunks?.length || 0,
+                    degenerate: importReport?.degenerate_count || 0,
+                    quarantined: importReport?.quarantined_entries?.length || 0,
+                    conflicts: importReport?.conflicts?.length || 0,
+                  })
+                  : t('exam_sheet:uploader.import_interrupted', { count: questions.length })}
               </span>
             </div>
             <div className="flex items-center gap-2 flex-shrink-0 ml-auto">
@@ -2308,7 +2327,7 @@ const ExamContentView: React.FC<ContentViewProps> = ({
                   {resumeError}
                 </span>
               )}
-              <DsButton
+              {canResumeImport && <DsButton
                 variant="ghost"
                 size="sm"
                 onClick={handleResumeImport}
@@ -2324,7 +2343,7 @@ const ExamContentView: React.FC<ContentViewProps> = ({
                   ? t('exam_sheet:uploader.resuming')
                   : t('exam_sheet:uploader.resume_import')
                 }
-              </DsButton>
+              </DsButton>}
             </div>
           </div>
         </div>

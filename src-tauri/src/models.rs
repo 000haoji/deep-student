@@ -273,6 +273,8 @@ pub struct ExamSheetSessionMetadata {
     pub import_source: Option<ImportSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<QuestionBankStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_report: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

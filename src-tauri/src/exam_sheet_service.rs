@@ -253,6 +253,28 @@ impl ExamSheetService {
             .clone();
         let _update_guard = update_lock.lock().await;
 
+        if let Some(ids) = delete_card_ids.as_ref().filter(|ids| !ids.is_empty()) {
+            if cards.as_ref().is_some_and(|items| !items.is_empty())
+                || create_cards.as_ref().is_some_and(|items| !items.is_empty())
+            {
+                return Err(AppError::validation("筛题不能与新增或编辑题目合并提交"));
+            }
+            {
+                let conn = self
+                    .vfs_db
+                    .get_conn_safe()
+                    .map_err(|e| AppError::database(e.to_string()))?;
+                exclude_exam_cards_with_conn(&conn, &session_id, ids, exam_name)?;
+            }
+            let detail = self
+                .get_from_vfs(&session_id)?
+                .ok_or_else(|| AppError::not_found("未找到指定的题目集"))?;
+            return Ok(ExamSheetUpdateOutcome {
+                detail,
+                updated_mistake_ids: Vec::new(),
+            });
+        }
+
         // ★ 从 VFS 获取整卷会话
         let mut detail = self
             .get_from_vfs(&session_id)?
@@ -262,61 +284,9 @@ impl ExamSheetService {
 
         let mut pending_updates = cards.unwrap_or_default();
         let create_cards = create_cards.unwrap_or_default();
-        let delete_card_ids = delete_card_ids.unwrap_or_default();
 
         let mut card_changes: Vec<CardChange> = Vec::new();
         let mut any_card_modified = false;
-
-        if !delete_card_ids.is_empty() {
-            let delete_set: HashSet<String> = delete_card_ids.iter().cloned().collect();
-
-            // 先校验删除目标是否存在关联错题
-            for page in detail.preview.pages.iter() {
-                for card in page.cards.iter() {
-                    if delete_set.contains(&card.card_id) {
-                        if let Some(linked) = &card.linked_mistake_ids {
-                            if !linked.is_empty() {
-                                return Err(AppError::validation(format!(
-                                    "题目 {} 已关联错题，请先解除关联后再删除。",
-                                    card.question_label
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut crop_paths_to_remove: Vec<String> = Vec::new();
-            detail.preview.pages.iter_mut().for_each(|page| {
-                page.cards.retain(|card| {
-                    if delete_set.contains(&card.card_id) {
-                        if !card.cropped_image_path.trim().is_empty() {
-                            crop_paths_to_remove.push(card.cropped_image_path.clone());
-                        }
-                        any_card_modified = true;
-                        false
-                    } else {
-                        true
-                    }
-                });
-            });
-
-            for rel in crop_paths_to_remove {
-                let abs = self.file_manager.resolve_image_path(&rel);
-                if let Err(err) = tokio::fs::remove_file(&abs).await {
-                    log_info!(
-                        "⚠️ [exam-sheet] 删除裁剪图片失败 {}: {}",
-                        abs.display(),
-                        err
-                    );
-                }
-            }
-
-            // 删除后移除任何针对已删除卡片的更新
-            if !pending_updates.is_empty() {
-                pending_updates.retain(|update| !delete_set.contains(&update.card_id));
-            }
-        }
 
         if !create_cards.is_empty() {
             let archive_root_rel = format!("images/exam_sheet_archive/{}", detail.summary.id);
@@ -1381,6 +1351,7 @@ impl ExamSheetService {
                 tags: None,
                 page_count: Some(1),
                 card_count: Some(card_count),
+                import_report: None,
                 raw_model_response: None,
                 source_type: SourceType::ImportFile,
                 import_source: Some(ImportSource {
@@ -1702,6 +1673,113 @@ impl ExamSheetService {
     }
 }
 
+/// Exclusions are destructive: resolve exact identities and commit all representations
+/// together. Legacy text/label similarity is deliberately never a deletion key.
+fn exclude_exam_cards_with_conn(
+    conn: &rusqlite::Connection,
+    session_id: &str,
+    card_ids: &[String],
+    exam_name: Option<String>,
+) -> Result<(), AppError> {
+    use crate::vfs::repos::question_repo::VfsQuestionRepo;
+    use rusqlite::{params, Transaction, TransactionBehavior};
+
+    let db_error = |error: crate::vfs::error::VfsError| AppError::database(error.to_string());
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|e| AppError::database(e.to_string()))?;
+    let exam = VfsExamRepo::get_exam_sheet_with_conn(&tx, session_id)
+        .map_err(db_error)?
+        .ok_or_else(|| AppError::not_found("未找到指定的题目集"))?;
+    let mut preview = exam.preview_json.clone();
+    let review_required = || {
+        AppError::validation(
+            "QBANK_IMPORT_REVIEW_REQUIRED: 题库与预览的题目标识不一致，请核对；未删除任何题目",
+        )
+    };
+    let selected: HashSet<&str> = card_ids.iter().map(String::as_str).collect();
+    if selected.contains("") {
+        return Err(review_required());
+    }
+    let pages = preview
+        .get_mut("pages")
+        .and_then(|value| value.as_array_mut())
+        .ok_or_else(review_required)?;
+    let mut question_ids = Vec::new();
+    for card_id in &selected {
+        let matching_cards: Vec<&serde_json::Value> = pages
+            .iter()
+            .filter_map(|page| page.get("cards").and_then(|cards| cards.as_array()))
+            .flatten()
+            .filter(|card| card.get("card_id").and_then(|id| id.as_str()) == Some(*card_id))
+            .collect();
+        if matching_cards.len() != 1 {
+            return Err(review_required());
+        }
+        if matching_cards[0]
+            .get("linked_mistake_ids")
+            .and_then(|ids| ids.as_array())
+            .is_some_and(|ids| !ids.is_empty())
+        {
+            return Err(AppError::validation("题目已关联错题，请先解除关联后再删除"));
+        }
+        let mut stmt = tx.prepare(
+            "SELECT id FROM questions WHERE exam_id = ?1 AND card_id = ?2 AND deleted_at IS NULL",
+        ).map_err(|e| AppError::database(e.to_string()))?;
+        let ids = stmt
+            .query_map(params![session_id, card_id], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::database(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::database(e.to_string()))?;
+        if ids.len() != 1 {
+            return Err(review_required());
+        }
+        question_ids.push(ids[0].clone());
+    }
+    for page in pages.iter_mut() {
+        if let Some(cards) = page.get_mut("cards").and_then(|cards| cards.as_array_mut()) {
+            cards.retain(|card| {
+                !card
+                    .get("card_id")
+                    .and_then(|id| id.as_str())
+                    .is_some_and(|id| selected.contains(id))
+            });
+        }
+    }
+    let page_count = pages.len();
+    for id in question_ids {
+        VfsQuestionRepo::delete_question_with_conn(&tx, &id).map_err(db_error)?;
+    }
+    let stats = VfsQuestionRepo::refresh_stats_with_conn(&tx, session_id).map_err(db_error)?;
+    let mut metadata = exam.metadata_json.clone();
+    let metadata_object = metadata.as_object_mut().ok_or_else(review_required)?;
+    metadata_object.insert("card_count".into(), serde_json::json!(stats.total_count));
+    metadata_object.insert("page_count".into(), serde_json::json!(page_count));
+    metadata_object.insert(
+        "stats".into(),
+        serde_json::to_value(stats).map_err(|e| AppError::validation(e.to_string()))?,
+    );
+    let name = match exam_name {
+        Some(name) => ExamSheetService::trim_owned(&name),
+        None => exam.exam_name,
+    };
+    preview["exam_name"] = serde_json::json!(name);
+    VfsExamRepo::upsert_exam_sheet_with_conn(
+        &tx,
+        VfsCreateExamSheetParams {
+            exam_name: name,
+            temp_id: exam.temp_id,
+            status: exam.status,
+            metadata_json: metadata,
+            preview_json: preview,
+            folder_id: None,
+        },
+        Some(session_id),
+    )
+    .map_err(db_error)?;
+    tx.commit().map_err(|e| AppError::database(e.to_string()))?;
+    Ok(())
+}
+
 /// 按请求更新题目集名称，返回是否有变化。
 ///
 /// `requested` 为 None 表示调用方没打算改名（只删题 / 改题），名称保持不变；
@@ -1737,7 +1815,228 @@ fn apply_exam_name_update(
 
 #[cfg(test)]
 mod exam_name_update_tests {
-    use super::apply_exam_name_update;
+    use super::{apply_exam_name_update, exclude_exam_cards_with_conn};
+    use crate::vfs::{database::VfsDatabase, repos::VfsExamRepo, types::VfsCreateExamSheetParams};
+    use rusqlite::params;
+
+    fn exclusion_fixture() -> (tempfile::TempDir, VfsDatabase, String) {
+        let (temp, db) = crate::vfs::database::setup_migrated_test_db();
+        let exam = VfsExamRepo::create_exam_sheet(&db, VfsCreateExamSheetParams {
+            exam_name: Some("Synthetic questions".into()), temp_id: "temp_exclusion".into(),
+            status: "completed".into(), folder_id: None,
+            metadata_json: serde_json::json!({
+                "source_image_hashes": ["synthetic_blob"],
+                "import_report": {"schema_version":1,"status":"needs_review","conflicts":[{"id":"synthetic"}]},
+            }),
+            preview_json: serde_json::json!({"pages":[{"page_index":0,"cards":[
+                {"card_id":"card_a","ocr_text":"same synthetic text"},
+                {"card_id":"card_b","ocr_text":"same synthetic text"},
+            ]}]}),
+        }).unwrap();
+        {
+            let conn = db.get_conn_safe().unwrap();
+            for (id, card_id) in [("q_a", "card_a"), ("q_b", "card_b")] {
+                conn.execute("INSERT INTO questions (id,exam_id,card_id,content,created_at,updated_at) VALUES (?1,?2,?3,'same synthetic text','2026-01-01','2026-01-01')",
+                    params![id, exam.id, card_id]).unwrap();
+            }
+            crate::vfs::repos::question_repo::VfsQuestionRepo::refresh_stats_with_conn(
+                &conn, &exam.id,
+            )
+            .unwrap();
+        }
+        (temp, db, exam.id)
+    }
+
+    #[test]
+    fn exclusion_soft_deletes_exact_entity_and_updates_preview_resource_stats() {
+        let (_temp, db, id) = exclusion_fixture();
+        let conn = db.get_conn_safe().unwrap();
+        exclude_exam_cards_with_conn(&conn, &id, &["card_b".into()], None).unwrap();
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE exam_id=?1 AND deleted_at IS NULL",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let deleted: Option<String> = conn
+            .query_row("SELECT deleted_at FROM questions WHERE id='q_b'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(live, 1);
+        assert!(deleted.is_some());
+        let stats: i64 = conn
+            .query_row(
+                "SELECT total_count FROM question_bank_stats WHERE exam_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 1);
+        let exam = VfsExamRepo::get_exam_sheet_with_conn(&conn, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exam.exam_name.as_deref(), Some("Synthetic questions"));
+        assert_eq!(
+            exam.preview_json["pages"][0]["cards"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            exam.metadata_json["source_image_hashes"][0],
+            "synthetic_blob"
+        );
+        assert_eq!(
+            exam.metadata_json["import_report"]["status"],
+            "needs_review"
+        );
+        let resource: String = conn
+            .query_row(
+                "SELECT data FROM resources WHERE id=?1",
+                [exam.resource_id.unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&resource).unwrap(),
+            exam.preview_json
+        );
+    }
+
+    #[test]
+    fn excluding_all_cards_preserves_source_pages_and_checkpoint() {
+        let (_temp, db, id) = exclusion_fixture();
+        let conn = db.get_conn_safe().unwrap();
+        conn.execute(
+            "UPDATE exam_sheets SET import_state_json = ?1 WHERE id = ?2",
+            params![r#"{"document_id":"synthetic","failed_pages":[2]}"#, id],
+        )
+        .unwrap();
+        exclude_exam_cards_with_conn(&conn, &id, &["card_a".into(), "card_b".into()], None)
+            .unwrap();
+        let stats: i64 = conn
+            .query_row(
+                "SELECT total_count FROM question_bank_stats WHERE exam_id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stats, 0);
+        let exam = VfsExamRepo::get_exam_sheet_with_conn(&conn, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exam.preview_json["pages"].as_array().unwrap().len(), 1);
+        assert!(exam.preview_json["pages"][0]["cards"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            exam.metadata_json["source_image_hashes"][0],
+            "synthetic_blob"
+        );
+        assert_eq!(exam.metadata_json["card_count"], 0);
+        let checkpoint: String = conn
+            .query_row(
+                "SELECT import_state_json FROM exam_sheets WHERE id=?1",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&checkpoint).unwrap()["failed_pages"][0],
+            2
+        );
+    }
+
+    #[test]
+    fn linked_mistakes_prevent_the_whole_exclusion_transaction() {
+        let (_temp, db, id) = exclusion_fixture();
+        let conn = db.get_conn_safe().unwrap();
+        let mut exam = VfsExamRepo::get_exam_sheet_with_conn(&conn, &id)
+            .unwrap()
+            .unwrap();
+        exam.preview_json["pages"][0]["cards"][1]["linked_mistake_ids"] =
+            serde_json::json!(["synthetic_mistake"]);
+        conn.execute(
+            "UPDATE exam_sheets SET preview_json=?1 WHERE id=?2",
+            params![exam.preview_json.to_string(), id],
+        )
+        .unwrap();
+        assert!(exclude_exam_cards_with_conn(
+            &conn,
+            &id,
+            &["card_a".into(), "card_b".into()],
+            None
+        )
+        .is_err());
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE exam_id=?1 AND deleted_at IS NULL",
+                [&id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 2);
+    }
+
+    #[test]
+    fn legacy_disjoint_card_ids_fail_without_guessing_by_text() {
+        let (_temp, db, id) = exclusion_fixture();
+        let conn = db.get_conn_safe().unwrap();
+        conn.execute(
+            "UPDATE questions SET card_id='unrelated' WHERE id='q_b'",
+            [],
+        )
+        .unwrap();
+        let error =
+            exclude_exam_cards_with_conn(&conn, &id, &["card_a".into(), "card_b".into()], None)
+                .unwrap_err();
+        assert!(error.to_string().contains("QBANK_IMPORT_REVIEW_REQUIRED"));
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 2);
+        let exam = VfsExamRepo::get_exam_sheet_with_conn(&conn, &id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            exam.preview_json["pages"][0]["cards"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn exclusion_rolls_back_soft_delete_and_stats_if_preview_save_fails() {
+        let (_temp, db, id) = exclusion_fixture();
+        let conn = db.get_conn_safe().unwrap();
+        conn.execute_batch("CREATE TRIGGER reject_exam_update BEFORE UPDATE ON exam_sheets BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END;").unwrap();
+        assert!(exclude_exam_cards_with_conn(&conn, &id, &["card_b".into()], None).is_err());
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE deleted_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stats: i64 = conn
+            .query_row(
+                "SELECT total_count FROM question_bank_stats WHERE exam_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!((live, stats), (2, 2));
+    }
 
     #[test]
     fn card_only_updates_keep_the_existing_name() {

@@ -8287,10 +8287,91 @@ pub struct SourceImageInfo {
     pub page_index: usize,
 }
 
-/// 获取题目集的原始导入图片列表（base64 data URL）
+fn qbank_source_image_directory(
+    preview: &serde_json::Value,
+    metadata: &serde_json::Value,
+) -> Vec<(usize, String)> {
+    // Preview indices are global across appended documents; metadata hashes are legacy-local.
+    let source_hashes: Vec<(usize, String)> = preview
+        .get("pages")
+        .and_then(|pages| pages.as_array())
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, page)| {
+            let hash = page.get("blob_hash")?.as_str()?.trim();
+            if hash.is_empty() {
+                return None;
+            }
+            let page_index = page
+                .get("page_index")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(index);
+            Some((page_index, hash.to_string()))
+        })
+        .collect();
+    if !source_hashes.is_empty() {
+        return source_hashes;
+    }
+    metadata
+        .get("source_image_hashes")
+        .and_then(|hashes| serde_json::from_value::<Vec<String>>(hashes.clone()).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .filter(|(_, hash)| !hash.trim().is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod qbank_source_image_tests {
+    use super::qbank_source_image_directory;
+    use serde_json::json;
+
+    #[test]
+    fn directory_uses_global_preview_indices_for_appended_documents() {
+        let preview = json!({"pages": [
+            {"page_index": 0, "blob_hash": "document_a_page_0"},
+            {"page_index": 3, "blob_hash": "document_b_page_0"},
+        ]});
+        let metadata = json!({"source_image_hashes": ["document_b_page_0"]});
+        assert_eq!(
+            qbank_source_image_directory(&preview, &metadata),
+            vec![
+                (0, "document_a_page_0".into()),
+                (3, "document_b_page_0".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_preserves_sparse_indices_and_legacy_fallback() {
+        let preview = json!({"pages": [
+            {"page_index": 0, "blob_hash": ""},
+            {"blob_hash": "page_1"},
+            {"page_index": 4, "blob_hash": "page_4"},
+        ]});
+        assert_eq!(
+            qbank_source_image_directory(&preview, &json!({})),
+            vec![(1, "page_1".into()), (4, "page_4".into()),]
+        );
+        assert_eq!(
+            qbank_source_image_directory(
+                &json!({"pages": []}),
+                &json!({"source_image_hashes": ["", "legacy_page_1"]})
+            ),
+            vec![(1, "legacy_page_1".into())]
+        );
+    }
+}
+
+/// 原图目录/按需单页读取。不传新增参数时保留旧的全量 data URL 契约。
 #[tauri::command]
 pub async fn qbank_get_source_images(
     examId: String,
+    pageIndex: Option<usize>,
+    metadataOnly: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SourceImageInfo>> {
     use crate::vfs::repos::VfsBlobRepo;
@@ -8304,36 +8385,25 @@ pub async fn qbank_get_source_images(
     // 阻塞式 SQLite 查询 + 大文件读取 + base64 编码整体移出异步线程，
     // 避免多页大图卡住 Tokio runtime
     tokio::task::spawn_blocking(move || -> Result<Vec<SourceImageInfo>> {
-        // 从 exam_sheet 的 metadata_json 中读取 source_image_hashes
         let exam = crate::vfs::repos::VfsExamRepo::get_exam_sheet(&vfs_db, &examId)
             .map_err(|e| AppError::database(format!("获取题目集失败: {}", e)))?
             .ok_or_else(|| AppError::not_found("题目集不存在"))?;
 
-        let mut source_hashes: Vec<String> = exam
-            .metadata_json
-            .get("source_image_hashes")
-            .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
-            .unwrap_or_default();
-
-        // ★ 回退：OCR 上传流程不写 source_image_hashes，图片存在 preview_json pages 的 blob_hash 中
-        if source_hashes.is_empty() {
-            if let Some(pages) = exam.preview_json.get("pages").and_then(|v| v.as_array()) {
-                for page in pages {
-                    if let Some(hash) = page.get("blob_hash").and_then(|v| v.as_str()) {
-                        if !hash.is_empty() {
-                            source_hashes.push(hash.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        if source_hashes.is_empty() {
-            return Ok(Vec::new());
-        }
+        let source_hashes = qbank_source_image_directory(&exam.preview_json, &exam.metadata_json);
 
         let mut results = Vec::new();
-        for (idx, hash) in source_hashes.iter().enumerate() {
+        for (idx, hash) in &source_hashes {
+            if pageIndex.is_some_and(|page| page != *idx) {
+                continue;
+            }
+            if metadataOnly.unwrap_or(false) {
+                results.push(SourceImageInfo {
+                    blob_hash: hash.clone(),
+                    data_url: String::new(),
+                    page_index: *idx,
+                });
+                continue;
+            }
             let blob_path = match VfsBlobRepo::get_blob_path(&vfs_db, hash) {
                 Ok(Some(p)) => p,
                 _ => continue,
@@ -8357,7 +8427,7 @@ pub async fn qbank_get_source_images(
             results.push(SourceImageInfo {
                 blob_hash: hash.clone(),
                 data_url,
-                page_index: idx,
+                page_index: *idx,
             });
         }
 

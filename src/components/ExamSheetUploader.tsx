@@ -98,42 +98,87 @@ const DOCUMENT_EXTENSIONS = ['.docx', '.xlsx', '.xls', '.txt', '.md', '.pdf'];
 // 点击选择 / 浏览器 dataTransfer 拖拽路径不经过原生路径校验，必须在此兜底，
 // 否则超大文件会被整体 FileReader→base64 读入内存。
 const MAX_UPLOAD_FILE_SIZE = DEFAULT_MAX_UPLOAD_FILE_SIZE;
+// Match the backend batch budget; validate before retaining/encoding more images.
+const MAX_IMAGE_BATCH_BYTES = 200 * 1024 * 1024;
 
 // 处理步骤
 type ProcessStep = 'select' | 'processing' | 'summary';
 
-type ExamSheetCard = NonNullable<ExamSheetSessionDetail['preview']['pages'][number]['cards']>[number];
-
-/** 导入结果摘要（只统计本次导入新增的题目） */
-export interface ImportSummary {
-  /** 本次新增的题目（追加到已有题目集时不含原有题目） */
-  cards: ExamSheetCard[];
-  questionTypes: Record<string, number>;
-  emptyQuestions: number;
+export interface ImportQuestion {
+  id: string;
+  card_id?: string | null;
+  content: string;
+  question_label?: string;
+  question_type?: string;
+  answer?: string;
 }
 
-/**
- * 从导入后的会话详情中挑出「本次新增」的题目并统计。
- *
- * 追加导入时会话里还有原有题目：摘要与筛选列表若混入它们，用户「取消勾选」
- * 会把原有题目一并删掉（2026-10 修复）。baseline 为导入前的题目 ID 集合；
- * 为 null（导入前快照失败）时退回统计全部题目。
- */
+interface ImportQuestionPage {
+  questions: ImportQuestion[];
+  total: number;
+  page: number;
+  has_more: boolean;
+}
+
+/** 导入摘要与题库使用同一组正式实体；预览仅用于核验可安全筛删的 card_id。 */
+export interface ImportSummary {
+  cards: Array<ImportQuestion & { card_id: string; ocr_text: string }>;
+  questionTypes: Record<string, number>;
+  emptyQuestions: number;
+  canFilter: boolean;
+}
+
+export async function loadImportQuestions(examId: string): Promise<ImportQuestion[]> {
+  const questions: ImportQuestion[] = [];
+  const ids = new Set<string>();
+  let page = 1;
+  let expectedTotal: number | undefined;
+  while (true) {
+    const result = await invoke<ImportQuestionPage>('qbank_list_questions', {
+      request: { exam_id: examId, filters: {}, page, page_size: 100 },
+    });
+    if (!Array.isArray(result.questions) || result.page !== page
+      || (expectedTotal !== undefined && result.total !== expectedTotal)) {
+      throw new Error('Question list changed while loading; retry the summary.');
+    }
+    expectedTotal = result.total;
+    for (const question of result.questions) {
+      if (!question.id || ids.has(question.id)) throw new Error('Duplicate question identity; review required.');
+      ids.add(question.id);
+      questions.push(question);
+    }
+    if (!result.has_more) break;
+    if (result.questions.length === 0 || questions.length >= result.total) {
+      throw new Error('Incomplete question page; review required.');
+    }
+    page += 1;
+  }
+  if (questions.length !== expectedTotal) throw new Error('Question count mismatch; review required.');
+  return questions;
+}
+
 export function buildImportSummary(
   detail: ExamSheetSessionDetail,
   baseline: ReadonlySet<string> | null,
+  questions: readonly ImportQuestion[],
 ): ImportSummary {
-  const pages = detail.preview?.pages || [];
-  const allCards = pages.flatMap(p => p.cards || []);
-  const cards = baseline ? allCards.filter(card => !baseline.has(card.card_id)) : allCards;
+  const previewCounts = new Map<string, number>();
+  for (const card of (detail.preview?.pages || []).flatMap(page => page.cards || [])) {
+    previewCounts.set(card.card_id, (previewCounts.get(card.card_id) || 0) + 1);
+  }
+  const added = baseline ? questions.filter(question => !baseline.has(question.id)) : [...questions];
+  const cards = added.map(question => ({ ...question, card_id: question.card_id || '', ocr_text: question.content }));
+  const cardIds = cards.map(card => card.card_id);
+  const canFilter = baseline !== null && cardIds.every(id => id && previewCounts.get(id) === 1)
+    && new Set(cardIds).size === cardIds.length;
   const questionTypes: Record<string, number> = {};
   let emptyQuestions = 0;
   for (const card of cards) {
     const qType = card.question_type || 'other';
     questionTypes[qType] = (questionTypes[qType] || 0) + 1;
-    if (!card.ocr_text?.trim()) emptyQuestions++;
+    if (!card.content?.trim()) emptyQuestions++;
   }
-  return { cards, questionTypes, emptyQuestions };
+  return { cards, questionTypes, emptyQuestions, canFilter };
 }
 
 interface ImportAttempt {
@@ -534,25 +579,27 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     }
   }, [parsedQuestions.length, step]);
 
-  const showSummary = useCallback((detail: ExamSheetSessionDetail) => {
-    setImportSummary(buildImportSummary(detail, baselineCardIdsRef.current));
+  const showSummary = useCallback(async (detail: ExamSheetSessionDetail, attempt?: ImportAttempt) => {
+    const questions = await loadImportQuestions(detail.summary.id);
+    if (!mountedRef.current || (attempt && !isCurrentImportAttempt(attempt))) return;
+    setImportSummary(buildImportSummary(detail, baselineCardIdsRef.current, questions));
+    const report = detail.summary.metadata?.import_report;
+    if (report) {
+      // Persisted quality is authoritative even when the terminal event was missed.
+      setImportIncomplete(report.status !== 'completed'
+        || (report.failed_pages?.length || 0) > 0 || (report.failed_chunks?.length || 0) > 0
+        || (report.quarantined_entries?.length || 0) > 0 || (report.conflicts?.length || 0) > 0);
+      setDegenerateCount(Math.max(0, report.degenerate_count || 0));
+    }
     setPendingDetail(detail);
     setExcludedCardIds(new Set());
     setStep('summary');
-  }, []);
+  }, [isCurrentImportAttempt]);
 
-  // 导入前快照已有题目 ID（追加导入时用于区分本次新增）；失败返回 null（退回统计全部）
-  const snapshotBaselineCardIds = useCallback(async (): Promise<Set<string> | null> => {
+  // A failed baseline must not turn pre-existing questions into selectable new imports.
+  const snapshotBaselineCardIds = useCallback(async (): Promise<Set<string>> => {
     if (!sessionId) return new Set();
-    try {
-      const detail = await TauriAPI.getExamSheetSessionDetail(sessionId);
-      return new Set(
-        (detail.preview?.pages || []).flatMap(p => p.cards || []).map(card => card.card_id),
-      );
-    } catch (err: unknown) {
-      debugLog.warn('[ExamSheetUploader] 导入前题目快照失败，完成页将统计全部题目:', err);
-      return null;
-    }
+    return new Set((await loadImportQuestions(sessionId)).map(question => question.id));
   }, [sessionId]);
 
   /** 发起一次流式导入（图片：content 为 base64 JSON 数组，format='image'） */
@@ -603,7 +650,17 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
       let format: string;
       let name: string;
       if (category === 'image') {
-        content = JSON.stringify(await Promise.all(selectedFiles.map(f => readFileAsBase64(f.file))));
+        if (selectedFiles.reduce((bytes, item) => bytes + item.file.size, 0) > MAX_IMAGE_BATCH_BYTES) {
+          throw new Error(t('exam_sheet:uploader.image_batch_too_large', {
+            defaultValue: '图片总大小不能超过 {{size}} MB，请拆分后导入。', size: 200,
+          }));
+        }
+        const encoded: string[] = [];
+        for (const item of selectedFiles) {
+          if (!isCurrentImportAttempt(attempt)) return;
+          encoded.push(await readFileAsBase64(item.file));
+        }
+        content = JSON.stringify(encoded);
         format = 'image';
         name = resolvedSessionName
           || selectedFiles[0]?.file.name.replace(/\.[^/.]+$/, '')
@@ -619,7 +676,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
       setLlmProgress({ percent: 5, message: t('exam_sheet:uploader.parsing_document') });
       const response = await runStreamImport(attempt, content, format, name);
       if (!isCurrentImportAttempt(attempt)) return;
-      showSummary(response);
+      await showSummary(response, attempt);
     } catch (err: unknown) {
       const errorMessage = errorMessageOf(err);
       debugLog.error('[ExamSheetUploader] 导入失败:', err);
@@ -645,7 +702,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
 
   // 完成：删除被取消勾选的题目后交给父组件
   const handleConfirmSummary = useCallback(async () => {
-    if (!pendingDetail || isConfirming) return;
+    if (!pendingDetail || isConfirming || (excludedCardIds.size > 0 && !importSummary?.canFilter)) return;
     setIsConfirming(true);
 
     try {
@@ -659,8 +716,9 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
         } catch (err: unknown) {
           debugLog.error('[ExamSheetUploader] Failed to delete excluded cards:', err);
           showGlobalNotification('error', t('exam_sheet:uploader.filter_delete_failed'));
-          // 即使删除失败也让用户继续
-          onUploadSuccess?.(pendingDetail);
+          setError(t('exam_sheet:uploader.filter_delete_failed'));
+          // Keep the review and exclusions intact; never claim a failed filter succeeded.
+          return;
         }
       } else {
         onUploadSuccess?.(pendingDetail);
@@ -669,7 +727,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     } finally {
       setIsConfirming(false);
     }
-  }, [pendingDetail, onUploadSuccess, excludedCardIds, isConfirming, t]);
+  }, [pendingDetail, onUploadSuccess, excludedCardIds, importSummary, isConfirming, t]);
 
   // 判断文件类型
   const categorizeFile = useCallback((file: File): FileCategory | null => {
@@ -736,9 +794,17 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     } else {
       // 一次拖入图片 + 文档混合时只取图片；已选文档时改选图片 = 替换
       const images = validFiles.filter(f => f.category === 'image');
+      const previous = currentCategory === 'document' ? [] : selectedFiles;
+      if ([...previous, ...images].reduce((bytes, item) => bytes + item.file.size, 0) > MAX_IMAGE_BATCH_BYTES) {
+        images.forEach(item => { if (item.previewUrl) URL.revokeObjectURL(item.previewUrl); });
+        setError(t('exam_sheet:uploader.image_batch_too_large', {
+          defaultValue: '图片总大小不能超过 {{size}} MB，请拆分后导入。', size: 200,
+        }));
+        return;
+      }
       setSelectedFiles(prev => (prev[0]?.category === 'document' ? images : [...prev, ...images]));
     }
-  }, [categorizeFile, currentCategory, t]);
+  }, [categorizeFile, currentCategory, selectedFiles, t]);
 
   // iPhone 照片多为 HEIC：先经平台原生解码转 JPEG（WebView / Android ImageDecoder），
   // 无法转换的明确提示并剔除，不再把 OCR/视觉模型不认的 HEIC 原样送下游。
@@ -897,7 +963,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
       });
 
       if (!isCurrentImportAttempt(attempt)) return;
-      showSummary(response);
+      await showSummary(response, attempt);
     } catch (err: unknown) {
       debugLog.error('[ExamSheetUploader] 断点续导失败:', err);
       if (!isCurrentImportAttempt(attempt)) return;
@@ -924,8 +990,8 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     try {
       const repaired = await TauriAPI.repairExamQuestions(examId);
       const detail = await TauriAPI.getExamSheetSessionDetail(examId);
-      showSummary(detail);
-      setDegenerateCount(prev => Math.max(0, prev - repaired));
+      await showSummary(detail);
+      if (!detail.summary.metadata?.import_report) setDegenerateCount(prev => Math.max(0, prev - repaired));
       showGlobalNotification('success', t('exam_sheet:uploader.repair_degenerate_done', { count: repaired }));
     } catch (err: unknown) {
       debugLog.error('[ExamSheetUploader] 修复未结构化题目失败:', err);
@@ -1226,7 +1292,9 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
               <div className="flex flex-1 min-h-0 flex-col gap-3 ui-slide-fade-in [--ui-enter-x:24px]" data-testid="exam-uploader-summary">
                 <div className="flex-shrink-0 space-y-1 text-center">
                   <h3 className="flex items-center justify-center gap-1.5 text-base font-semibold">
-                    <CheckCircle size={18} weight="fill" className="text-success ui-zoom-fade-in" />
+                    {importIncomplete || !importSummary.canFilter
+                      ? <WarningCircle size={18} className="text-warning" />
+                      : <CheckCircle size={18} weight="fill" className="text-success ui-zoom-fade-in" />}
                     {t('exam_sheet:uploader.import_done', { count: total })}
                   </h3>
                   {total > 0 && (
@@ -1263,7 +1331,15 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
                   </div>
                 )}
 
-                {/* 本次新增的题目：默认全部保留，取消勾选即不录入 */}
+                {!importSummary.canFilter && (
+                  <div role="alert" data-testid="exam-uploader-integrity-warning" className="rounded-md bg-warning/10 px-3 py-2 text-sm text-warning">
+                    {t('exam_sheet:uploader.integrity_review_required', {
+                      defaultValue: '题库与预览的题目标识不一致，已暂停筛题。请核对题库；不会根据题干猜测删除。',
+                    })}
+                  </div>
+                )}
+
+                {/* 正式题目已经保存，确认时以同一事务排除取消勾选的实体。 */}
                 {total > 0 && (
                   <div className="flex min-h-0 flex-col overflow-hidden rounded-md border border-border/50">
                     <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border/40 px-3 py-1.5">
@@ -1272,6 +1348,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
                         variant="ghost"
                         size="sm"
                         className="!h-7 shrink-0 text-xs"
+                        disabled={!importSummary.canFilter || isConfirming}
                         onClick={() => setExcludedCardIds(allExcluded ? new Set() : new Set(cards.map(c => c.card_id)))}
                       >
                         {allExcluded ? t('common:select_all') : t('common:deselect_all')}
@@ -1283,7 +1360,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
                         const text = card.ocr_text?.trim() || card.question_label || '';
                         return (
                           <label
-                            key={card.card_id}
+                            key={card.id}
                             data-testid="exam-uploader-summary-question"
                             className={cn(
                               'flex cursor-pointer items-start gap-2.5 px-3 py-2 transition-colors',
@@ -1295,6 +1372,7 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
                               type="checkbox"
                               className="mt-1 h-4 w-4 flex-shrink-0 accent-primary"
                               checked={!isExcluded}
+                              disabled={!importSummary.canFilter || isConfirming}
                               onChange={() => {
                                 setExcludedCardIds(prev => {
                                   const next = new Set(prev);

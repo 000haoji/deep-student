@@ -2952,6 +2952,7 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
             onOpenChange={setCropDialogOpen}
             examId={sessionId}
             questionId={currentQuestion.id}
+            sourceRef={currentQuestion.sourceRef}
             inline
             isActive={isActive}
             onImageAdded={() => {
@@ -3466,6 +3467,7 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
           onOpenChange={setCropDialogOpen}
           examId={sessionId}
           questionId={currentQuestion.id}
+          sourceRef={currentQuestion.sourceRef}
           inline
           isActive={isActive}
           onImageAdded={() => {

@@ -20,6 +20,7 @@ const RENDER_DPI: f32 = 300.0;
 const PAGE_WIDTH_INCHES: f32 = 8.5;
 const PAGE_HEIGHT_INCHES: f32 = 14.0;
 const MAX_DOCUMENT_SIZE: usize = 200 * 1024 * 1024;
+const MAX_SOURCE_IMAGE_PIXELS: u64 = 64_000_000;
 
 /// 单个页面的渲染结果（不含原始图片字节以节省内存）
 #[derive(Debug, Clone)]
@@ -196,6 +197,7 @@ impl PageRasterizer {
         info!("[PageRasterizer] 处理 {} 张图片", base64_images.len());
 
         let mut pages = Vec::with_capacity(base64_images.len());
+        let mut total_source_bytes = 0usize;
 
         for (idx, b64) in base64_images.iter().enumerate() {
             let raw_b64 = if let Some(pos) = b64.find(',') {
@@ -211,6 +213,10 @@ impl PageRasterizer {
                 })?;
 
             Self::check_file_size(bytes.len())?;
+            total_source_bytes = total_source_bytes
+                .checked_add(bytes.len())
+                .filter(|n| *n <= MAX_DOCUMENT_SIZE)
+                .ok_or_else(|| AppError::validation("图片批次总大小超过 200MiB，请拆分导入"))?;
 
             // ★ 2026-06-12（代理 3 审阅 B3）：只读取图片头部获取尺寸，
             // 避免为取宽高就全量解码大图（CPU/内存开销）。
@@ -218,7 +224,8 @@ impl PageRasterizer {
                 .with_guessed_format()
                 .ok()
                 .and_then(|reader| reader.into_dimensions().ok())
-                .unwrap_or((0, 0));
+                .ok_or_else(|| AppError::validation(format!("图片 {} 无法读取尺寸", idx + 1)))?;
+            validate_source_dimensions(width, height)?;
 
             let (mime, ext) = detect_image_format(&bytes);
 
@@ -407,6 +414,30 @@ impl PageRasterizer {
         base64::engine::general_purpose::STANDARD
             .decode(raw_b64)
             .map_err(|e| AppError::validation(format!("Base64 解码失败: {}", e)))
+    }
+}
+
+fn validate_source_dimensions(width: u32, height: u32) -> Result<(), AppError> {
+    let pixels = u64::from(width) * u64::from(height);
+    if width == 0 || height == 0 || pixels > MAX_SOURCE_IMAGE_PIXELS {
+        return Err(AppError::validation(format!(
+            "图片尺寸 {}x{} 超过单页安全像素预算",
+            width, height
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod import_image_budget_tests {
+    use super::validate_source_dimensions;
+
+    #[test]
+    fn rejects_zero_and_oversized_source_images_before_decoding() {
+        assert!(validate_source_dimensions(0, 3000).is_err());
+        assert!(validate_source_dimensions(100_000, 100_000).is_err());
+        assert!(validate_source_dimensions(u32::MAX, u32::MAX).is_err());
+        assert!(validate_source_dimensions(2550, 3608).is_ok());
     }
 }
 

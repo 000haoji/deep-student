@@ -1,112 +1,409 @@
-//! Stage 3: Cross-Page Merger — 跨页题目检测与合并
-//!
-//! 处理 VLM 逐页分析后的跨页题目续接问题：
-//! - 检测 `continues_from_previous` / `continues_to_next` 标记
-//! - 合并跨页题目的 raw_text 和 figures
-//! - 记录每道题跨越的页面索引
+//! Conservative cross-page continuation with typed source provenance.
+//! Missing/failed pages are boundaries, not evidence of an adjacent continuation.
 
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info};
 
-use crate::vlm_grounding_service::{VlmFigure, VlmPageAnalysis, VlmQuestion};
+use crate::vlm_grounding_service::{ImportBlockKind, VlmFigure, VlmPageAnalysis, VlmQuestion};
 
-/// 合并后的题目（可能跨越多个页面）
-#[derive(Debug, Clone)]
-pub struct MergedQuestion {
-    /// 合并后的题目数据
-    pub question: VlmQuestion,
-    /// 此题跨越的页面索引列表（至少包含一个）
-    pub page_indices: Vec<usize>,
-    /// 所有配图及其来源页面索引
-    pub figures_with_page: Vec<(usize, VlmFigure)>,
+/// One original fragment; every merged page/bbox remains auditable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SourceSpan {
+    pub page_index: usize,
+    pub bbox: [f64; 4],
+    pub source_id: String,
+    pub label: String,
 }
 
-/// 将逐页 VLM 分析结果合并为完整题目列表
-///
-/// `page_analyses` 中 `None` 的页面会被跳过（VLM 分析失败的页面）。
+#[derive(Debug, Clone, Default)]
+pub struct MergedQuestion {
+    pub question: VlmQuestion,
+    pub page_indices: Vec<usize>,
+    pub figures_with_page: Vec<(usize, VlmFigure)>,
+    pub source_spans: Vec<SourceSpan>,
+}
+
+fn valid_scope(scope: &str) -> Option<&str> {
+    let scope = scope.trim();
+    // A section is semantic metadata, not a guessed relationship between numbers.
+    scope
+        .chars()
+        .any(|c| c.is_alphabetic() && !"一二三四五六七八九十百千万零〇".contains(c))
+        .then_some(scope)
+}
+
+fn compatible_labels(a: &str, b: &str) -> bool {
+    a.trim().is_empty() || b.trim().is_empty() || a.trim() == b.trim()
+}
+
 pub fn merge_pages(page_analyses: &[Option<VlmPageAnalysis>]) -> Vec<MergedQuestion> {
     let mut result: Vec<MergedQuestion> = Vec::new();
+    let mut active_section = String::new();
 
     for (page_idx, analysis_opt) in page_analyses.iter().enumerate() {
-        let analysis = match analysis_opt {
-            Some(a) => a,
-            None => continue,
+        let Some(analysis) = analysis_opt else {
+            active_section.clear();
+            continue;
         };
-
-        for question in &analysis.questions {
-            // ★ 2026-06-12（代理 3 审阅 F2）：续接必须落在相邻页面上。
-            // 旧实现只要 result 非空就并入最后一题——若中间页 VLM 分析失败（None）
-            // 或上一页没有解析出任何题目，会把续接文本错误地拼到隔页的无关题目上。
-            // 允许 last_page == page_idx（同页被 VLM 拆成多个续接块）或上一页。
-            let can_merge = question.continues_from_previous
-                && result
-                    .last()
-                    .and_then(|q| q.page_indices.last().copied())
-                    .map(|last_page| page_idx - last_page <= 1)
-                    .unwrap_or(false);
-
-            if question.continues_from_previous && !can_merge {
-                debug!(
-                    "[CrossPageMerger] 页面 {} 题目 '{}' 标记续接但上一题不在相邻页，按独立题目处理",
-                    page_idx + 1,
-                    question.label
-                );
+        for (block_idx, source) in analysis.questions.iter().enumerate() {
+            let mut question = source.clone();
+            question.normalize_legacy_kind();
+            if question.source_id.trim().is_empty() {
+                question.source_id = format!("page:{page_idx}:block:{block_idx}");
+            }
+            if let Some(scope) = valid_scope(&question.section).map(str::to_string) {
+                question.section = scope.clone();
+                active_section = scope;
+            } else if question.block_kind == ImportBlockKind::Heading {
+                // An unclassified heading may start a new chapter. Do not leak the
+                // previous chapter's identity through that boundary.
+                question.section.clear();
+                active_section.clear();
+            } else {
+                let crossed_answer_boundary = result.last().is_some_and(|last| {
+                    (last.question.block_kind == ImportBlockKind::Question
+                        && question.block_kind.is_answer())
+                        || (last.question.block_kind.is_answer()
+                            && question.block_kind == ImportBlockKind::Question)
+                });
+                if crossed_answer_boundary || question.block_kind == ImportBlockKind::Unknown {
+                    active_section.clear();
+                }
+                question.section = active_section.clone();
             }
 
+            let can_merge = question.continues_from_previous
+                && matches!(
+                    question.block_kind,
+                    ImportBlockKind::Question
+                        | ImportBlockKind::Answer
+                        | ImportBlockKind::Explanation
+                        | ImportBlockKind::Material
+                )
+                && result.last().is_some_and(|last| {
+                    last.question.continues_to_next
+                        && last.question.block_kind == question.block_kind
+                        && last.question.section == question.section
+                        && compatible_labels(&last.question.label, &question.label)
+                        && last
+                            .page_indices
+                            .last()
+                            .is_some_and(|&last_page| page_idx.saturating_sub(last_page) <= 1)
+                });
+
+            let span = SourceSpan {
+                page_index: page_idx,
+                bbox: question.bbox,
+                source_id: question.source_id.clone(),
+                label: question.label.clone(),
+            };
             if can_merge {
-                let last = result.last_mut().unwrap();
-
+                let last = result.last_mut().expect("checked above");
                 debug!(
-                    "[CrossPageMerger] 页面 {} 题目 '{}' 续接上一页题目 '{}'",
+                    "[CrossPageMerger] 页面 {} 来源 '{}' 续接 '{}'",
                     page_idx + 1,
-                    question.label,
-                    last.question.label
+                    question.source_id,
+                    last.question.source_id
                 );
-
                 if !question.raw_text.is_empty() {
-                    last.question.raw_text.push('\n');
+                    if !last.question.raw_text.is_empty() {
+                        last.question.raw_text.push('\n');
+                    }
                     last.question.raw_text.push_str(&question.raw_text);
                 }
-
-                // 同页多个续接块时避免重复记录页面索引
                 if last.page_indices.last() != Some(&page_idx) {
                     last.page_indices.push(page_idx);
                 }
-
-                for fig in &question.figures {
-                    last.figures_with_page.push((page_idx, fig.clone()));
-                    last.question.figures.push(fig.clone());
+                last.source_spans.push(span);
+                for figure in &question.figures {
+                    last.figures_with_page.push((page_idx, figure.clone()));
+                    last.question.figures.push(figure.clone());
                 }
-
                 last.question.continues_to_next = question.continues_to_next;
             } else {
-                let figures_with_page: Vec<(usize, VlmFigure)> = question
-                    .figures
-                    .iter()
-                    .map(|f| (page_idx, f.clone()))
-                    .collect();
-
                 result.push(MergedQuestion {
-                    question: question.clone(),
+                    figures_with_page: question
+                        .figures
+                        .iter()
+                        .map(|figure| (page_idx, figure.clone()))
+                        .collect(),
+                    question,
                     page_indices: vec![page_idx],
-                    figures_with_page,
+                    source_spans: vec![span],
                 });
             }
         }
     }
+    info!(
+        "[CrossPageMerger] 合并完成: {} 个文档块, {} 个跨页块",
+        result.len(),
+        result.iter().filter(|q| q.page_indices.len() > 1).count()
+    );
+    result
+}
 
-    let cross_page_count = result.iter().filter(|q| q.page_indices.len() > 1).count();
-    if cross_page_count > 0 {
-        info!(
-            "[CrossPageMerger] 合并完成: {} 道题目, 其中 {} 道跨页",
-            result.len(),
-            cross_page_count
-        );
-    } else {
-        info!(
-            "[CrossPageMerger] 合并完成: {} 道题目, 无跨页",
-            result.len()
-        );
+pub fn partition_complete_blocks(
+    blocks: Vec<MergedQuestion>,
+) -> (Vec<MergedQuestion>, Vec<MergedQuestion>) {
+    // Publishing a fragment before its continuation is available changes its
+    // identity or freezes truncated content when a failed page is retried.
+    blocks.into_iter().partition(|block| {
+        !block.question.continues_from_previous && !block.question.continues_to_next
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn block(
+        kind: ImportBlockKind,
+        section: &str,
+        label: &str,
+        from: bool,
+        to: bool,
+    ) -> VlmQuestion {
+        VlmQuestion {
+            block_kind: kind,
+            section: section.into(),
+            label: label.into(),
+            raw_text: format!("{label}原文"),
+            bbox: [0.1, 0.2, 0.8, 0.9],
+            continues_from_previous: from,
+            continues_to_next: to,
+            ..Default::default()
+        }
+    }
+    fn page(block: VlmQuestion) -> Option<VlmPageAnalysis> {
+        Some(VlmPageAnalysis {
+            questions: vec![block],
+        })
     }
 
-    result
+    #[test]
+    fn continuation_keeps_every_page_bbox_and_source_identity() {
+        let pages = vec![
+            page(block(
+                ImportBlockKind::Question,
+                "single_choice",
+                "1",
+                false,
+                true,
+            )),
+            page(block(ImportBlockKind::Question, "", "1", true, false)),
+        ];
+        let result = merge_pages(&pages);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].page_indices, vec![0, 1]);
+        assert_eq!(result[0].source_spans.len(), 2);
+        assert_eq!(result[0].source_spans[1].bbox, [0.1, 0.2, 0.8, 0.9]);
+        assert_ne!(
+            result[0].source_spans[0].source_id,
+            result[0].source_spans[1].source_id
+        );
+        assert_eq!(result[0].question.section, "single_choice");
+    }
+
+    #[test]
+    fn never_merges_questions_with_answers_or_conflicting_sections_or_labels() {
+        for (kind, scope, label) in [
+            (ImportBlockKind::Answer, "single_choice", "1"),
+            (ImportBlockKind::Question, "term_definition", "1"),
+            (ImportBlockKind::Question, "single_choice", "2"),
+        ] {
+            let pages = vec![
+                page(block(
+                    ImportBlockKind::Question,
+                    "single_choice",
+                    "1",
+                    false,
+                    true,
+                )),
+                page(block(kind, scope, label, true, false)),
+            ];
+            assert_eq!(merge_pages(&pages).len(), 2);
+        }
+    }
+
+    #[test]
+    fn missing_page_prevents_continuation_and_scope_inheritance() {
+        let pages = vec![
+            page(block(
+                ImportBlockKind::Question,
+                "single_choice",
+                "1",
+                false,
+                true,
+            )),
+            None,
+            page(block(ImportBlockKind::Question, "", "1", true, false)),
+        ];
+        let result = merge_pages(&pages);
+        assert_eq!(result.len(), 2);
+        assert!(result[1].question.section.is_empty());
+    }
+
+    #[test]
+    fn continuation_requires_two_sided_evidence() {
+        let pages = vec![
+            page(block(
+                ImportBlockKind::Question,
+                "single_choice",
+                "1",
+                false,
+                false,
+            )),
+            page(block(
+                ImportBlockKind::Question,
+                "single_choice",
+                "1",
+                true,
+                false,
+            )),
+        ];
+        assert_eq!(merge_pages(&pages).len(), 2);
+    }
+
+    #[test]
+    fn heading_scope_can_continue_across_pages_without_number_guessing() {
+        let pages = vec![
+            page(block(
+                ImportBlockKind::Heading,
+                "term_definition",
+                "",
+                false,
+                false,
+            )),
+            page(block(ImportBlockKind::Answer, "", "1", false, false)),
+        ];
+        let result = merge_pages(&pages);
+        assert_eq!(result[1].question.section, "term_definition");
+        let numeric = vec![
+            page(block(ImportBlockKind::Heading, "2", "", false, false)),
+            page(block(ImportBlockKind::Answer, "", "1", false, false)),
+        ];
+        assert!(merge_pages(&numeric)[1].question.section.is_empty());
+    }
+
+    #[test]
+    fn answer_region_without_scope_does_not_inherit_last_question_type() {
+        let pages = vec![
+            page(block(
+                ImportBlockKind::Question,
+                "short_answer",
+                "8",
+                false,
+                false,
+            )),
+            page(block(ImportBlockKind::Answer, "", "1", false, false)),
+        ];
+        let result = merge_pages(&pages);
+        assert!(result[1].question.section.is_empty());
+    }
+
+    #[test]
+    fn failed_neighbor_defers_both_sides_until_a_complete_identity_exists() {
+        let first = block(
+            ImportBlockKind::Question,
+            "synthetic_section",
+            "1",
+            false,
+            true,
+        );
+        let second = block(
+            ImportBlockKind::Question,
+            "synthetic_section",
+            "1",
+            true,
+            false,
+        );
+        for incomplete in [
+            vec![page(first.clone()), None],
+            vec![None, page(second.clone())],
+        ] {
+            let (ready, deferred) = partition_complete_blocks(merge_pages(&incomplete));
+            assert!(ready.is_empty());
+            assert_eq!(deferred.len(), 1);
+        }
+        let (ready, deferred) =
+            partition_complete_blocks(merge_pages(&[page(first), page(second)]));
+        assert!(deferred.is_empty());
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].question.source_id, "page:0:block:0");
+        assert_eq!(ready[0].source_spans.len(), 2);
+        assert_eq!(ready[0].page_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn unresolved_or_conflicting_continuations_never_become_practice_questions() {
+        let (ready, deferred) = partition_complete_blocks(merge_pages(&[
+            page(block(
+                ImportBlockKind::Question,
+                "scope_a",
+                "1",
+                false,
+                true,
+            )),
+            page(block(
+                ImportBlockKind::Question,
+                "scope_b",
+                "1",
+                true,
+                false,
+            )),
+            page(block(
+                ImportBlockKind::Question,
+                "scope_b",
+                "2",
+                false,
+                false,
+            )),
+        ]));
+        assert_eq!(deferred.len(), 2);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].question.label, "2");
+    }
+
+    #[test]
+    fn missing_head_stays_deferred_after_a_later_fragment_merges() {
+        let (ready, deferred) = partition_complete_blocks(merge_pages(&[
+            None,
+            page(block(
+                ImportBlockKind::Question,
+                "synthetic_section",
+                "1",
+                true,
+                true,
+            )),
+            page(block(
+                ImportBlockKind::Question,
+                "synthetic_section",
+                "1",
+                true,
+                false,
+            )),
+        ]));
+        assert!(ready.is_empty());
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].source_spans.len(), 2);
+        assert!(deferred[0].question.continues_from_previous);
+    }
+
+    #[test]
+    fn legacy_answer_marker_is_upgraded_before_continuation() {
+        let mut answer = block(ImportBlockKind::Question, "single_choice", "1", true, false);
+        answer.raw_text = "[答案区] 答案：B".into();
+        let pages = vec![
+            page(block(
+                ImportBlockKind::Question,
+                "single_choice",
+                "1",
+                false,
+                true,
+            )),
+            page(answer),
+        ];
+        let result = merge_pages(&pages);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[1].question.block_kind, ImportBlockKind::Answer);
+    }
 }

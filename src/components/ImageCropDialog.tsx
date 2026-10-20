@@ -38,6 +38,8 @@ export interface ImageCropDialogProps {
   onOpenChange: (open: boolean) => void;
   examId: string;
   questionId: string;
+  /** Persisted document-import provenance; absent for legacy/manual questions. */
+  sourceRef?: string | null;
   onImageAdded?: () => void;
   /**
    * @deprecated 组件现恒以内联裁剪工具渲染（模块规范禁模态），该 prop 仅为兼容保留、不再参与逻辑。
@@ -45,6 +47,36 @@ export interface ImageCropDialogProps {
   inline?: boolean;
   /** ★ 标签页：宿主标签页是否活跃（保活 display:none 实例不得接管统一顶栏） */
   isActive?: boolean;
+}
+
+function sourceLocation(sourceRef: string | null | undefined): { pageIndex?: number; rect: CropRect | null } {
+  try {
+    const source = JSON.parse(sourceRef || 'null');
+    if (source?.schema_version !== 1 || source.kind !== 'document_import') return { rect: null };
+    const validIndex = (index: unknown): index is number => typeof index === 'number' && Number.isInteger(index) && index >= 0;
+    const globalIndex = Array.isArray(source.preview_page_indices) ? source.preview_page_indices.find(validIndex) : undefined;
+    const offset = validIndex(source.page_offset) ? source.page_offset : 0;
+    const localIndex = Array.isArray(source.page_indices) ? source.page_indices.find(validIndex) : undefined;
+    const spans = Array.isArray(source.page_spans) ? source.page_spans : [];
+    const span = globalIndex !== undefined
+      ? spans.find((span: any) => validIndex(span?.page_index) && span.page_index + offset === globalIndex)
+      : spans.find((span: any) => validIndex(span?.page_index));
+    const pageIndex = globalIndex ?? ((span?.page_index ?? localIndex) !== undefined ? (span?.page_index ?? localIndex) + offset : undefined);
+    const box = span?.bbox;
+    // Only normalized xyxy is safe to apply without knowing the raster size.
+    const rect = Array.isArray(box) && box.length === 4
+      && box.every((value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1)
+      && box[2] > box[0] && box[3] > box[1]
+      ? { x: box[0], y: box[1], width: box[2] - box[0], height: box[3] - box[1] } : null;
+    return { pageIndex, rect };
+  } catch { return { rect: null }; }
+}
+
+function imageObjectUrl(dataUrl: string): string {
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(dataUrl);
+  if (!match) throw new Error('Invalid source image');
+  const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0));
+  return URL.createObjectURL(new Blob([bytes], { type: match[1] }));
 }
 
 // ============================================================================
@@ -56,6 +88,7 @@ export function ImageCropDialog({
   onOpenChange,
   examId,
   questionId,
+  sourceRef,
   onImageAdded,
   isActive,
 }: ImageCropDialogProps) {
@@ -65,6 +98,11 @@ export function ImageCropDialog({
   const [loading, setLoading] = useState(false);
   const [currentPage, setCurrentPage] = useState(0);
   const [cropping, setCropping] = useState(false);
+  const [loadedImage, setLoadedImage] = useState<{ blobHash: string; url: string } | null>(null);
+  const [pageLoading, setPageLoading] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [catalogOwner, setCatalogOwner] = useState<string | null>(null);
+  const owner = JSON.stringify([examId, questionId, sourceRef]);
 
   // Crop selection state
   const [cropRect, setCropRect] = useState<CropRect | null>(null);
@@ -75,35 +113,67 @@ export function ImageCropDialog({
   // 内联工具根节点：Android 返回键 handler 的可见性守卫用（保活隐藏实例不吞返回键）
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // Load source images when dialog opens
+  // The catalog contains hashes/indices only. Closing also drops all retained data.
   useEffect(() => {
+    setSourceImages([]);
+    setCatalogOwner(null);
+    setCropRect(null);
+    setLoadedImage(null);
+    setLoadError(false);
     if (!open || !examId) return;
     let cancelled = false;
-
-    const load = async () => {
-      setLoading(true);
-      try {
-        const images = await invoke<SourceImageInfo[]>('qbank_get_source_images', {
-          examId,
-        });
+    setLoading(true);
+    void invoke<SourceImageInfo[]>('qbank_get_source_images', { examId, metadataOnly: true })
+      .then(images => {
+        if (cancelled) return;
+        const location = sourceLocation(sourceRef);
+        const index = images.findIndex(image => image.pageIndex === location.pageIndex);
+        // Never retain legacy all-page data URLs in the catalog state.
+        setSourceImages(images.map(image => ({ ...image, dataUrl: '' })));
+        setCurrentPage(index >= 0 ? index : 0);
+        setCropRect(index >= 0 ? location.rect : null);
+        setCatalogOwner(owner);
+      })
+      .catch(error => {
         if (!cancelled) {
-          setSourceImages(images);
-          setCurrentPage(0);
-          setCropRect(null);
+          console.error('[ImageCropDialog] Failed to load source image catalog:', error);
+          setLoadError(true);
         }
-      } catch (e) {
-        console.error('[ImageCropDialog] Failed to load source images:', e);
-        if (!cancelled) {
-          setSourceImages([]);
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    load();
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [open, examId]);
+  }, [open, examId, questionId, sourceRef, owner]);
+
+  const selectedImage = catalogOwner === owner ? sourceImages[currentPage] : undefined;
+  const selectedPageIndex = selectedImage?.pageIndex;
+  const selectedBlobHash = selectedImage?.blobHash;
+  useEffect(() => {
+    if (!open || selectedPageIndex === undefined || !selectedBlobHash) return;
+    let cancelled = false;
+    let objectUrl: string | undefined;
+    setLoadedImage(null);
+    setPageLoading(true);
+    setLoadError(false);
+    void invoke<SourceImageInfo[]>('qbank_get_source_images', { examId, pageIndex: selectedPageIndex })
+      .then(images => {
+        if (cancelled) return;
+        const image = images.find(image => image.pageIndex === selectedPageIndex && image.blobHash === selectedBlobHash);
+        if (!image?.dataUrl) throw new Error('Source image is unavailable');
+        objectUrl = imageObjectUrl(image.dataUrl);
+        setLoadedImage({ blobHash: image.blobHash, url: objectUrl });
+      })
+      .catch(error => {
+        if (!cancelled) {
+          console.error('[ImageCropDialog] Failed to load source page:', error);
+          setLoadError(true);
+        }
+      })
+      .finally(() => { if (!cancelled) setPageLoading(false); });
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [open, examId, selectedPageIndex, selectedBlobHash, owner]);
 
   // Get relative coordinates within the displayed image
   const getRelativeCoords = useCallback((clientX: number, clientY: number) => {
@@ -182,14 +252,14 @@ export function ImageCropDialog({
 
   // Submit crop
   const handleCrop = useCallback(async () => {
-    if (!cropRect || !sourceImages[currentPage]) return;
+    if (!cropRect || !selectedImage || pageLoading || loadedImage?.blobHash !== selectedImage.blobHash) return;
 
     setCropping(true);
     try {
       await invoke('qbank_crop_source_image', {
         request: {
           question_id: questionId,
-          blob_hash: sourceImages[currentPage].blobHash,
+          blob_hash: selectedImage.blobHash,
           crop_x: cropRect.x,
           crop_y: cropRect.y,
           crop_width: cropRect.width,
@@ -210,9 +280,10 @@ export function ImageCropDialog({
     } finally {
       setCropping(false);
     }
-  }, [cropRect, sourceImages, currentPage, questionId, t, onImageAdded]);
+  }, [cropRect, selectedImage, pageLoading, loadedImage, questionId, t, onImageAdded]);
 
-  const currentImage = sourceImages[currentPage];
+  const currentImage = selectedImage && loadedImage?.blobHash === selectedImage.blobHash
+    ? { ...selectedImage, dataUrl: loadedImage.url } : undefined;
   const hasMultiplePages = sourceImages.length > 1;
 
   // 内联裁剪工具：Android 返回键 = 取消关闭
@@ -290,8 +361,10 @@ export function ImageCropDialog({
               </div>
             )}
 
+            {pageLoading && <div role="status" className="flex justify-center py-10"><CircleNotch className="animate-spin" size={24} /></div>}
+            {loadError && <p role="alert" className="py-4 text-center text-sm text-destructive">{t('question_bank.no_source_images')}</p>}
             {/* Image with crop overlay */}
-            {currentImage && (
+            {currentImage && !pageLoading && (
               <div
                 ref={imageContainerRef}
                 className="relative select-none cursor-crosshair border border-border/50 rounded-lg overflow-hidden bg-muted/30"
@@ -397,7 +470,7 @@ export function ImageCropDialog({
             <DsButton
               variant="primary"
               size="sm"
-              disabled={!cropRect || cropping}
+              disabled={!cropRect || cropping || pageLoading || !currentImage}
               onClick={handleCrop}
               className="!h-9 flex-shrink-0 px-3 [@media(pointer:coarse)]:!h-11"
             >
@@ -439,7 +512,7 @@ export function ImageCropDialog({
             <DsButton
               variant="primary"
               size="sm"
-              disabled={!cropRect || cropping}
+              disabled={!cropRect || cropping || pageLoading || !currentImage}
               onClick={handleCrop}
               className="!h-9 flex-shrink-0 px-3 [@media(pointer:coarse)]:!h-11"
             >

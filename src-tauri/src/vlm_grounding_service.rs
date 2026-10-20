@@ -17,8 +17,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-use crate::llm_manager::single_shot_stream::{is_retryable_http_status, SingleShotOptions};
-use crate::llm_manager::{build_provider_adapter, LLMManager};
+use crate::llm_manager::single_shot_stream::SingleShotOptions;
+use crate::llm_manager::LLMManager;
 use crate::models::AppError;
 use crate::page_rasterizer::PageSlice;
 
@@ -26,15 +26,45 @@ use crate::page_rasterizer::PageSlice;
 // 数据类型
 // ============================================================================
 
+/// Typed source block, independent of whether the model produced a nonempty stem.
+/// Old checkpoints default to Question; explicit unsupported kinds stay Unknown.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportBlockKind {
+    #[default]
+    Question,
+    Answer,
+    Explanation,
+    Heading,
+    Material,
+    Figure,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ImportBlockKind {
+    pub fn is_answer(self) -> bool {
+        matches!(self, Self::Answer | Self::Explanation)
+    }
+}
+
 /// VLM 单页分析结果
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VlmPageAnalysis {
     pub questions: Vec<VlmQuestion>,
 }
 
-/// VLM 识别出的单道题目
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// VLM 识别出的文档块（包括题目、答案、标题等）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VlmQuestion {
+    #[serde(default)]
+    pub block_kind: ImportBlockKind,
+    /// Semantic scope, shared by questions and their answers across pages.
+    #[serde(default)]
+    pub section: String,
+    /// Stable source identity supplied by the caller when absent in model output.
+    #[serde(default)]
+    pub source_id: String,
     /// 题号标签（"1", "2", "5-8" 等）
     #[serde(default)]
     pub label: String,
@@ -76,6 +106,76 @@ fn default_bbox() -> [f64; 4] {
     [0.0, 0.0, 0.0, 0.0]
 }
 
+impl VlmQuestion {
+    /// Upgrade the old textual marker to authoritative typed metadata once.
+    pub fn normalize_legacy_kind(&mut self) {
+        if self.raw_text.trim_start().starts_with("[答案区]") {
+            self.block_kind = ImportBlockKind::Answer;
+        }
+        self.section = self.section.trim().to_string();
+        self.label = self.label.trim().to_string();
+    }
+}
+
+fn deserialize_nullable_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn validate_complete_response(
+    finish_reason: Option<&str>,
+    interrupted: Option<&str>,
+) -> Result<(), AppError> {
+    if let Some(reason) = interrupted {
+        return Err(AppError::llm(format!(
+            "VLM 响应中断，不能作为完整提取结果: {}",
+            reason
+        )));
+    }
+    match finish_reason
+        .map(|reason| reason.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("stop" | "end_turn" | "stop_sequence" | "completed") => Ok(()),
+        reason => Err(AppError::llm(format!(
+            "VLM 响应未完整结束: {}",
+            reason.unwrap_or("missing_completion_signal")
+        ))),
+    }
+}
+
+/// Only remove a complete outer Markdown fence. Never slice by the first/last
+/// bracket: a nested options/figures array is not a complete page response.
+fn parse_complete_json(content: &str) -> Result<Value, AppError> {
+    let trimmed = content.trim();
+    let json = if let Some(fenced) = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+    {
+        fenced
+            .trim()
+            .strip_suffix("```")
+            .ok_or_else(|| AppError::llm("VLM JSON 代码块未完整闭合"))?
+            .trim()
+    } else {
+        trimmed
+    };
+    serde_json::from_str(json)
+        .map_err(|e| AppError::llm(format!("VLM JSON 响应不完整或无效: {}", e)))
+}
+
+fn validate_docx_input_budget(image_count: usize, text: &str) -> Result<(), AppError> {
+    if image_count > DOCX_VLM_MAX_IMAGES || text.chars().count() > DOCX_VLM_MAX_TEXT_CHARS {
+        return Err(AppError::validation(format!(
+            "DOCX 提取批次超过完整性预算（最多 {} 张图片/{} 字符），请分批处理，不能截断后导入",
+            DOCX_VLM_MAX_IMAGES, DOCX_VLM_MAX_TEXT_CHARS
+        )));
+    }
+    Ok(())
+}
+
 // ============================================================================
 // ★ P1-3 修复：DOCX 直提路径的图片请求预算
 //
@@ -96,6 +196,7 @@ const DOCX_VLM_MAX_SOURCE_PIXELS: u64 = 64_000_000;
 const DOCX_VLM_MAX_DIMENSION: u32 = 1_600;
 /// 单次请求最多附带的图片数，对齐 EXAM_SEGMENT_MAX_PAGES
 const DOCX_VLM_MAX_IMAGES: usize = 36;
+const DOCX_VLM_MAX_TEXT_CHARS: usize = 8_000;
 /// DOCX VLM SSE 响应的原始字节硬上限。32K 输出 token 的正常响应远低于此值；
 /// 该预算用于阻断异常上游无限发送 SSE 注释、空事件或超长 JSON。
 const DOCX_VLM_MAX_STREAM_BYTES: usize = 16 * 1024 * 1024;
@@ -229,6 +330,7 @@ fn prepare_docx_image(data_url: String, source_index: usize) -> Result<PreparedD
     ))
 }
 
+#[cfg(test)]
 fn prepare_docx_images(
     candidate_urls: Vec<String>,
     total_input_count: usize,
@@ -282,18 +384,28 @@ fn remap_docx_question_image_indices(
 // DOCX 图文混合 VLM 直提类型
 // ============================================================================
 
-/// VLM 从图文混合 DOCX 直接提取的题目
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// VLM 从图文混合 DOCX 直接提取的 typed 文档块。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VlmExtractedQuestion {
+    #[serde(default)]
+    pub block_kind: ImportBlockKind,
+    #[serde(default)]
+    pub section: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub source_id: String,
+    #[serde(default)]
+    pub raw_text: String,
     #[serde(default)]
     pub content: String,
     #[serde(default)]
     pub question_type: String,
     #[serde(default)]
     pub options: Vec<VlmExtractedOption>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub answer: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_nullable_string")]
     pub explanation: String,
     /// 关联的图片索引（对应输入图片数组的下标）
     #[serde(default)]
@@ -340,8 +452,18 @@ impl VlmGroundingService {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
         let data_url = format!("data:{};base64,{}", mime, b64);
 
-        self.analyze_single_page(&data_url, page.text_hint.as_deref())
-            .await
+        let mut analysis = self
+            .analyze_single_page(&data_url, page.text_hint.as_deref())
+            .await?;
+        for (index, block) in analysis.questions.iter_mut().enumerate() {
+            // Model-chosen IDs are not trustworthy or stable across retries.
+            block.source_id = format!(
+                "page:{}:{}:block:{}",
+                page.page_index, page.blob_hash, index
+            );
+            block.normalize_legacy_kind();
+        }
+        Ok(analysis)
     }
 
     /// 分析单个页面图片
@@ -459,12 +581,13 @@ impl VlmGroundingService {
             )
             .await?;
 
-        if completion.finish_reason.as_deref() == Some("length") {
-            warn!(
-                "[VLM-Grounding] 输出达到 max_tokens 上限 ({})，结果可能被截断",
-                max_tokens
-            );
+        if completion.aborted {
+            return Err(AppError::llm("VLM 响应已取消，不能作为完整提取结果"));
         }
+        validate_complete_response(
+            completion.finish_reason.as_deref(),
+            completion.interrupted.as_deref(),
+        )?;
         info!(
             "[VLM-Grounding] 收到响应: {} 字符 (attempts={}, stream={})",
             completion.content.len(),
@@ -594,12 +717,11 @@ impl VlmGroundingService {
 
     /// 从 DOCX 图文混合文档中直接提取题目（流式回调）
     ///
-    /// 将所有嵌入图片 + 提取的文本一起发送给 VLM，
-    /// VLM 直接看到真实图片并自行判断图片与题目的对应关系。
-    /// 完全绕过 text+marker 方案，消除图片-题目错配问题。
+    /// 调用方先按完整性预算分批，将本批图片和原文交给 VLM 分类。
+    /// 模型建议的图文关系仍需调用方校验，不允许因请求预算省略源内容。
     ///
-    /// `on_question` 每解析完一道题就回调一次，支持实时显示和逐题保存。
-    /// 返回最终解析的总题目数。
+    /// HTTP 流式传输；整批 JSON 与结束原因验证通过后才逐块回调。
+    /// 不完整响应不会向调用方交付可发布题目。
     pub async fn extract_docx_questions_stream(
         &self,
         image_data_urls: &[String],
@@ -609,6 +731,7 @@ impl VlmGroundingService {
         if image_data_urls.is_empty() {
             return Err(AppError::validation("图片列表为空"));
         }
+        validate_docx_input_budget(image_data_urls.len(), extracted_text)?;
 
         let config = self.get_vlm_config().await?;
         let api_key = self
@@ -696,6 +819,12 @@ impl VlmGroundingService {
                 total_input_count, DOCX_VLM_MAX_IMAGES, prepared.omitted_by_count
             );
         }
+        if !prepared.rejected.is_empty() || prepared.omitted_by_count > 0 {
+            return Err(AppError::validation(format!(
+                "DOCX 提取批次有 {} 张图片未完整发送（安全检查或请求预算），请缩小批次或修复图片后重试",
+                prepared.rejected.len() + prepared.omitted_by_count
+            )));
+        }
         if prepared.images.is_empty() {
             return Err(AppError::validation(
                 "DOCX 中没有通过安全检查且可发送给 VLM 的图片",
@@ -720,18 +849,6 @@ impl VlmGroundingService {
             content_parts.push(json!({
                 "type": "image_url",
                 "image_url": { "url": image.data_url, "detail": "high" }
-            }));
-        }
-
-        let omitted_total = prepared.rejected.len() + prepared.omitted_by_count;
-        if omitted_total > 0 {
-            content_parts.push(json!({
-                "type": "text",
-                "text": format!(
-                    "注意：原文共有 {} 张嵌入图片，其中 {} 张因安全或请求预算未附带；请勿臆测未显示图片的内容。",
-                    total_input_count,
-                    omitted_total
-                )
             }));
         }
 
@@ -774,388 +891,71 @@ impl VlmGroundingService {
             }
         }
 
-        let provider: Box<dyn crate::providers::ProviderAdapter> = build_provider_adapter(&config);
-
-        let mut preq = self
+        // Keep HTTP transport streaming, but do not publish individual objects until
+        // the whole batch and its provider finish reason pass integrity checks.
+        let mut opts = SingleShotOptions::new(format!("VLM-DOCX({})", config.model));
+        opts.max_stream_bytes = DOCX_VLM_MAX_STREAM_BYTES;
+        opts.idle_timeout = std::time::Duration::from_secs(DOCX_VLM_STREAM_IDLE_TIMEOUT_SECS);
+        let completion = self
             .llm_manager
-            .prepare_provider_request(
-                provider.as_ref(),
+            .single_shot_completion(
                 &config,
                 &request_body,
                 Some(&api_key),
                 None,
                 "VLM DOCX 提取请求构建失败",
+                &opts,
+                None,
             )
             .await?;
-
-        // 流式请求不设全局 timeout，改用 connect timeout + 读 chunk 超时
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| AppError::internal(format!("创建 HTTP 客户端失败: {}", e)))?;
-
-        info!(
-            "[VLM-Grounding] DOCX 图文提取 (streaming): {}/{} 张图片, {} bytes, model={}, url={}",
-            prepared.images.len(),
-            total_input_count,
-            prepared.total_bytes,
-            config.model,
-            crate::llm_manager::sanitize_url_for_log(&preq.url)
-        );
-
-        const MAX_RETRIES: u32 = 2;
-        let mut last_error = String::new();
-
-        for attempt in 0..=MAX_RETRIES {
-            if attempt > 0 {
-                let delay = std::time::Duration::from_secs(3u64.pow(attempt));
-                warn!(
-                    "[VLM-Grounding] DOCX 提取第 {} 次重试，等待 {}s",
-                    attempt,
-                    delay.as_secs()
-                );
-                tokio::time::sleep(delay).await;
-            }
-
-            let response_result = if preq.is_codex() {
-                self.llm_manager
-                    .send_codex_stream_request_with_single_refresh(&mut preq, None)
-                    .await
-            } else {
-                let mut rb = client.post(&preq.url);
-                for (k, v) in &preq.headers {
-                    rb = rb.header(k, v);
-                }
-                rb.json(&preq.body)
-                    .send()
-                    .await
-                    .map_err(|e| AppError::network(format!("VLM DOCX 提取请求失败: {}", e)))
-            };
-
-            let response = match response_result {
-                Ok(r) => r,
-                Err(e) => {
-                    last_error = e.to_string();
-                    if attempt < MAX_RETRIES {
-                        continue;
-                    }
-                    return Err(e);
-                }
-            };
-
-            let status = response.status();
-
-            // 非流式错误响应（4xx/5xx 可重试）
-            if is_retryable_http_status(status.as_u16()) {
-                let body = response.text().await.unwrap_or_default();
-                last_error = format!("VLM API 返回 {}: {}", status, truncate_utf8(&body, 200));
-                if attempt < MAX_RETRIES {
-                    warn!("[VLM-Grounding] {}", last_error);
-                    continue;
-                }
-                return Err(AppError::llm(last_error));
-            }
-
-            if !status.is_success() {
-                let body = response.text().await.unwrap_or_default();
-                return Err(AppError::llm(format!(
-                    "VLM DOCX 提取 API 返回错误 {}: {}",
-                    status,
-                    truncate_utf8(&body, 500)
-                )));
-            }
-
-            // ===== SSE 流式读取 + 增量 JSON 解析 =====
-            use futures_util::StreamExt;
-            let mut stream = response.bytes_stream();
-            let mut sse_buffer = crate::utils::sse_buffer::SseEventBuffer::new();
-            let mut json_parser = crate::llm_manager::IncrementalJsonArrayParser::new();
-            let mut full_content = String::new();
-            let mut stream_ended = false;
-            let mut chunk_count: usize = 0;
-            let mut question_count: usize = 0;
-            let mut aborted = false;
-            let mut response_bytes = 0usize;
-            let mut stream_idle_timed_out = false;
-
-            loop {
-                let chunk_result = match tokio::time::timeout(
-                    std::time::Duration::from_secs(DOCX_VLM_STREAM_IDLE_TIMEOUT_SECS),
-                    stream.next(),
-                )
-                .await
-                {
-                    Ok(Some(result)) => result,
-                    Ok(None) => break,
-                    Err(_) => {
-                        last_error = format!(
-                            "VLM DOCX 流式响应空闲超过 {} 秒",
-                            DOCX_VLM_STREAM_IDLE_TIMEOUT_SECS
-                        );
-                        stream_idle_timed_out = true;
-                        warn!("[VLM-Grounding] {}", last_error);
-                        break;
-                    }
-                };
-
-                if aborted {
-                    break;
-                }
-                match chunk_result {
-                    Ok(chunk) => {
-                        account_docx_vlm_stream_bytes(&mut response_bytes, chunk.len())?;
-                        for line in sse_buffer.process_bytes(&chunk) {
-                            if crate::utils::sse_buffer::SseEventBuffer::check_done_marker(&line) {
-                                stream_ended = true;
-                                break;
-                            }
-                            let events = provider.parse_stream(&line);
-                            for event in events {
-                                match event {
-                                    crate::providers::StreamEvent::ContentChunk(content) => {
-                                        full_content.push_str(&content);
-                                        chunk_count += 1;
-
-                                        // 增量解析：每个 SSE token 喂给 JSON 解析器
-                                        if let Some(objects) = json_parser.feed(&content) {
-                                            for obj in objects {
-                                                if let Ok(mut vq) =
-                                                    serde_json::from_value::<VlmExtractedQuestion>(
-                                                        obj,
-                                                    )
-                                                {
-                                                    remap_docx_question_image_indices(
-                                                        &mut vq,
-                                                        &source_indices,
-                                                    );
-                                                    question_count += 1;
-                                                    if !on_question(vq) {
-                                                        aborted = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if chunk_count.is_multiple_of(50) {
-                                            info!(
-                                                "[VLM-Grounding] DOCX 流式进度: {} chunks, {} 字符, {} 题",
-                                                chunk_count,
-                                                full_content.len(),
-                                                question_count
-                                            );
-                                        }
-                                    }
-                                    crate::providers::StreamEvent::Done => {
-                                        stream_ended = true;
-                                        break;
-                                    }
-                                    _ => {}
-                                }
-                                if aborted {
-                                    break;
-                                }
-                            }
-                            if stream_ended || aborted {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        if !full_content.is_empty() {
-                            warn!(
-                                "[VLM-Grounding] 流式读取错误但已有 {} 字符/{} 题，继续处理: {}",
-                                full_content.len(),
-                                question_count,
-                                e
-                            );
-                            break;
-                        }
-                        last_error = format!("VLM 流式读取失败: {}", e);
-                        if attempt < MAX_RETRIES {
-                            warn!("[VLM-Grounding] {}", last_error);
-                            break;
-                        }
-                        return Err(AppError::network(last_error));
-                    }
-                }
-                if stream_ended {
-                    break;
-                }
-            }
-
-            if aborted {
-                info!(
-                    "[VLM-Grounding] DOCX 提取回调请求停止，已在 {} 道题后终止",
-                    question_count
-                );
-                return Ok(question_count);
-            }
-
-            // 尚未向调用方交付任何题目时可以安全重试；一旦已经回调题目，
-            // 为避免重复保存，只返回已完成的部分结果。
-            if stream_idle_timed_out {
-                if question_count > 0 {
-                    warn!(
-                        "[VLM-Grounding] 流空闲超时，保留已提取的 {} 道题目",
-                        question_count
-                    );
-                    return Ok(question_count);
-                }
-                if attempt < MAX_RETRIES {
-                    continue;
-                }
-                return Err(AppError::network(last_error));
-            }
-
-            // 处理自然关闭且没有空行分隔符的最后一个 SSE 事件。
-            for remaining in sse_buffer.flush() {
-                if !remaining.trim().is_empty() {
-                    if crate::utils::sse_buffer::SseEventBuffer::check_done_marker(&remaining) {
-                        break;
-                    }
-                    let events = provider.parse_stream(&remaining);
-                    for event in events {
-                        if let crate::providers::StreamEvent::ContentChunk(content) = event {
-                            full_content.push_str(&content);
-                            if let Some(objects) = json_parser.feed(&content) {
-                                for obj in objects {
-                                    if let Ok(mut vq) =
-                                        serde_json::from_value::<VlmExtractedQuestion>(obj)
-                                    {
-                                        remap_docx_question_image_indices(&mut vq, &source_indices);
-                                        question_count += 1;
-                                        if !on_question(vq) {
-                                            return Ok(question_count);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // finalize: 处理 JSON 解析器缓冲区中可能的不完整对象
-            if let Some(objects) = json_parser.finalize() {
-                for obj in objects {
-                    if let Ok(mut vq) = serde_json::from_value::<VlmExtractedQuestion>(obj) {
-                        remap_docx_question_image_indices(&mut vq, &source_indices);
-                        question_count += 1;
-                        if !on_question(vq) {
-                            return Ok(question_count);
-                        }
-                    }
-                }
-            }
-
-            if question_count == 0 && full_content.is_empty() {
-                last_error = "VLM 流式响应为空".to_string();
-                if attempt < MAX_RETRIES {
-                    continue;
-                }
-                return Err(AppError::llm(last_error));
-            }
-
-            // 如果增量解析没拿到任何题目，回退到完整解析
-            if question_count == 0 && !full_content.is_empty() {
-                warn!(
-                    "[VLM-Grounding] 增量解析未提取到题目，回退完整解析 ({} 字符)",
-                    full_content.len()
-                );
-                match Self::parse_docx_extraction_response(&full_content) {
-                    Ok(questions) => {
-                        for mut vq in questions {
-                            remap_docx_question_image_indices(&mut vq, &source_indices);
-                            question_count += 1;
-                            if !on_question(vq) {
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        return Err(e);
-                    }
-                }
-            }
-
-            info!(
-                "[VLM-Grounding] DOCX 提取流式完成: {} chunks, {} 字符, {} 道题目",
-                chunk_count,
-                full_content.len(),
-                question_count
-            );
-
-            return Ok(question_count);
+        if completion.aborted {
+            return Err(AppError::llm("VLM 响应已取消，不能作为完整提取结果"));
         }
-
-        Err(AppError::llm(last_error))
+        validate_complete_response(
+            completion.finish_reason.as_deref(),
+            completion.interrupted.as_deref(),
+        )?;
+        let mut response_bytes = 0;
+        account_docx_vlm_stream_bytes(&mut response_bytes, completion.content.len())?;
+        let questions = Self::parse_docx_extraction_response(&completion.content)?;
+        let mut count = 0;
+        for mut question in questions {
+            remap_docx_question_image_indices(&mut question, &source_indices);
+            count += 1;
+            if !on_question(question) {
+                break;
+            }
+        }
+        Ok(count)
     }
 
     /// 构建 DOCX 图文提取的 VLM prompt
     fn build_docx_extraction_prompt(image_count: usize, extracted_text: &str) -> String {
-        // 截断文本到合理长度（留足上下文给图片 token），按字符截断防止 UTF-8 断裂
-        let max_text_chars = 8000;
-        let text_section = if extracted_text.chars().count() > max_text_chars {
-            let truncated: String = extracted_text.chars().take(max_text_chars).collect();
-            format!("{}...(截断)", truncated)
-        } else {
-            extracted_text.to_string()
-        };
-
         format!(
-            r#"你是一个试题提取专家。上面是从一份 DOCX 文档中提取的 {count} 张嵌入图片（编号为图片0到图片{last}）。
-
-**文档提取的文本内容**（仅供参考，图片内容请直接看图）：
+            r#"你是文档原文提取器，不是解题助手。本批次有 {image_count} 张图片（图片0起）及以下完整原文：
 ---
-{text}
+{extracted_text}
 ---
+识别所有文档块，保留原文顺序；只输出完整 JSON 数组，不输出其他内容。
+每个块的字段：
+{{"block_kind":"question|answer|explanation|heading|material|figure|unknown",
+  "section":"chapter16/single_choice", "label":"1", "source_id":"",
+  "raw_text":"当前块的逐字原文，保留原题号、公式和数学符号",
+  "content":"题干（非题目块可为空）", "question_type":"single_choice",
+  "options":[{{"key":"A","content":"选项原文"}}],
+  "answer":null, "explanation":null, "image_indices":[0],
+  "difficulty":"medium", "tags":[]}}
 
-**你的任务**：
-1. 结合图片和文本，识别文档中的**所有题目**
-2. 准确判断每张图片属于哪道题目（通过图片内容和文本上下文判断）
-3. 提取每道题的完整结构化信息
-
-**输出 JSON 数组**，每个元素代表一道题目（只输出 JSON，不要其他内容）：
-
-```json
-[
-  {{
-    "content": "题干文本（不含选项；表格用 Markdown 格式；公式用 LaTeX：$...$）",
-    "question_type": "single_choice",
-    "options": [{{"key": "A", "content": "选项内容"}}, ...],
-    "answer": "A",
-    "explanation": "解析（如果文档中有）",
-    "image_indices": [0],
-    "difficulty": "medium",
-    "tags": ["力学"]
-  }}
-]
-```
-
-**字段说明**：
-- `question_type`: single_choice / multiple_choice / fill_blank / short_answer / calculation / proof / essay
-- `options`: 仅选择题需要，其他题型留空数组 `[]`
-- `image_indices`: 属于该题的图片编号数组（对应上方【图片N】），无图则 `[]`
-- `difficulty`: easy / medium / hard / very_hard，按下方判定标准逐题判断
-
-{difficulty_rubric}
-
-**重要规则**：
-1. 公式格式：{latex_brief}
-2. 每张图片最多归属一道题目（装饰性图片如水印/页眉不需要归属）
-3. 如果图片本身就是题目内容（整道题是图片），在 content 中用文字描述图片内容
-4. 如果多道题共享一张图片（题组），将图片归属到题组的第一道题
-5. 题目按文档中出现的顺序排列
-6. 只输出 JSON 数组，不要输出任何其他内容
-7. **选择题的 content 只包含题干**，不要把选项文本（A/B/C/D 的内容）写进 content，选项放到 options 数组中
-8. 如果题干包含表格，请使用标准 Markdown 表格格式（必须有表头分隔行 `|---|---|`），例如：
-   | 列1 | 列2 |
-   |---|---|
-   | 数据1 | 数据2 |"#,
-            count = image_count,
-            last = image_count.saturating_sub(1),
-            text = text_section,
+强制规则：
+1. block_kind 是语义分类而非看 content 是否为空。参考答案、评分要点及带题目摘要的答案仍是 answer；解析是 explanation；标题是 heading；公共材料是 material；独立图片是 figure；无法判断是 unknown。禁止将答案摘要生成新题。
+2. section 必须来自实际标题/明确语义作用域，如 single_choice、term_definition、short_answer；有章节时使用 chapter16/single_choice 这样的路径。题目区与对应答案区使用相同作用域，跨页可继承有证据的标题；不得仅凭数字重号猜测，不确定就空字符串。
+3. label 仅填写原题号/子题号，不得按本批次重新编号；source_id 若输入中已有则原样保留，否则空字符串由后端分配。raw_text 必须是来源原文，不能改写、总结或补充。
+4. 严禁推理作答、补答案、补评分要点或从常识生成解析。仅转录当前块明确存在的答案/解析，题目块未见答案时 answer/explanation 必须 null。题号相同不代表可以把别处文字偷偷并入此块。
+5. answer/explanation 块保留原文并填写相应字段；没有原题号或section也必须保留为相应类型，不得伪造题号或题干。
+6. question_type: single_choice/multiple_choice/indefinite_choice/fill_blank/short_answer/calculation/proof/essay/other；只有 question 才填题型。选项放 options，不混入题干；其他块 options=[]。
+7. image_indices 只能引用本次实际显示的图片，不得猜测未见图片。题组共享图片和材料必须保留为对应块，不得改写为独立题。
+8. 不要遗漏或合并块；输出必须完整闭合。公式格式：{latex_brief}
+{difficulty_rubric}"#,
             latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF,
             difficulty_rubric = crate::prompt_contracts::DIFFICULTY_RUBRIC,
         )
@@ -1165,53 +965,28 @@ impl VlmGroundingService {
     fn parse_docx_extraction_response(
         content: &str,
     ) -> Result<Vec<VlmExtractedQuestion>, AppError> {
-        let stripped = {
-            let trimmed = content.trim();
-            if let Some(rest) = trimmed.strip_prefix("```json") {
-                rest.trim_start().strip_suffix("```").unwrap_or(rest).trim()
-            } else if let Some(rest) = trimmed.strip_prefix("```") {
-                rest.trim_start().strip_suffix("```").unwrap_or(rest).trim()
-            } else {
-                trimmed
-            }
-        };
-
-        // 提取 JSON 数组
-        let json_str = if let Some(start) = stripped.find('[') {
-            if let Some(end) = stripped.rfind(']') {
-                &stripped[start..=end]
-            } else {
-                stripped
-            }
+        let value = parse_complete_json(content)?;
+        let blocks = if value.is_array() {
+            value
         } else {
-            stripped
+            value
+                .get("questions")
+                .or_else(|| value.get("blocks"))
+                .cloned()
+                .ok_or_else(|| AppError::llm("VLM 响应缺少完整文档块数组"))?
         };
-
-        if let Ok(questions) = serde_json::from_str::<Vec<VlmExtractedQuestion>>(json_str) {
-            info!("[VLM-Grounding] DOCX 提取成功: {} 道题目", questions.len());
-            return Ok(questions);
-        }
-
-        // 尝试包裹对象格式 {"questions": [...]}
-        if let Ok(obj) = serde_json::from_str::<Value>(json_str) {
-            if let Some(qs) = obj.get("questions").and_then(|v| v.as_array()) {
-                if let Ok(questions) =
-                    serde_json::from_value::<Vec<VlmExtractedQuestion>>(Value::Array(qs.clone()))
-                {
-                    info!(
-                        "[VLM-Grounding] DOCX 提取成功 (wrapped): {} 道题目",
-                        questions.len()
-                    );
-                    return Ok(questions);
-                }
+        let mut questions: Vec<VlmExtractedQuestion> = serde_json::from_value(blocks)
+            .map_err(|e| AppError::llm(format!("VLM 文档块字段无法解析: {}", e)))?;
+        for question in &mut questions {
+            if question.raw_text.trim_start().starts_with("[答案区]")
+                || question.content.trim_start().starts_with("[答案区]")
+            {
+                question.block_kind = ImportBlockKind::Answer;
             }
+            question.section = question.section.trim().to_string();
+            question.label = question.label.trim().to_string();
         }
-
-        warn!(
-            "[VLM-Grounding] 无法解析 DOCX 提取响应: {}",
-            truncate_utf8(json_str, 500)
-        );
-        Err(AppError::llm("VLM 响应无法解析为题目列表"))
+        Ok(questions)
     }
 
     /// 检测是否有可用的 VLM 模型
@@ -1225,56 +1000,22 @@ impl VlmGroundingService {
 
     /// 从 VLM 响应文本中提取结构化分析结果
     fn parse_vlm_response(content: &str) -> Result<VlmPageAnalysis, AppError> {
-        let stripped = {
-            let trimmed = content.trim();
-            if let Some(rest) = trimmed.strip_prefix("```json") {
-                rest.trim_start().strip_suffix("```").unwrap_or(rest).trim()
-            } else if let Some(rest) = trimmed.strip_prefix("```") {
-                rest.trim_start().strip_suffix("```").unwrap_or(rest).trim()
-            } else {
-                trimmed
-            }
-        };
-
-        let json_str = if let Some(start) = stripped.find('[') {
-            if let Some(end) = stripped.rfind(']') {
-                &stripped[start..=end]
-            } else {
-                stripped
-            }
-        } else if let Some(start) = stripped.find('{') {
-            if let Some(end) = stripped.rfind('}') {
-                &stripped[start..=end]
-            } else {
-                stripped
-            }
+        let value = parse_complete_json(content)?;
+        let blocks = if value.is_array() {
+            value
         } else {
-            stripped
+            value
+                .get("questions")
+                .or_else(|| value.get("blocks"))
+                .cloned()
+                .ok_or_else(|| AppError::llm("VLM 响应缺少完整文档块数组"))?
         };
-
-        if let Ok(analysis) = serde_json::from_str::<VlmPageAnalysis>(json_str) {
-            return Ok(analysis);
+        let mut questions: Vec<VlmQuestion> = serde_json::from_value(blocks)
+            .map_err(|e| AppError::llm(format!("VLM 页面块字段无法解析: {}", e)))?;
+        for question in &mut questions {
+            question.normalize_legacy_kind();
         }
-
-        if let Ok(questions) = serde_json::from_str::<Vec<VlmQuestion>>(json_str) {
-            return Ok(VlmPageAnalysis { questions });
-        }
-
-        if let Ok(obj) = serde_json::from_str::<Value>(json_str) {
-            if let Some(qs) = obj.get("questions").and_then(|v| v.as_array()) {
-                if let Ok(questions) =
-                    serde_json::from_value::<Vec<VlmQuestion>>(Value::Array(qs.clone()))
-                {
-                    return Ok(VlmPageAnalysis { questions });
-                }
-            }
-        }
-
-        warn!(
-            "[VLM-Grounding] 无法解析 VLM 响应为结构化数据，原始内容: {}",
-            truncate_utf8(json_str, 500)
-        );
-        Err(AppError::llm("VLM 响应无法解析为题目分析结果"))
+        Ok(VlmPageAnalysis { questions })
     }
 
     /// 构建 VLM 分析 prompt
@@ -1282,88 +1023,34 @@ impl VlmGroundingService {
     /// 当 `text_hint` 可用时，在 prompt 中附加文本层作为参考，
     /// 提高小字体 / 模糊公式的识别准确率。
     fn build_analysis_prompt(text_hint: Option<&str>) -> String {
-        // text_hint 截断到 1500 字符（约 750 token），
-        // 确保 prompt（~800 tok） + hint（~750 tok） + image（~2000 tok）< 4096，
-        // 留出足够的输出空间（>= 8000 tok）给结构化 JSON。
-        let hint_section = match text_hint {
-            Some(hint) if !hint.is_empty() => {
-                let max_hint_chars = 1500;
-                let truncated = if hint.chars().count() > max_hint_chars {
-                    let t: String = hint.chars().take(max_hint_chars).collect();
-                    format!("{}...(截断)", t)
-                } else {
-                    hint.to_string()
-                };
-                format!(
-                    r#"
-
-**机器提取的文本参考**（可能有误，仅供辅助识别模糊内容，以图片为准）：
----
-{}
----
-"#,
-                    truncated
-                )
-            }
-            _ => String::new(),
-        };
-
+        let hint = text_hint
+            .unwrap_or("")
+            .chars()
+            .take(1500)
+            .collect::<String>();
         format!(
-            r#"请分析这张试卷/题目页面图片，识别其中的所有题目和配图。{}
-**任务**：
-1. 识别页面中每道题目的完整内容（题号、题干、选项、答案、解析）
-2. 识别页面中所有图片/配图/插图，并确定它们属于哪道题目
-3. 给出每道题目和每张图片在页面中的位置坐标
-4. 如果页面开头有未完成的题目（接续上一页），标记 continues_from_previous
-5. 如果页面末尾有未完成的题目（续接下一页），标记 continues_to_next
+            r#"请逐字提取此页面的所有文档块及位置，不要解题或生成答案。
+机器文本仅辅助识别，以图片原文为准：
+---
+{hint}
+---
+只输出完整 JSON 数组，每个元素表示原页面上的一个块：
+[{{"block_kind":"question|answer|explanation|heading|material|figure|unknown",
+   "section":"chapter16/single_choice", "label":"1", "source_id":"",
+   "bbox":[0.05,0.02,0.95,0.17], "raw_text":"逐字原文（保留题号/选项/公式）",
+   "is_group":false,"sub_questions":[],
+   "figures":[{{"bbox":[0.60,0.03,0.92,0.15],"fig_label":"配图"}}],
+   "continues_from_previous":false,"continues_to_next":false}}]
 
-**输出要求**：
-请输出 JSON 数组，每个元素代表一道题目（只输出 JSON，不要其他内容）：
-
-```json
-[
-  {{
-    "label": "1",
-    "bbox": [0.05, 0.02, 0.95, 0.17],
-    "raw_text": "1. 下列关于力的说法正确的是（  ）\nA. 力是物体...\nB. 力可以...\nC. ...\nD. ...",
-    "is_group": false,
-    "sub_questions": [],
-    "figures": [
-      {{
-        "bbox": [0.60, 0.03, 0.92, 0.15],
-        "fig_label": "配图"
-      }}
-    ],
-    "continues_from_previous": false,
-    "continues_to_next": false
-  }}
-]
-```
-
-**字段说明**：
-- `label`: 题号（如 "1", "2", "5-8"）
-- `bbox`: 题目区域坐标 [x1, y1, x2, y2]，左上角到右下角，归一化到 0-1
-- `raw_text`: 题目的完整文本（含题号、题干、选项等），数学公式用 LaTeX 格式
-- `is_group`: 是否为题组（多道题共享一段材料或配图时为 true）
-- `sub_questions`: 题组时的子题号列表
-- `figures`: 该题关联的配图列表
-  - `bbox`: 图片区域坐标 [x1, y1, x2, y2]，归一化到 0-1
-  - `fig_label`: 图片标签（"图1", "配图", "选项图"等）
-- `continues_from_previous`: 此题是否接续上一页（页面开头的不完整题目）
-- `continues_to_next`: 此题是否在下一页继续（页面末尾的不完整题目）
-
-**重要规则**：
-1. 公式格式：{latex_brief}
-2. 每道题的 raw_text 必须包含完整内容（题干+选项+答案+解析，如果页面上有的话）
-3. 如果多道题共享一张配图（如阅读理解），将它们标记为 is_group=true
-4. bbox 坐标格式为 [x1, y1, x2, y2]：(x1,y1) 是左上角，(x2,y2) 是右下角，值域 0-1
-5. 如果题目没有配图，figures 留空数组
-6. 注意区分题目配图和装饰性元素（页眉页脚、水印等不需要标记）
-7. 如果页面开头的内容明显是上一页题目的延续（如选项 C/D 开头、答案解析开头），标记 continues_from_previous=true
-8. 如果页面末尾的题目明显未结束（题干不完整、选项缺失），标记 continues_to_next=true
-9. 如果当前页面是「答案/解析区」（成片的题号+答案，没有题干或选项），把每条答案作为独立条目输出：label 填写它对应的题号，raw_text 以 `[答案区] ` 开头并原样保留答案正文，**不要为它编造题干**
-10. 如果同一道题的题干与答案分处不同页面，两页分别输出即可（题干一条、答案区一条），后端会按题号合并"#,
-            hint_section,
+强制规则：
+1. 明确区分 question（题目）、answer（参考答案/评分要点）、explanation（解析）、heading（标题）、material（公共材料）、figure（独立图）、unknown（无法识别）。答案即使重复题干摘要也仍是 answer，不能改成新题。旧 [答案区] 标记一律表示 answer。
+2. section 来自实际章节与题型标题，如 chapter16/single_choice、chapter16/term_definition、chapter16/short_answer。没有章节时可用 single_choice/term_definition/short_answer。题目和对应答案使用同一语义作用域；缺少标题证据就留空，禁止只凭数字猜测跨页作用域。
+3. label 是原题号/子题号，禁止重新编号；无题号留空。source_id 留空由后端绑定原页。标题、公共材料、答案必须单独输出，不能偷偷并入无关题目。
+4. raw_text 逐字保留当前块原文，不得总结/改写、补漏或生成新内容。严禁推理补答案、凭常识作答、补解析；页面没写的答案不能出现在提取结果。
+5. bbox 为当前块在本页的位置，[x1,y1,x2,y2]归一化0..1；figures只列真实配图而非页眉、水印。
+6. 同一题跨页仅在原文确有连续关系时分别标 continues_to_next/continues_from_previous。答案区起始不自动视为上一题续接；跨kind不能续接。
+7. 题组材料与子题分别保留原题号及内容，不得因共享图片而合并多道题。参考答案每条单独保留原题号、section与原文，后端只在身份唯一时关联。
+8. 完整提取所有块，不能因为输出预算而省略后半页。公式格式：{latex_brief}"#,
             latex_brief = crate::prompt_contracts::LATEX_OUTPUT_BRIEF,
         )
     }
@@ -1559,6 +1246,7 @@ impl VlmGroundingService {
 ///
 /// ★ 2026-06-12（代理 3 审阅 F3）：旧代码多处 `&body[..body.len().min(N)]`
 /// 直接按字节切片，中文错误消息/响应在非字符边界会 panic。
+#[cfg(test)]
 fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
@@ -1596,6 +1284,96 @@ mod tests {
             "data:image/png;base64,{}",
             base64::engine::general_purpose::STANDARD.encode(cursor.into_inner())
         )
+    }
+
+    #[test]
+    fn old_checkpoints_default_to_questions_but_legacy_answers_upgrade() {
+        let legacy = VlmGroundingService::parse_vlm_response(
+            r#"[{"label":"1","raw_text":"原题"},{"label":"1","raw_text":"[答案区] B"}]"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.questions[0].block_kind, ImportBlockKind::Question);
+        assert_eq!(legacy.questions[1].block_kind, ImportBlockKind::Answer);
+        assert_eq!(
+            serde_json::to_value(ImportBlockKind::Answer).unwrap(),
+            json!("answer")
+        );
+    }
+
+    #[test]
+    fn wrapped_page_response_keeps_nested_figure_arrays() {
+        let response = r#"{"questions":[{"label":"1","block_kind":"question","section":"single_choice","raw_text":"原题","figures":[{"bbox":[0.1,0.2,0.3,0.4]}]}]}"#;
+        let result = VlmGroundingService::parse_vlm_response(response).unwrap();
+        assert_eq!(result.questions.len(), 1);
+        assert_eq!(result.questions[0].figures.len(), 1);
+        assert!(VlmGroundingService::parse_vlm_response(&response[..response.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn complete_json_gate_rejects_partial_envelopes_and_trailing_prose() {
+        assert!(parse_complete_json(r#"[{"label":"1"}], omitted later items"#).is_err());
+        assert!(parse_complete_json("```json\n[]").is_err());
+        assert!(parse_complete_json("```json\n[]\n```").is_ok());
+    }
+
+    #[test]
+    fn length_or_interrupted_responses_cannot_be_complete() {
+        for reason in [
+            "length",
+            "max_tokens",
+            "MAX_TOKENS",
+            "max_output_tokens",
+            "model_context_window_exceeded",
+            "content_filter",
+            "refusal",
+            "tool_use",
+            "tool_calls",
+            "aborted",
+            "unknown",
+        ] {
+            assert!(validate_complete_response(Some(reason), None).is_err());
+        }
+        assert!(validate_complete_response(None, None).is_err());
+        assert!(validate_complete_response(Some("stop"), Some("socket closed")).is_err());
+        for reason in ["stop", "end_turn", "stop_sequence", "completed", "STOP"] {
+            assert!(validate_complete_response(Some(reason), None).is_ok());
+        }
+    }
+
+    #[test]
+    fn docx_budget_never_silently_truncates_text_or_images() {
+        assert!(validate_docx_input_budget(36, &"字".repeat(8000)).is_ok());
+        assert!(validate_docx_input_budget(37, "原文").is_err());
+        assert!(validate_docx_input_budget(1, &"字".repeat(8001)).is_err());
+    }
+
+    #[test]
+    fn typed_docx_answer_accepts_null_and_keeps_original_label_and_text() {
+        let result = VlmGroundingService::parse_docx_extraction_response(
+            r#"[{"block_kind":"answer","section":"term_definition","label":"3","source_id":"input:3","raw_text":"3. 原文评分要点","content":"摘要","answer":null,"explanation":null}]"#,
+        ).unwrap();
+        assert_eq!(result[0].block_kind, ImportBlockKind::Answer);
+        assert_eq!(result[0].label, "3");
+        assert_eq!(result[0].source_id, "input:3");
+        assert_eq!(result[0].raw_text, "3. 原文评分要点");
+        assert!(result[0].answer.is_empty());
+        let unknown: VlmQuestion =
+            serde_json::from_value(json!({"block_kind":"new_unsupported_kind"})).unwrap();
+        assert_eq!(unknown.block_kind, ImportBlockKind::Unknown);
+    }
+
+    #[test]
+    fn prompts_require_typed_source_blocks_and_forbid_generated_answers() {
+        for prompt in [
+            VlmGroundingService::build_analysis_prompt(None),
+            VlmGroundingService::build_docx_extraction_prompt(1, "全部原文"),
+        ] {
+            assert!(prompt.contains("block_kind"));
+            assert!(prompt.contains("term_definition"));
+            assert!(prompt.contains("section"));
+            assert!(prompt.contains("原题号"));
+            assert!(prompt.contains("严禁推理"));
+        }
     }
 
     #[test]
@@ -1678,6 +1456,7 @@ mod tests {
             image_indices: vec![0, 2, 99],
             difficulty: String::new(),
             tags: Vec::new(),
+            ..Default::default()
         };
 
         remap_docx_question_image_indices(&mut question, &[3, 8, 12]);

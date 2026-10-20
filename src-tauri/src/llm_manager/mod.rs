@@ -4427,11 +4427,28 @@ pub(crate) fn normalize_nonstream_response_to_openai(
     if text_segments.is_empty() && response_status == Some("incomplete") {
         return Err(AppError::llm("Responses 请求未能完成"));
     }
+    // Responses 的完成状态在顶层 `status`，不在 OpenAI 的
+    // `choices[0].finish_reason`。归一化时必须保留真实状态，否则调用方无法
+    // 区分“完整结束”和“max_output_tokens 截断”；未知/缺失状态不伪造成功。
+    let incomplete_reason = response_json
+        .get("incomplete_details")
+        .and_then(|details| details.get("reason"))
+        .and_then(Value::as_str);
+    let finish_reason = match response_status {
+        Some("completed") => Some("completed"),
+        Some("incomplete") => Some(match incomplete_reason {
+            Some("max_output_tokens") => "length",
+            Some(reason) => reason,
+            None => "incomplete",
+        }),
+        _ => None,
+    };
     Ok(json!({
         "choices": [{
             "message": {
                 "content": text_segments.join("")
-            }
+            },
+            "finish_reason": finish_reason
         }],
         "usage": response_json.get("usage").cloned()
     }))
@@ -8875,7 +8892,7 @@ impl LLMManager {
         let messages = vec![
             json!({
                 "role": "system",
-                "content": "你是一个专业的题目解析助手。请准确识别文档中的题目，并按指定格式输出。"
+                "content": "你是一个专业的题目提取助手。只提取原文明确提供的信息，禁止推理作答、补答或编造解析；没有原文答案证据时 answer 必须为 null。答案、解析、标题、材料和配图不是题目，不得改写成题干。请按指定格式输出完整 JSON 数组。"
             }),
             json!({
                 "role": "user",
@@ -8894,8 +8911,70 @@ impl LLMManager {
         request_body
     }
 
-    /// 流式调用 LLM 解析题目，每解析出一道题目立即通过回调返回
-    /// callback 返回 false 则中止流
+    /// 题目导入只能把正常结束且 JSON 数组完整的响应视为成功。
+    /// 即使截断处刚好位于对象/数组边界，也不能丢弃供应商的结束元信息。
+    ///
+    /// 正常结束原因因协议而异：OpenAI Chat Completions 为 `stop`，
+    /// Anthropic Messages 为 `end_turn` / `stop_sequence`，OpenAI Responses
+    /// 流为 `completed`，Gemini 为 `STOP`。只接受这些正常结束值；`length`、
+    /// `tool_calls`、`content_filter`、`refusal` 等仍视为未完整完成。
+    const QUESTION_PARSING_SUCCESS_FINISH_REASONS: &'static [&'static str] =
+        &["stop", "end_turn", "stop_sequence", "completed"];
+
+    fn validate_question_parsing_completion(
+        completion: &single_shot_stream::SingleShotCompletion,
+    ) -> Result<Vec<Value>> {
+        if completion.aborted {
+            return Err(AppError::llm("题目解析已取消，部分输出不可作为完整结果"));
+        }
+        if let Some(reason) = completion.interrupted.as_deref() {
+            return Err(AppError::llm(format!(
+                "题目解析流中断，部分输出不可作为完整结果: {}",
+                reason
+            )));
+        }
+        match completion.finish_reason.as_deref() {
+            Some(reason)
+                if Self::QUESTION_PARSING_SUCCESS_FINISH_REASONS
+                    .iter()
+                    .any(|allowed| reason.eq_ignore_ascii_case(*allowed)) => {}
+            Some(reason) => {
+                return Err(AppError::llm(format!(
+                    "题目解析未正常完成 (finish_reason={})，部分输出不可作为完整结果",
+                    reason
+                )))
+            }
+            // 所有受支持协议都由传输层/归一化给出真实结束信号（Responses 非流式
+            // 在 normalize_nonstream_response_to_openai 中恢复 `status`）。缺失
+            // 结束信号说明响应可能被网关截断，即使 JSON 恰好闭合也不能当成功。
+            None => {
+                return Err(AppError::llm(
+                    "题目解析缺少结束信号 (finish_reason=missing)，部分输出不可作为完整结果",
+                ))
+            }
+        }
+
+        let trimmed = completion.content.trim();
+        // 兼容完整的 markdown 围栏，但不从不完整数组/额外文字中猜测成功片段。
+        let json_text = if let Some(fenced) = trimmed
+            .strip_prefix("```json")
+            .or_else(|| trimmed.strip_prefix("```"))
+        {
+            fenced.trim().strip_suffix("```").unwrap_or("").trim()
+        } else {
+            trimmed
+        };
+        let questions: Vec<Value> = serde_json::from_str(json_text)
+            .map_err(|error| AppError::llm(format!("题目解析未返回完整 JSON 数组: {}", error)))?;
+        if questions.iter().any(|value| !value.is_object()) {
+            return Err(AppError::llm("题目解析数组包含非对象条目"));
+        }
+        Ok(questions)
+    }
+
+    /// 流式调用 LLM 解析题目，每解析出一道题目立即通过回调返回。
+    /// 回调仅表示暂存；只有整个方法返回 Ok 才能发布，Err 时不得提交部分对象。
+    /// callback 返回 false 则中止流并返回 Err。
     ///
     /// 传输由 `single_shot_stream` 承担：空闲超时 + 总时长硬上限（不再受共享
     /// 客户端 300s 总超时限制），供应商拒绝流式时自动回退非流式。
@@ -8946,28 +9025,17 @@ impl LLMManager {
             .await?
         };
 
-        if let Some(reason) = completion.interrupted.as_deref() {
-            // 已有部分内容时保留已解析题目（与旧实现一致），由上层决定是否补跑
-            log::warn!(
-                "[LLM] 题目解析流中断，保留已解析的 {} 题（{} 字符）: {}",
-                all_questions.len(),
-                completion.content.len(),
-                reason
-            );
+        let complete_questions = Self::validate_question_parsing_completion(&completion)?;
+        // 增量解析不能决定完整性；以已校验的完整数组核对已发出的暂存对象。
+        if !complete_questions.starts_with(&all_questions) {
+            return Err(AppError::llm("题目解析增量对象与完整响应不一致"));
         }
-
-        // 处理剩余未解析的内容
-        if !completion.aborted {
-            if let Some(questions) = json_parser.finalize() {
-                for q in questions {
-                    if on_question(q.clone()) {
-                        all_questions.push(q);
-                    }
-                }
+        for question in complete_questions.iter().skip(all_questions.len()) {
+            if !on_question(question.clone()) {
+                return Err(AppError::llm("题目解析已取消，部分输出不可作为完整结果"));
             }
         }
-
-        Ok(all_questions)
+        Ok(complete_questions)
     }
 
     pub async fn call_llm_for_question_parsing_with_model(
@@ -8997,70 +9065,205 @@ impl LLMManager {
             )
             .await?;
 
+        Self::validate_question_parsing_completion(&completion)?;
         Ok(completion.content)
     }
 }
 
 #[cfg(test)]
+mod question_parsing_completion_tests {
+    use super::*;
+    use single_shot_stream::{SingleShotCompletion, TransportMode};
+
+    fn completion(content: &str) -> SingleShotCompletion {
+        SingleShotCompletion {
+            content: content.into(),
+            reasoning_bytes: 0,
+            finish_reason: Some("stop".into()),
+            usage: None,
+            mode: TransportMode::Stream,
+            attempts: 1,
+            interrupted: None,
+            aborted: false,
+        }
+    }
+
+    #[test]
+    fn question_parsing_rejects_length_even_with_closed_json() {
+        let mut result = completion(r#"[{"content":"完整对象但响应截断"}]"#);
+        result.finish_reason = Some("length".into());
+        let error = LLMManager::validate_question_parsing_completion(&result).unwrap_err();
+        assert!(error.to_string().contains("length"));
+    }
+
+    #[test]
+    fn question_parsing_rejects_interrupted_partial_objects() {
+        let mut result = completion(r#"[{"content":"暂存对象"}]"#);
+        result.interrupted = Some("connection reset".into());
+        let error = LLMManager::validate_question_parsing_completion(&result).unwrap_err();
+        assert!(error.to_string().contains("connection reset"));
+    }
+
+    #[test]
+    fn question_parsing_requires_completion_signal_and_closed_array() {
+        for reason in [
+            None,
+            Some(""),
+            Some("content_filter"),
+            Some("tool_calls"),
+            Some("refusal"),
+            Some("max_tokens"),
+        ] {
+            for mode in [TransportMode::Stream, TransportMode::NonStream] {
+                let mut result = completion("[]");
+                result.finish_reason = reason.map(str::to_string);
+                result.mode = mode;
+                assert!(
+                    LLMManager::validate_question_parsing_completion(&result).is_err(),
+                    "response with finish_reason={reason:?} mode={mode:?} must not complete"
+                );
+            }
+        }
+        for content in [
+            r#"[{"content":"已闭合对象"},"#,
+            r#"{"content":"不是数组"}"#,
+            "[null]",
+        ] {
+            assert!(
+                LLMManager::validate_question_parsing_completion(&completion(content)).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn question_parsing_accepts_protocol_specific_normal_finish_reasons() {
+        // OpenAI Chat Completions / Gemini(STOP) / Anthropic / OpenAI Responses.
+        for reason in ["stop", "STOP", "end_turn", "stop_sequence", "completed"] {
+            let mut result = completion(r#"[{"content":"题目"}]"#);
+            result.finish_reason = Some(reason.into());
+            let parsed = LLMManager::validate_question_parsing_completion(&result)
+                .unwrap_or_else(|error| panic!("finish_reason={reason} rejected: {error}"));
+            assert_eq!(parsed.len(), 1);
+        }
+    }
+
+    #[test]
+    fn responses_nonstream_normalization_preserves_real_completion_status() {
+        let config = ApiConfig {
+            provider_type: Some("custom".to_string()),
+            provider_scope: Some("custom".to_string()),
+            model_adapter: "custom".to_string(),
+            api_protocol: Some("openai_responses".to_string()),
+            supports_openai_responses: Some(true),
+            model: "synthetic-responses-model".to_string(),
+            base_url: "https://proxy.example.com/v1".to_string(),
+            ..ApiConfig::default()
+        };
+        let output = json!([{
+            "type": "message",
+            "content": [{"type": "output_text", "text": r#"[{"content":"题目"}]"#}]
+        }]);
+
+        let completed = normalize_nonstream_response_to_openai(
+            &config,
+            &json!({
+                "status": "completed",
+                "output": output.clone(),
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }),
+        )
+        .expect("completed Responses body");
+        assert_eq!(completed["choices"][0]["finish_reason"], json!("completed"));
+        let mut result = completion(r#"[{"content":"题目"}]"#);
+        result.finish_reason = completed["choices"][0]["finish_reason"]
+            .as_str()
+            .map(str::to_string);
+        result.mode = TransportMode::NonStream;
+        assert!(LLMManager::validate_question_parsing_completion(&result).is_ok());
+
+        // A truncated Responses body keeps its useful text but must never be
+        // reported as a normal stop.
+        let truncated = normalize_nonstream_response_to_openai(
+            &config,
+            &json!({
+                "status": "incomplete",
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "output": output.clone()
+            }),
+        )
+        .expect("incomplete Responses body still yields partial content");
+        assert_eq!(truncated["choices"][0]["finish_reason"], json!("length"));
+        let mut result = completion(r#"[{"content":"题目"}]"#);
+        result.finish_reason = truncated["choices"][0]["finish_reason"]
+            .as_str()
+            .map(str::to_string);
+        result.mode = TransportMode::NonStream;
+        assert!(LLMManager::validate_question_parsing_completion(&result).is_err());
+
+        // Missing/unknown status must not be normalized into a normal stop.
+        let unknown = normalize_nonstream_response_to_openai(
+            &config,
+            &json!({
+                "status": "in_progress",
+                "output": output
+            }),
+        )
+        .expect("in-progress body is still parseable");
+        assert!(unknown["choices"][0]["finish_reason"].is_null());
+    }
+
+    #[test]
+    fn question_parsing_rejects_callback_cancellation() {
+        let mut result = completion("[]");
+        result.aborted = true;
+        assert!(LLMManager::validate_question_parsing_completion(&result).is_err());
+    }
+
+    #[test]
+    fn question_parsing_accepts_complete_plain_or_fenced_array() {
+        for content in [
+            r#"[{"content":"题目"}]"#,
+            "```json\n[{\"content\":\"题目\"}]\n```",
+        ] {
+            let parsed =
+                LLMManager::validate_question_parsing_completion(&completion(content)).unwrap();
+            assert_eq!(parsed.len(), 1);
+            assert_eq!(parsed[0]["content"], "题目");
+        }
+    }
+}
+#[cfg(test)]
 mod proxy_env_tests {
     use super::LLMManager;
 
-    /// 环境变量串行锁：代理测试会修改进程级 env，避免并行测试相互干扰。
-    static PROXY_ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    const PROXY_ENV_KEYS: [&str; 8] = [
-        "HTTP_PROXY",
-        "http_proxy",
-        "HTTPS_PROXY",
-        "https_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-        "NO_PROXY",
-        "no_proxy",
-    ];
+    /// 环境变量串行锁已移除：主测试不再修改本进程 env（探针在子进程里跑）。
 
     /// 主 LLM HTTP 客户端必须遵循标准代理环境变量（对齐 DSH 出站代理语义）。
     /// 用一个本地 TCP 监听冒充代理：只要它收到绝对形式请求行（GET http://…），
     /// 就证明 reqwest 系统代理生效；NO_PROXY 排除本机是为了不影响并行测试。
+    ///
+    /// 实际发请求的探针放在子进程里跑（re-exec 本测试二进制的 `inner_proxy_probe`）。
+    /// reqwest 0.11 的系统代理探测/连接组件是进程级惰性单例：本套件里任何先创建过
+    /// Client 的测试运行时销毁后，同进程后续运行时新建 Client 的请求会永久挂起
+    /// （最小复现：min_repro a→b 两测试必挂，与 hyper/业务代码无关）。子进程隔离
+    /// 同时保住了「验证 env 语义」的目标和整个测试套件的稳定性。
     #[tokio::test]
     async fn http_client_honors_proxy_environment() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let _guard = PROXY_ENV_GUARD
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind proxy listener");
         let proxy_url = format!("http://{}", listener.local_addr().expect("proxy addr"));
 
-        let saved: Vec<(&str, Option<String>)> = PROXY_ENV_KEYS
-            .iter()
-            .map(|key| (*key, std::env::var(key).ok()))
-            .collect();
-
-        for key in [
-            "HTTP_PROXY",
-            "http_proxy",
-            "HTTPS_PROXY",
-            "https_proxy",
-            "ALL_PROXY",
-            "all_proxy",
-        ] {
-            std::env::set_var(key, &proxy_url);
-        }
-        for key in ["NO_PROXY", "no_proxy"] {
-            std::env::set_var(key, "127.0.0.1,localhost,::1");
-        }
-
         let accept = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept proxied request");
             let mut buffer = vec![0u8; 8192];
-            let read = socket
-                .read(&mut buffer)
-                .await
-                .expect("read proxied request");
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(30), socket.read(&mut buffer))
+                    .await
+                    .expect("proxy must see a request within 30s")
+                    .expect("read proxied request");
             let head = String::from_utf8_lossy(&buffer[..read]).to_string();
             let _ = socket
                 .write_all(
@@ -9070,28 +9273,47 @@ mod proxy_env_tests {
             head
         });
 
+        let exe = std::env::current_exe().expect("current test exe");
+        let output = tokio::process::Command::new(exe)
+            .args([
+                "--exact",
+                "llm_manager::proxy_env_tests::inner_proxy_probe",
+                "--test-threads=1",
+            ])
+            .env("HTTP_PROXY", &proxy_url)
+            .env("HTTPS_PROXY", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env("NO_PROXY", "127.0.0.1,localhost,::1")
+            .env("no_proxy", "127.0.0.1,localhost,::1")
+            .output()
+            .await
+            .expect("spawn proxy probe subprocess");
+
+        let head = accept.await.expect("proxy task");
+        assert!(
+            output.status.success(),
+            "proxy probe subprocess must pass; stderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            head.starts_with("GET http://proxy-verify.invalid"),
+            "HTTP client must honor proxy env; proxy saw: {head}"
+        );
+    }
+
+    /// 仅由 `http_client_honors_proxy_environment` 以子进程方式调用：
+    /// 在干净进程里验证 `create_http_client_with_fallback` 遵循代理 env。
+    /// 代理 mock 提前断连不影响结论：绝对形式请求行已经证明代理生效。
+    #[tokio::test]
+    async fn inner_proxy_probe() {
         let client = LLMManager::create_http_client_with_fallback();
         let outcome = client
             .get("http://proxy-verify.invalid/v1/models")
             .send()
             .await;
-
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
-        let head = accept.await.expect("proxy task");
-        if let Err(error) = &outcome {
-            // 代理 mock 提前断连不影响结论：绝对形式请求行已经证明代理生效。
+        if let Err(error) = outcome {
             eprintln!("proxied request error (tolerated): {error}");
         }
-        assert!(
-            head.starts_with("GET http://proxy-verify.invalid"),
-            "HTTP client must honor proxy env; proxy saw: {head}"
-        );
     }
 }
 

@@ -268,6 +268,21 @@ describe('ExamContentView secondary entry points', () => {
     });
   });
 
+  it.each([false, true])('keeps persisted import quality visible after reopening (resume_available=%s)', async (resumeAvailable) => {
+    mockGetExamSheetSessionDetail.mockResolvedValue({
+      summary: { status: 'completed', metadata: { import_report: {
+        schema_version: 1, status: 'needs_review', failed_pages: [], failed_chunks: [],
+        degenerate_count: 0, quarantined_entries: [{ id: 'synthetic-entry' }],
+        conflicts: [{ id: 'synthetic-conflict' }], resume_available: resumeAvailable,
+      } } }, preview: { pages: [] },
+    });
+    render(<ExamContentView node={{ id: 'exam_1', name: 'Exam', type: 'exam', path: '/exam_1' } as any} />);
+    expect(await screen.findByTestId('exam-import-quality')).toHaveTextContent('exam_sheet:uploader.quality_review');
+    const resume = screen.queryByRole('button', { name: 'exam_sheet:uploader.resume_import' });
+    expect(Boolean(resume)).toBe(resumeAvailable);
+    expect(mockResumeQuestionImport).not.toHaveBeenCalled();
+  });
+
   it('exposes management entry and opens CSV import/export dialogs from the manage view', async () => {
     render(
       <ExamContentView

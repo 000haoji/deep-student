@@ -77,25 +77,44 @@ const docx = () => new File(['hello'], 'quiz.docx', {
   type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 });
 
+const question = (id: string, cardId = id) => ({
+  id: `entity_${id}`, card_id: cardId, content: `question ${id}`, question_label: id,
+  question_type: 'single_choice', answer: 'A', options: [],
+});
+const questionPage = (ids: string[], page = 1, hasMore = false, total = ids.length) => ({
+  questions: ids.map(id => question(id)), page, page_size: 50, has_more: hasMore, total,
+});
+
 describe('buildImportSummary', () => {
   it('only counts cards added by this import when a baseline is known', () => {
     const summary = buildImportSummary(
       detailWith([card('old-1'), card('old-2'), card('new-1', { question_type: 'fill_blank' }), card('new-2', { ocr_text: ' ' })]),
-      new Set(['old-1', 'old-2']),
+      new Set(['entity_old-1', 'entity_old-2']),
+      [question('old-1'), question('old-2'), { ...question('new-1'), question_type: 'fill_blank' }, { ...question('new-2'), content: ' ' }],
     );
     expect(summary.cards.map(c => c.card_id)).toEqual(['new-1', 'new-2']);
     expect(summary.questionTypes).toEqual({ fill_blank: 1, single_choice: 1 });
     expect(summary.emptyQuestions).toBe(1);
   });
 
-  it('falls back to all cards when the baseline snapshot failed', () => {
-    expect(buildImportSummary(detailWith([card('a'), card('b')]), null).cards).toHaveLength(2);
+  it('shows all formal entities but disables filtering when the baseline is unknown', () => {
+    const summary = buildImportSummary(detailWith([card('a'), card('b')]), null, [question('a'), question('b')]);
+    expect(summary.cards).toHaveLength(2);
+    expect(summary.canFilter).toBe(false);
+  });
+
+  it('never matches legacy identities by identical question text', () => {
+    const summary = buildImportSummary(detailWith([card('legacy')]), new Set(), [question('legacy', 'unrelated')]);
+    expect(summary.cards[0].id).toBe('entity_legacy');
+    expect(summary.canFilter).toBe(false);
   });
 });
 
 describe('ExamSheetUploader (streamlined layout)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.invoke.mockReset();
+    mocks.updateExamSheetCards.mockReset();
     mocks.getApiConfigurations.mockResolvedValue([]);
     mocks.getExamSheetSessionDetail.mockResolvedValue(detailWith([card('old-1')]));
     (globalThis as any).URL.createObjectURL = vi.fn(() => 'blob:preview');
@@ -137,8 +156,11 @@ describe('ExamSheetUploader (streamlined layout)', () => {
 
   it('summary lists only the newly imported questions and only deletes the ones the user unchecks', async () => {
     const onUploadSuccess = vi.fn();
+    let imported = false;
     mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'qbank_list_questions') return questionPage(imported ? ['old-1', 'new-1', 'new-2'] : ['old-1']);
       if (cmd === 'import_question_bank_stream') {
+        imported = true;
         return detailWith([card('old-1'), card('new-1'), card('new-2')]);
       }
       return true;
@@ -165,8 +187,122 @@ describe('ExamSheetUploader (streamlined layout)', () => {
     expect(onUploadSuccess).toHaveBeenCalledTimes(1);
   });
 
+  it('loads every formal question page instead of silently counting an incomplete preview', async () => {
+    let imported = false;
+    mocks.invoke.mockImplementation(async (cmd: string, args: any) => {
+      if (cmd === 'qbank_list_questions') {
+        if (!imported) return questionPage([]);
+        return args.request.page === 1
+          ? questionPage(['a'], 1, true, 2)
+          : questionPage(['b'], 2, false, 2);
+      }
+      if (cmd === 'import_question_bank_stream') {
+        imported = true;
+        return detailWith([card('a')]);
+      }
+      return true;
+    });
+    render(<ExamSheetUploader sessionId="exam_1" />);
+    selectFiles([docx()]);
+    fireEvent.click(screen.getByTestId('exam-uploader-start'));
+    expect(await screen.findAllByTestId('exam-uploader-summary-question')).toHaveLength(2);
+    expect(screen.getByText('exam_sheet:uploader.import_done:2')).toBeInTheDocument();
+    expect(screen.getByTestId('exam-uploader-integrity-warning')).toBeInTheDocument();
+    expect(screen.getAllByRole('checkbox').every(input => (input as HTMLInputElement).disabled)).toBe(true);
+  });
+
+  it('shows persistent partial/degenerate warnings even when no Completed event was received', async () => {
+    let imported = false;
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'qbank_list_questions') return questionPage(imported ? ['a'] : []);
+      if (cmd === 'import_question_bank_stream') {
+        imported = true;
+        const detail = detailWith([card('a')]);
+        detail.summary.metadata = { import_report: {
+          schema_version: 1, status: 'partial', failed_pages: [2], failed_chunks: [],
+          degenerate_count: 1, quarantined_entries: [], conflicts: [], resume_available: true,
+        } };
+        return detail;
+      }
+      return true;
+    });
+    render(<ExamSheetUploader sessionId="exam_1" />);
+    selectFiles([docx()]);
+    fireEvent.click(screen.getByTestId('exam-uploader-start'));
+    await screen.findByTestId('exam-uploader-summary');
+    expect(screen.getByText('exam_sheet:uploader.incomplete_warning')).toBeInTheDocument();
+    expect(screen.getByText('exam_sheet:uploader.degenerate_warning:1')).toBeInTheDocument();
+  });
+
+  it('does not navigate away or discard exclusions when unified filtering fails', async () => {
+    let imported = false;
+    const onUploadSuccess = vi.fn();
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'qbank_list_questions') return questionPage(imported ? ['a', 'b'] : []);
+      if (cmd === 'import_question_bank_stream') {
+        imported = true;
+        return detailWith([card('a'), card('b')]);
+      }
+      return true;
+    });
+    mocks.updateExamSheetCards.mockRejectedValue(new Error('QBANK_IMPORT_REVIEW_REQUIRED'));
+    render(<ExamSheetUploader sessionId="exam_1" onUploadSuccess={onUploadSuccess} />);
+    selectFiles([docx()]);
+    fireEvent.click(screen.getByTestId('exam-uploader-start'));
+    const rows = await screen.findAllByTestId('exam-uploader-summary-question');
+    fireEvent.click(rows[1].querySelector('input')!);
+    fireEvent.click(screen.getByText('exam_sheet:uploader.view_questions_filtered:1'));
+    await waitFor(() => expect(mocks.updateExamSheetCards).toHaveBeenCalled());
+    expect(onUploadSuccess).not.toHaveBeenCalled();
+    expect(screen.getByTestId('exam-uploader-summary')).toBeInTheDocument();
+    expect(rows[1].querySelector('input')).not.toBeChecked();
+  });
+
+  it('rejects an image batch above 200 MiB before any FileReader or backend import', async () => {
+    const files = Array.from({ length: 5 }, (_, index) => {
+      const file = new File(['synthetic'], `page${index}.png`, { type: 'image/png' });
+      Object.defineProperty(file, 'size', { value: 45 * 1024 * 1024 });
+      return file;
+    });
+    render(<ExamSheetUploader sessionId="exam_1" />);
+    selectFiles(files);
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+    expect(screen.queryByTestId('exam-uploader-start')).toBeNull();
+    expect(mocks.invoke).not.toHaveBeenCalled();
+  });
+
+  it('reads images sequentially rather than starting the entire batch concurrently', async () => {
+    let imported = false;
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'qbank_list_questions') return questionPage(imported ? ['a'] : []);
+      if (cmd === 'import_question_bank_stream') { imported = true; return detailWith([card('a')]); }
+      return true;
+    });
+    const readers: Array<{ onload: null | (() => void); result: string }> = [];
+    const OriginalReader = globalThis.FileReader;
+    const read = vi.fn(function (this: { onload: null | (() => void); result: string }) { readers.push(this); });
+    globalThis.FileReader = class {
+      onload = null;
+      onerror = null;
+      result = 'data:image/png;base64,QUJD';
+      readAsDataURL = read;
+    } as any;
+    try {
+      render(<ExamSheetUploader sessionId="exam_1" />);
+      selectFiles([new File(['a'], 'a.png', { type: 'image/png' }), new File(['b'], 'b.png', { type: 'image/png' })]);
+      fireEvent.click(screen.getByTestId('exam-uploader-start'));
+      await waitFor(() => expect(read).toHaveBeenCalled());
+      expect(read).toHaveBeenCalledTimes(1);
+      await act(async () => readers[0].onload?.());
+      expect(read).toHaveBeenCalledTimes(2);
+      await act(async () => readers[1].onload?.());
+      await screen.findByTestId('exam-uploader-summary');
+    } finally { globalThis.FileReader = OriginalReader; }
+  });
+
   it('shows a failure once, with retry as the primary action instead of a second retry button', async () => {
     mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'qbank_list_questions') return questionPage([]);
       if (cmd === 'import_question_bank_stream') throw new Error('未找到可用的模型');
       return true;
     });

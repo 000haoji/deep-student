@@ -202,12 +202,26 @@ export interface SaveMistakeResponse {
   source?: 'auto' | 'manual' | string;
 }
 
+export interface QuestionImportReport {
+  schema_version: 1;
+  status: 'completed' | 'partial' | 'needs_review' | 'failed';
+  failed_pages: unknown[];
+  failed_chunks: unknown[];
+  degenerate_count: number;
+  quarantined_entries: unknown[];
+  conflicts: unknown[];
+  /** Only true when a persisted checkpoint can actually be resumed. */
+  resume_available?: boolean;
+  [key: string]: unknown;
+}
+
 // 统一封装：带调试埋点的 invoke
 export interface ExamSheetSessionMetadata {
   instructions?: string | null;
   tags?: string[] | null;
   page_count?: number | null;
   card_count?: number | null;
+  import_report?: QuestionImportReport | null;
   raw_model_response?: any;
 }
 
