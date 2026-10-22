@@ -53,6 +53,7 @@ CREATE INDEX idx_qbank_groups_exam ON qbank_groups(exam_id,deleted_at,position);
 CREATE INDEX idx_qbank_group_materials_group ON qbank_group_materials(group_id,deleted_at,position);
 CREATE INDEX idx_qbank_jobs_exam ON qbank_import_jobs(exam_id,status);
 CREATE INDEX idx_questions_group ON questions(group_id,group_position);
+-- @danger-ack: unique_constraint reason="source_key is a newly added nullable column; all existing rows are NULL and excluded by the partial index, with no data backfill"
 CREATE UNIQUE INDEX idx_questions_source_slot ON questions(exam_id,source_key) WHERE source_key IS NOT NULL;
 
 CREATE TRIGGER qbank_question_group_insert BEFORE INSERT ON questions WHEN NEW.group_id IS NOT NULL

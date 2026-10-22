@@ -30,7 +30,7 @@ export function questionSourceResourceId(sourceRef: string | null | undefined): 
  * 旧格式 `[题目集:exam_id:名称]` 保持兼容；`#` 定位后缀只新增、不改变旧引用。
  */
 export function buildQuestionCitation(examId: string, question: Question): string {
-  const label = (question.questionLabel || '').replace(/[:\[\]#\n]/g, ' ').trim();
+  const label = (question.questionLabel || '').replace(/[:[\]#\n]/g, ' ').trim();
   const head = `[题目集:${examId}#${question.id}`;
   return label ? `${head}:${label}]` : `${head}]`;
 }
