@@ -195,12 +195,26 @@ describe('QualityMenu', () => {
 });
 
 describe('MediaStudyView · Bilibili quality', () => {
+  it('retries failed in-app playback with a new source and cache attempt', async () => {
+    qualityBackend();
+    render(<MediaStudyView kind="video" src="" bilibili={LINK as never} resourceId="file_link" fileName="lecture.bilibili" onError={vi.fn()} />);
+    await flush();
+    const first = video.props!.src;
+    act(() => video.props!.onError());
+    expect(screen.queryByTestId('bilibili-embed')).toBeNull();
+    expect(document.querySelector('[data-bilibili-stream-error]')).toBeTruthy();
+    fireEvent.click(screen.getByText('learningHub:mediaBilibili.playback.retry'));
+    await flush();
+    expect(video.props!.src).not.toBe(first);
+    expect(video.props!.src).toContain('a=2');
+    expect(invokeMock).toHaveBeenLastCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 0, attempt: 2 });
+  });
   it('defaults to the highest quality and lists what the backend can play', async () => {
     qualityBackend();
     renderLink();
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80');
+    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&a=1');
     await flush();
-    expect(invokeMock).toHaveBeenCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 0 });
+    expect(invokeMock).toHaveBeenCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 0, attempt: 1 });
     expect(video.props?.quality?.value).toBe(80);
     expect(video.props?.quality?.options).toEqual([
       { value: 80, label: '1080P' },
@@ -218,7 +232,7 @@ describe('MediaStudyView · Bilibili quality', () => {
     const mountsBefore = video.mounts;
 
     act(() => video.props?.quality?.onChange(64));
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=64');
+    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=64&a=1');
     expect(video.mounts).toBe(mountsBefore + 1);
     expect(getBilibiliQualityPreference()).toBe(64);
     await flush();
@@ -241,7 +255,7 @@ describe('MediaStudyView · Bilibili quality', () => {
     // 偏好是全局的：另一个条目按 360P 请求
     cleanup();
     renderLink('file_other');
-    expect(video.props?.src).toBe('bilistream://localhost/file_other?qn=16');
+    expect(video.props?.src).toBe('bilistream://localhost/file_other?qn=16&a=2');
   });
 
   it('tells the user when Bilibili downgrades the chosen quality', async () => {
@@ -270,12 +284,12 @@ describe('MediaStudyView · Bilibili quality', () => {
     await act(async () => {
       await refreshBilibiliAccount();
     });
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80');
+    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&a=1');
     qualityBackend();
     act(() => setBilibiliAccount({ ...ACCOUNT, loggedIn: true, mid: 7 }));
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&e=1');
+    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&e=1&a=1');
     await flush();
-    expect(invokeMock).toHaveBeenLastCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 1 });
+    expect(invokeMock).toHaveBeenLastCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 1, attempt: 1 });
     // 换地址后同样续上位置
     status(0, false, true);
     expect(video.seekTo).toHaveBeenLastCalledWith(30);
