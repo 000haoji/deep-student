@@ -48,9 +48,9 @@ export const qbankToolsSkill: SkillDefinition = {
 
 ## 完整工作流
 
-1. **建题**：单题用 \`qbank_create_question\`，批量用 \`qbank_batch_import\`；资源库试卷直接传 \`resource_id\` 给 \`qbank_import_document\`，无需先读或OCR。选项放options。对话命题使用当前模型的v2文档，不另选模型槽；generate_questions仅提供指引，用户明确要求后台任务才background=true。抽取不自行解题，缺答案保留null。
-2. **练习**：get_next_question取题，review_only=true仅错题/复习题；限时/模拟考/每日练习用start_timed_practice/generate_mock_exam/get_daily_practice。
-3. **用户作答**：agentCanAnswer=false，不得猜测或代答。submit_answer只提交用户原答；限时/模拟考由用户在UI作答交卷。成绩分析加载workbench-tools读取权威脱敏scoreSummary，不含答案或逐题判定。
+1. **建题**：单题用 \`builtin-qbank_create_question\`，批量用 \`builtin-qbank_batch_import\`；资源直接传resource_id给 \`builtin-qbank_import_document\`。选项放options。当前模型产v2文档，不另选槽；generate_questions只给指引，用户明确要求后台才background=true。抽取不解题，缺答案null。
+2. **练习**：\`builtin-qbank_get_next_question\`取题，review_only=true仅错题/复习；限时/模拟考/每日分别用start_timed_practice/generate_mock_exam/get_daily_practice。
+3. **用户作答**：agentCanAnswer=false，不得生成、猜测或代替用户作答。submit_answer仅用户原答；限时/模拟考用户在UI交卷。成绩加载workbench-tools读取scoreSummary，绝不包含答案或逐题判定。
 4. **错题闭环**：读取作答/交卷回执中的错题 ID；需要去重时先搜索并逐题读取版本。
    收藏难题用 \`builtin-qbank_toggle_favorite\`，书签标记用 \`builtin-qbank_toggle_bookmark\`
    （两个独立标记位）。回看一道题的完整作答记录用 \`builtin-qbank_get_submissions\`，
@@ -58,9 +58,9 @@ export const qbankToolsSkill: SkillDefinition = {
    不可恢复：每次调用 \`builtin-qbank_delete_questions\` 前都必须加载 \`ask-user\`，使用
    \`builtin-ask_user\` 列明本次准确题目与数量并取得明确确认；授权永不记忆，禁止复用，
    无人值守/headless 场景不得执行。
-5. **分析**：search_questions/get_stats/get_learning_trend/get_activity_heatmap/get_knowledge_stats；单页最多20条，读到has_more=false才算完整。
+5. **分析**：search_questions/get_stats/\`builtin-qbank_get_learning_trend\`/get_activity_heatmap/get_knowledge_stats；单页最多 20 条，读到has_more=false才完整。
 6. **整理**：batch_update_questions改难度/状态/完整标签，最多20题，逐题OCC非原子；按results重读冲突。内容修改逐题update_question。
-7. **组卷**：generate_paper的preview不写文件，export_path=null；markdown写exports/qbank/*.md。不得声称生成PDF/Word。
+7. **组卷**：\`builtin-qbank_generate_paper\`的preview不写文件，export_path=null；markdown写exports/qbank/*.md。不得声称生成PDF/Word。
 
 ## 材料、草稿和提交
 
@@ -114,7 +114,8 @@ export const qbankToolsSkill: SkillDefinition = {
 
 session_id/exam_id=题目集ID；question_id=正式题ID；card_id=同库卡片ID。
 page从1开始，offset从0开始；limit/page_size按has_more继续分页。
-长字段的截断由<field>_truncated、options[i].content_truncated和fieldsTruncated标明；不得当全文。
+长字段最多2000字符，<field>_truncated、options[i].content_truncated、fieldsTruncated标记，不得当全文。
+分页回执含total、limit/offset或page/page_size、questions/results、has_more、truncated；读到has_more=false才完整。
 
 ## 出题格式要求
 
@@ -574,7 +575,7 @@ page从1开始，offset从0开始；limit/page_size按has_more继续分页。
     },
     {
       name: 'builtin-qbank_ai_grade',
-      description: '真实调用模型：grade须用户作答的 submission_id 并持久化评分；analyze生成解析，仅原 explanation 为空时写入。',
+      description: '真实 AI：grade须qbank_submit_answer的submission_id并持久化评分；analyze仅写空explanation，已有解析不会被覆盖。',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
@@ -884,7 +885,7 @@ page从1开始，offset从0开始；limit/page_size按has_more继续分页。
     },
     {
       name: 'builtin-qbank_generate_paper',
-      description: 'Medium：筛题组卷。preview仅内存，export_path=null/file_created=false；markdown真实写exports/qbank/*.md。拒绝PDF/Word；题目最多20条，questions_truncated标记，长字段截断。',
+      description: 'Medium：筛题组卷。preview仅内存，export_path=null/file_created=false；markdown真实写exports/qbank/*.md。拒绝PDF/Word；questions最多20条，questions_truncated标记，长字段截断。',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
