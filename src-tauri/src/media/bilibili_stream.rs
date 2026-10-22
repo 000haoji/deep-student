@@ -905,7 +905,8 @@ mod tests {
     #[ignore = "requires live public Bilibili API and CDN"]
     async fn live_native_playurl_and_range_share_one_attempt() {
         let client = BiliClient::new().unwrap();
-        let lookup = client.lookup("BV1UypG6gEEB", None).await.unwrap();
+        let video = std::env::var("DS_BILIBILI_LIVE_VIDEO").unwrap_or_else(|_| "BV1GJ411x7h7".into());
+        let lookup = client.lookup(&video, None).await.unwrap();
         let descriptor = BiliLinkDescriptor::from_lookup(&lookup);
         let info = resolve_play_info(&client, &descriptor, DEFAULT_QN)
             .await
