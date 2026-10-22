@@ -487,12 +487,18 @@ impl BiliClient {
     }
 
     fn video_cache_key(&self, id: &BiliVideoId) -> String {
+        // Mock servers recycle ports; retain caching within a test client, not across clients.
+        let scope = if self.strict_hosts {
+            self.attempt.cache_scope()
+        } else {
+            self.attempt.id.clone()
+        };
         match id {
             BiliVideoId::Bv(bvid) => {
-                format!("{}|{}|{}", self.attempt.cache_scope(), self.api_base, bvid)
+                format!("{}|{}|{}", scope, self.api_base, bvid)
             }
             BiliVideoId::Av(aid) => {
-                format!("{}|{}|av{}", self.attempt.cache_scope(), self.api_base, aid)
+                format!("{}|{}|av{}", scope, self.api_base, aid)
             }
         }
     }
