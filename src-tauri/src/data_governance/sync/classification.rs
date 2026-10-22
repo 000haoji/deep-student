@@ -405,6 +405,16 @@ pub fn sync_classification_registry() -> Vec<TableClassification> {
         },
         TableClassification {
             database: "vfs",
+            table_name: "question_group_materials_fts",
+            primary_key: "(virtual)",
+            category: SyncCategory::DerivedRebuild,
+            conflict_policy: ConflictPolicyClass::NoConflict,
+            business_unique_keys: "",
+            has_json_blobs: false,
+            merge_notes: "FTS5 virtual table (external content); rebuilt from question_group_materials by V20261021 triggers",
+        },
+        TableClassification {
+            database: "vfs",
             table_name: "vfs_index_units",
             primary_key: "id",
             category: SyncCategory::DerivedRebuild,

@@ -57,6 +57,8 @@ pub struct MockCloudStorage {
     inner: Mutex<MockCloudStorageInner>,
     /// 当设为 true 时，所有网络操作返回错误（模拟断网）
     offline: Mutex<bool>,
+    // 发布序号按远端实例持久化，独立的内存云端不能复用 provider 默认标识。
+    binding_hint: String,
 }
 
 impl MockCloudStorage {
@@ -64,6 +66,7 @@ impl MockCloudStorage {
         Self {
             inner: Mutex::new(MockCloudStorageInner::default()),
             offline: Mutex::new(false),
+            binding_hint: format!("mock|instance={}", uuid::Uuid::new_v4()),
         }
     }
 
@@ -95,6 +98,10 @@ impl MockCloudStorage {
 impl CloudStorage for MockCloudStorage {
     fn provider_name(&self) -> &'static str {
         "Mock"
+    }
+
+    fn instance_binding_hint(&self) -> String {
+        self.binding_hint.clone()
     }
 
     async fn check_connection(&self) -> CloudResult<()> {

@@ -1798,7 +1798,11 @@ impl MigrationCoordinator {
     ) -> Result<(), MigrationError> {
         self.ensure_refinery_history_table(conn)?;
 
-        for migration in runner.get_migrations() {
+        // Refinery 仅在 run 时排序；兼容恢复也必须先补齐较早版本的依赖列。
+        let mut migrations: Vec<&refinery::Migration> = runner.get_migrations().iter().collect();
+        migrations.sort_unstable_by_key(|migration| migration.version());
+
+        for migration in migrations {
             let version = migration.version();
 
             // 跳过已记录的迁移
@@ -9500,5 +9504,60 @@ mod tests {
             .query_row("SELECT value FROM test_data LIMIT 1", [], |row| row.get(0))
             .unwrap();
         assert_eq!(value, "new-snapshot", "必须从最新快照恢复");
+    }
+
+    #[cfg(feature = "data_governance")]
+    #[test]
+    fn make_alter_columns_safe_recovers_in_version_order_with_reversed_runner() {
+        let (coordinator, temp_dir) = create_test_coordinator();
+        let db_path = temp_dir.path().join("mistakes.db");
+        let mut conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+
+        let applied_runner = coordinator
+            .create_mistakes_runner()
+            .unwrap()
+            .set_grouped(false);
+        applied_runner.run(&mut conn).unwrap();
+
+        // 中间态：只抹掉 V20260711/V20260712 的历史，并删除 deleted_at 列
+        //（先清掉引用该列的索引，SQLite 不允许 DROP COLUMN 时仍有索引引用）。
+        conn.execute_batch(
+            "DELETE FROM refinery_schema_history WHERE version IN (20260711, 20260712);
+             DROP INDEX IF EXISTS idx_fsrs_review_logs_deleted_at;
+             DROP INDEX IF EXISTS idx_fsrs_review_logs_updated_not_deleted;
+             DROP INDEX IF EXISTS idx_fsrs_logs_state_active;
+             DROP INDEX IF EXISTS idx_fsrs_review_logs_mastery_pending;
+             DROP INDEX IF EXISTS idx_fsrs_logs_review_ms;
+             ALTER TABLE fsrs_review_logs DROP COLUMN deleted_at;",
+        )
+        .unwrap();
+
+        let mut reversed: Vec<refinery::Migration> = applied_runner.get_migrations().clone();
+        reversed.sort_unstable_by_key(|migration| std::cmp::Reverse(migration.version()));
+        let reversed_runner = refinery::Runner::new(&reversed).set_grouped(false);
+
+        coordinator
+            .make_alter_columns_safe(&conn, &reversed_runner)
+            .expect("恢复不得依赖 registry 的原始顺序");
+
+        assert!(
+            coordinator
+                .column_exists(&conn, "fsrs_review_logs", "deleted_at")
+                .unwrap(),
+            "V20260711 的 deleted_at 必须被补齐"
+        );
+        assert!(
+            coordinator
+                .index_exists(&conn, "idx_fsrs_logs_state_active")
+                .unwrap(),
+            "V20260712 依赖 deleted_at 的索引必须在补列后重建"
+        );
+        for version in [20260711, 20260712] {
+            assert!(
+                coordinator.is_migration_recorded(&conn, version).unwrap(),
+                "V{version} 恢复后必须写入迁移记账"
+            );
+        }
     }
 }

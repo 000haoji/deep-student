@@ -48,10 +48,13 @@ impl SessionOperation {
             // Appending may target a live or finished bank, but never a session
             // that is being deleted, archived or already has an active
             // unfinished import (that would overwrite a recoverable attempt).
+            // `empty` is a freshly created bank whose first document arrives via
+            // this same append path; it has no prior content to overwrite.
             SessionOperation::AppendDocument => {
                 matches!(
                     status,
-                    "importing"
+                    "empty"
+                        | "importing"
                         | "parsing"
                         | "needs_review"
                         | "partial"
@@ -734,6 +737,25 @@ mod tests {
         sheet.id
     }
 
+    /// 走与 `dstu_create` 的 `exams` 分支相同的真实创建路径：新建空题目集
+    /// （status=empty，metadata.status=empty，无断点）。
+    fn empty_exam(db: &VfsDatabase) -> String {
+        let sheet = VfsExamRepo::create_exam_sheet_in_folder(
+            db,
+            VfsCreateExamSheetParams {
+                exam_name: Some("空题目集首导合成".into()),
+                temp_id: "guard-empty-synthetic".into(),
+                metadata_json: json!({"status":"empty","pageCount":0,"questionCount":0}),
+                preview_json: json!({"temp_id":"guard-empty-synthetic","exam_name":"空题目集首导合成","pages":[]}),
+                status: "empty".into(),
+                folder_id: None,
+            },
+            None,
+        )
+        .unwrap();
+        sheet.id
+    }
+
     fn checkpoint(schema_version: u32, cached: bool) -> ImportCheckpointState {
         ImportCheckpointState {
             qbank_name: "会话门禁合成".into(),
@@ -927,6 +949,147 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(error.contains("未完成的导入断点"), "{error}");
+    }
+
+    #[test]
+    fn empty_session_without_checkpoint_allows_first_document_append() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = empty_exam(&db);
+        let snapshot =
+            validate_session_for_operation(&db, &id, SessionOperation::AppendDocument, "")
+                .expect("无断点的 empty 题目集必须允许首次追加文档");
+        assert_eq!(snapshot.status, "empty");
+        assert!(!snapshot.deleted);
+    }
+
+    #[test]
+    fn empty_session_with_unfinished_checkpoint_still_rejects_append() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = empty_exam(&db);
+        VfsExamRepo::update_import_state(&db, &id, &json!({"schema_version":2})).unwrap();
+        let error = validate_session_for_operation(&db, &id, SessionOperation::AppendDocument, "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("未完成的导入断点"), "{error}");
+    }
+
+    #[test]
+    fn deleted_empty_session_rejects_append() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = empty_exam(&db);
+        {
+            let conn = db.get_conn_safe().unwrap();
+            conn.execute(
+                "UPDATE exam_sheets SET deleted_at=?1 WHERE id=?2",
+                params!["2026-10-21T00:00:00Z", id],
+            )
+            .unwrap();
+        }
+        let error = validate_session_for_operation(&db, &id, SessionOperation::AppendDocument, "")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("已删除"), "{error}");
+    }
+
+    #[test]
+    fn empty_session_stays_unresumable() {
+        let (_temp, db) = setup_migrated_test_db();
+        // empty is rejected by the status gate itself, whether or not a
+        // checkpoint happens to be present.
+        let no_checkpoint = empty_exam(&db);
+        let error =
+            validate_session_for_operation(&db, &no_checkpoint, SessionOperation::Resume, "")
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("不允许续导"), "{error}");
+        assert!(error.contains("empty"), "{error}");
+
+        let with_checkpoint = empty_exam(&db);
+        VfsExamRepo::update_import_state(&db, &with_checkpoint, &json!({"schema_version":2}))
+            .unwrap();
+        let error =
+            validate_session_for_operation(&db, &with_checkpoint, SessionOperation::Resume, "")
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("不允许续导"), "{error}");
+        assert!(error.contains("empty"), "{error}");
+    }
+
+    /// 真实 empty 题目集 → 真实 `import_document`（JSON 路径不调用模型）
+    /// 首导，必须写回原题目集。
+    #[tokio::test]
+    async fn empty_exam_first_json_import_reuses_frontend_session_id() {
+        use crate::database::Database;
+        use crate::file_manager::FileManager;
+        use crate::llm_manager::LLMManager;
+        use crate::question_import_service::{ImportRequest, QuestionImportService};
+        use std::sync::Arc;
+
+        let (temp_dir, db) = setup_migrated_test_db();
+        let db = Arc::new(db);
+        let session_id = empty_exam(&db);
+
+        let main_db = Arc::new(Database::new(&temp_dir.path().join("guard-main.db")).unwrap());
+        let file_manager = Arc::new(FileManager::new(temp_dir.path().to_path_buf()).unwrap());
+        let llm = Arc::new(LLMManager::new(main_db, file_manager).unwrap());
+        let service = QuestionImportService::new_without_file_manager(llm);
+
+        let content = json!({
+            // Same schema the JSON importer publishes: `content` is mandatory,
+            // otherwise the row is quarantined instead of imported.
+            "questions": [
+                {"label":"Q1","content":"1+1=?","answer":"2","block_kind":"question"},
+                {"label":"Q2","content":"2+2=?","answer":"4","block_kind":"question"}
+            ]
+        })
+        .to_string();
+        let result = service
+            .import_document(
+                &db,
+                ImportRequest {
+                    content,
+                    format: "json".into(),
+                    name: Some("空题目集首导".into()),
+                    session_id: Some(session_id.clone()),
+                    folder_id: None,
+                    model_config_id: None,
+                    pdf_prefer_ocr: None,
+                },
+            )
+            .await
+            .expect("空题目集的首个文档导入不能被会话门禁拒绝");
+
+        assert_eq!(
+            result.session_id, session_id,
+            "首导必须复用前端传入的题目集 ID"
+        );
+        assert_eq!(result.imported_count, 2);
+
+        let conn = db.get_conn_safe().unwrap();
+        let sheets: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM exam_sheets WHERE deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(sheets, 1, "首导不得另建题目集");
+        let questions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE exam_id=?1 AND deleted_at IS NULL",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(questions, 2);
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM exam_sheets WHERE id=?1",
+                [&session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(status, "empty", "首导后原空题目集必须已发布题目");
     }
 
     #[test]

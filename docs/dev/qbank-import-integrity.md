@@ -28,7 +28,7 @@ Compatibility rules on resume:
 
 ### Session ownership and append
 
-- A caller-supplied `session_id` is an append request. The session must exist, must not be soft-deleted, must have an allowed status (`importing`, `parsing`, `needs_review`, `partial`, `failed`, `completed`, `excluded`), and must not carry an unfinished import checkpoint. Appending cannot overwrite a resumable attempt.
+- A caller-supplied `session_id` is an append request, including the first document uploaded into a newly created `empty` bank. The session must exist, must not be soft-deleted, must have an allowed status (`empty`, `importing`, `parsing`, `needs_review`, `partial`, `failed`, `completed`, `excluded`), and must not carry an unfinished import checkpoint. The original bank ID is retained; appending cannot overwrite a resumable attempt. An `empty` bank is not resumable.
 - Resume requires a resumable status (`importing`, `needs_review`, `partial`, `failed`) plus a non-empty checkpoint. Bank-level `import_mode` is not used to restrict append document formats; a mode mismatch is only considered for an explicit resume request that declares its mode.
 - One in-process lease per session prevents a resume and an append from interleaving. A competing attempt receives a clear "already running" error instead of racing.
 - The resume entry point compares the checkpoint it read with the stored JSON before writing the migrated attempt (`UPDATE ... WHERE import_state_json IS <read value>`). A stale writer is rejected. All checkpoint writes refuse missing or soft-deleted sessions.
