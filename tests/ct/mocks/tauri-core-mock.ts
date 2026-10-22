@@ -56,6 +56,7 @@ export const invoke = async (command: string, _payload?: Record<string, unknown>
   if (handler) return handler(command, _payload);
 
   switch (command) {
+    case 'qbank_list_authoring_drafts':
     case 'get_all_custom_templates':
       return [];
     case 'get_default_template_id':

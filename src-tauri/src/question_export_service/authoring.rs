@@ -367,7 +367,7 @@ mod tests {
         )
         .unwrap();
         let document:QuestionDocument=serde_json::from_value(json!({"schema_version":2,"mode":"extract","materials":[{"local_id":"m1","content":"Shared conditions","images":[{"id":file.id,"hash":blob.hash,"name":"condition.png","mime":"image/png"}]}],"groups":[{"local_id":"g1","label":"Conditions","material_ids":["m1"],"question_ids":["q1","q2"]}],"questions":[
-            {"local_id":"q1","group_id":"g1","content":"Numeric question","question_type":"numeric","structured_data":{"answer_value":3.14,"tolerance":0.01}},
+            {"local_id":"q1","group_id":"g1","content":"Numeric question","question_type":"numeric","structured_data":{"answer_value":12.5,"tolerance":0.01}},
             {"local_id":"q2","group_id":"g1","content":"Explain","question_type":"short_answer","answer":null}
         ]})).unwrap();
         QuestionAuthoringService::new(db.clone())
@@ -400,7 +400,7 @@ mod tests {
         );
         assert_eq!(
             exported["questions"][0]["structured_data"]["answer_value"],
-            3.14
+            12.5
         );
         assert_eq!(exported["materials"][0]["images"][0]["hash"], blob.hash);
         assert_ne!(exported["materials"][0]["images"][0]["id"], file.id);
