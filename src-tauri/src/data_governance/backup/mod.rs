@@ -6754,6 +6754,240 @@ mod tests {
         assert_eq!(backups[0].backup_id, backup_dir_name);
     }
 
+    /// 全量备份版本门禁：更高 schema 版本必须 fail-close，不得静默降级覆盖。
+    #[test]
+    #[cfg(feature = "data_governance")]
+    fn backup_manifest_from_newer_schema_version_is_rejected() {
+        use crate::data_governance::migration::vfs::VFS_SCHEMA_VERSION;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let manager = BackupManager::new(dir.path().to_path_buf());
+
+        let mut manifest = BackupManifest::new("0.0.0");
+        manifest.set_schema_version("vfs", VFS_SCHEMA_VERSION + 1);
+        let error = manager
+            .check_manifest_compatibility(&manifest)
+            .expect_err("newer schema version must be rejected");
+        let message = format!("{error}");
+        assert!(
+            matches!(error, BackupError::VersionIncompatible(_)),
+            "expected VersionIncompatible, got {message}"
+        );
+        assert!(message.contains("vfs"), "got {message}");
+
+        // 未知数据库同样 fail-close（防"恢复成功但丢库"）
+        let mut unknown = BackupManifest::new("0.0.0");
+        unknown.set_schema_version("future_db", 1);
+        let error = manager
+            .check_manifest_compatibility(&unknown)
+            .expect_err("unknown database must be rejected");
+        assert!(matches!(error, BackupError::VersionIncompatible(_)));
+        assert!(format!("{error}").contains("future_db"));
+
+        // 同版本通过
+        let mut ok_manifest = BackupManifest::new("0.0.0");
+        ok_manifest.set_schema_version("vfs", VFS_SCHEMA_VERSION);
+        manager
+            .check_manifest_compatibility(&ok_manifest)
+            .expect("current schema version must pass");
+    }
+
+    /// 全量备份 + 资产闭包：题组、材料配图 blob 必须随备份恢复，且关系/FTS 仍可用。
+    #[test]
+    #[cfg(feature = "data_governance")]
+    fn full_backup_restore_roundtrips_question_group_material_blob() {
+        use crate::vfs::database::VfsDatabase;
+        use crate::vfs::repos::question_group_repo::{
+            MaterialContentType, NewMaterial, NewQuestionGroup, ProposedChildQuestion,
+            ProposedGroupBundle, QuestionGroupType, VfsQuestionGroupRepo,
+        };
+        use crate::vfs::repos::{CreateQuestionParams, QuestionImage, VfsBlobRepo};
+
+        let backup_dir = tempfile::TempDir::new().unwrap();
+        let app_root = tempfile::TempDir::new().unwrap();
+        let slot = app_root.path().join("slots").join("slotA");
+        fs::create_dir_all(&slot).unwrap();
+
+        // 核心库文件必须齐全（backup_full 对缺失核心库 fail-close）
+        for id in DatabaseId::all_ordered() {
+            let path = BackupManager::resolve_database_path_in_dir(&slot, &id);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            Connection::open(path).unwrap();
+        }
+
+        // 复用既有 `setup_migrated_test_db` 的真实迁移结果（不手工建表）：
+        // 通过 SQLite backup API 把已迁移库复制到 slot 的正式路径，
+        // 使 VfsDatabase/backup 都看到同一 schema 与同一 vfs_blobs 目录。
+        let (vfs_tmp, source_db) = crate::vfs::database::setup_migrated_test_db();
+        let slot_vfs_path = BackupManager::resolve_database_path_in_dir(&slot, &DatabaseId::Vfs);
+        {
+            let source_conn = source_db.get_conn_safe().expect("open migrated source vfs");
+            source_conn
+                .backup("main", &slot_vfs_path, None)
+                .expect("copy fully migrated vfs schema into slot");
+        }
+        drop(source_db);
+        drop(vfs_tmp);
+        let db = VfsDatabase::new(&slot).unwrap();
+        let image_bytes: &[u8] = b"synthetic-group-material-png";
+        let blob = VfsBlobRepo::store_blob(&db, image_bytes, Some("image/png"), Some("png"))
+            .expect("store synthetic material blob");
+        let image = QuestionImage {
+            id: blob.hash.clone(),
+            name: "material.png".to_string(),
+            mime: "image/png".to_string(),
+            hash: blob.hash.clone(),
+        };
+
+        let question_id = {
+            let conn = db.get_conn_safe().unwrap();
+            conn.execute(
+                "INSERT INTO exam_sheets (id, exam_name, status, temp_id, metadata_json, preview_json, created_at, updated_at)
+                 VALUES ('exam_bak','backup exam','completed','tmp_bak','{}','{}','2026-10-21T00:00:00Z','2026-10-21T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+            let published = VfsQuestionGroupRepo::publish_group_bundle(
+                &db,
+                &ProposedGroupBundle {
+                    group: NewQuestionGroup {
+                        exam_id: "exam_bak".to_string(),
+                        group_type: QuestionGroupType::Reading,
+                        title: Some("Group".to_string()),
+                        source_type: None,
+                        source_ref: None,
+                        import_baseline: None,
+                        publish_state: None,
+                    },
+                    materials: vec![NewMaterial {
+                        group_id: String::new(),
+                        order_index: 1,
+                        content_type: MaterialContentType::Figure,
+                        title: Some("Figure material".to_string()),
+                        text: "figure caption".to_string(),
+                        images: vec![image.clone()],
+                        source_ref: None,
+                        page_index: Some(1),
+                        bbox: Some([0.1, 0.2, 0.8, 0.6]),
+                    }],
+                    children: vec![ProposedChildQuestion {
+                        client_ref: Some("c1".to_string()),
+                        question: CreateQuestionParams {
+                            exam_id: "exam_bak".to_string(),
+                            card_id: None,
+                            question_label: None,
+                            content: "child stem".to_string(),
+                            options: None,
+                            answer: Some("A".to_string()),
+                            explanation: None,
+                            structured_data: None,
+                            question_type: None,
+                            difficulty: None,
+                            tags: None,
+                            source_type: None,
+                            source_ref: None,
+                            images: None,
+                            parent_id: None,
+                        },
+                        sub_label: Some("(1)".to_string()),
+                        group_order: 1,
+                    }],
+                },
+            )
+            .expect("publish group with material image");
+            published.siblings[0].id.clone()
+        };
+
+        let mut manager = BackupManager::new(backup_dir.path().to_path_buf());
+        // 与生产一致：app_data_dir 是应用根（含 slots/），active slot 由
+        // active_data_dir_for_backup / restore 的 fallback 解析为 slots/slotA。
+        manager.set_app_data_dir(app_root.path().to_path_buf());
+        manager.set_app_version("1.0.0".to_string());
+        let manifest = manager
+            .backup_with_assets(None)
+            .expect("backup with assets");
+        assert!(
+            manifest.assets.as_ref().is_some_and(|assets| assets
+                .files
+                .iter()
+                .any(|file| file.relative_path.contains(&blob.relative_path))),
+            "material blob must be inside the asset closure"
+        );
+
+        drop(db);
+        let db_path = BackupManager::resolve_database_path_in_dir(&slot, &DatabaseId::Vfs);
+        fs::remove_file(&db_path).unwrap();
+        let _ = fs::remove_file(db_path.with_extension("db-wal"));
+        let _ = fs::remove_file(db_path.with_extension("db-shm"));
+        let _ = fs::remove_dir_all(slot.join("vfs_blobs"));
+        assert!(!db_path.exists());
+
+        // 全量恢复必须走 with_assets(true)：restore() 只恢复 .db 文件。
+        println!(
+            "[diag] app_root={:?} slot={:?} blob.relative_path={} assets={:?}",
+            app_root.path(),
+            slot,
+            blob.relative_path,
+            manifest.assets.as_ref().map(|assets| assets
+                .files
+                .iter()
+                .filter(|file| file.relative_path.contains("vfs_blobs"))
+                .map(|file| (file.relative_path.clone(), file.original_path.clone()))
+                .collect::<Vec<_>>())
+        );
+        manager
+            .restore_with_assets(&manifest, true)
+            .expect("restore full backup with assets");
+        println!(
+            "[diag] restored vfs_blobs tree={:?}",
+            walkdir::WalkDir::new(slot.join("vfs_blobs"))
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry
+                    .path()
+                    .strip_prefix(&slot)
+                    .unwrap_or(entry.path())
+                    .to_path_buf())
+                .collect::<Vec<_>>()
+        );
+
+        // 关系闭环
+        let restored = VfsDatabase::new(&slot).unwrap();
+        let conn = restored.get_conn_safe().unwrap();
+        let bundle = VfsQuestionGroupRepo::list_groups_with_conn(&conn, "exam_bak", 1, 10)
+            .expect("list restored groups");
+        assert_eq!(bundle.total, 1, "restored group must be visible");
+        let group_id = bundle.groups[0].id.clone();
+        let detail = VfsQuestionGroupRepo::get_bundle_with_conn(&conn, &group_id)
+            .unwrap()
+            .expect("restored group bundle");
+        assert_eq!(detail.siblings.len(), 1);
+        assert_eq!(detail.siblings[0].id, question_id);
+        assert_eq!(detail.materials.len(), 1);
+        assert_eq!(detail.materials[0].images.len(), 1);
+        assert_eq!(detail.materials[0].images[0].hash, blob.hash);
+
+        // 资产字节真实恢复
+        let blob_path = slot.join("vfs_blobs").join(&blob.relative_path);
+        let restored_bytes = fs::read(&blob_path).expect("restored material blob file");
+        assert_eq!(restored_bytes.as_slice(), image_bytes);
+
+        // 材料 FTS 仍可命中该子题
+        let hits = VfsQuestionGroupRepo::search_material_question_ids_with_conn(
+            &conn,
+            "\"caption\"",
+            Some("exam_bak"),
+            10,
+        )
+        .unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "restored material FTS must hit the child question"
+        );
+        assert_eq!(hits[0].0, question_id);
+    }
+
     #[test]
     fn test_manifest_serialization() {
         let mut manifest = BackupManifest::new("1.0.0");

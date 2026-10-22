@@ -285,6 +285,24 @@ export function useMediaPlayback<T extends HTMLMediaElement>({
     [seekTo],
   );
 
+  /**
+   * 重新加载当前源（失败重试）：状态回到未就绪并从当前位置的起点重新请求。
+   * 旧语义（播放 / 暂停 / 进度）不变，仅新增可选能力。
+   */
+  const reload = useCallback(() => {
+    const el = mediaRef.current;
+    if (!el) return;
+    setIsBuffering(false);
+    setIsReady(false);
+    setIsPlaying(false);
+    setBufferedEnd(0);
+    try {
+      el.load();
+    } catch {
+      // 合成环境没有实现 load()：重试状态仍由调用方维护
+    }
+  }, []);
+
   const setVolume = useCallback((next: number) => {
     const el = mediaRef.current;
     const clamped = Math.min(1, Math.max(0, next));
@@ -347,6 +365,7 @@ export function useMediaPlayback<T extends HTMLMediaElement>({
     pause,
     seekTo,
     seekBy,
+    reload,
     setVolume,
     toggleMute,
     setRate,

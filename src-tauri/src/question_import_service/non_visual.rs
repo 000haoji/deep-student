@@ -5,7 +5,7 @@
 
 use super::{
     ensure_vfs_file_for_blob, AppError, ImportCheckpointState, ImportResult, ImportStage,
-    QuestionImportProgress, QuestionImportService, UnboundedSender, VfsDatabase, VfsExamRepo,
+    QuestionImportProgress, QuestionImportService, UnboundedSender, VfsDatabase,
 };
 use crate::cross_page_merger::{MergedQuestion, SourceSpan};
 use crate::figure_extractor::QuestionWithFigures;
@@ -303,7 +303,11 @@ impl QuestionImportService {
         )?;
         persist_candidates(vfs_db, session_id, checkpoint)?;
         let report = candidate_report(checkpoint, &inputs, &questions, failures, 0);
-        self.publish_import_candidates(
+        let typed_blocks: Vec<super::groups::TypedBlock> = questions
+            .iter()
+            .map(super::groups::TypedBlock::from_structured)
+            .collect();
+        self.publish_import_candidates_with_groups(
             vfs_db,
             session_id,
             qbank_name,
@@ -312,6 +316,7 @@ impl QuestionImportService {
             &[],
             report,
             progress_tx,
+            Some(typed_blocks),
         )
     }
 
@@ -426,7 +431,11 @@ impl QuestionImportService {
         }
         persist_candidates(vfs_db, session_id, checkpoint)?;
         let report = candidate_report(checkpoint, &inputs, &questions, failures, blob_hashes.len());
-        self.publish_import_candidates(
+        let typed_blocks: Vec<super::groups::TypedBlock> = questions
+            .iter()
+            .map(super::groups::TypedBlock::from_structured)
+            .collect();
+        self.publish_import_candidates_with_groups(
             vfs_db,
             session_id,
             qbank_name,
@@ -435,6 +444,7 @@ impl QuestionImportService {
             &[],
             report,
             progress_tx,
+            Some(typed_blocks),
         )
     }
 }
@@ -485,6 +495,7 @@ fn candidate_prompt(input: &CandidateInput, context: &SectionContext) -> String 
 
 每个块必须输出 block_kind、section、label、source_id、raw_text、content、options、answer、explanation、question_type、image_indices、answer_evidence、explanation_evidence。
 block_kind 只能为 question/answer/explanation/heading/material/figure/unknown。答案区即使复述题干或有题干摘要也必须是 answer，不能新增题目。参考答案、答案表和评分要点须逐原题号输出，保留原题号 label；不要根据数量或顺序关联答案。
+材料/共享条件块若明确统领本批若干小题，设 block_kind="material"、is_group=true、sub_questions=[原文中明确出现的题号 label，如 "1","2"]，section 必须与这些小题相同；只列原文/输入中确有明确题号的小题，不得用“最近的文章”、数量或位置补全，无法确认就不设 is_group。非材料块不得输出 is_group/sub_questions。
 section 是原文章节+题型/小节的完整作用域，例如“第2章/单选题”；题目和对应答案用相同作用域。先观察本批新标题，再沿用明确的前文上下文；发现新章重置作用域。不能跨章节凭裸题号猜归属，未知 section 留空，不虚构。若 answer_region 或 starts_in_answer_region 为 true，本批位于“参考答案”总标题之后：不得沿用前文题干章节/题型作为 section，只有本批原文出现明确答案章节标题时才填写，否则留空。
 source_id 原样回传该段 [source_id=...] 中的值（可加明确子题路径）。同一 [source_id] 段内含多道题或多个块时，必须为每个题加 /原题号 子路径，不得用重复段 ID 表示不同题。label 仅用原题号，不重新连续编号。raw_text 保留原文（包括原题号、选项、答案证据和 <<IMG:N>> 锚点）；块跨段时用开始段的 source_id。
 content 只放题干或该块原文摘要，选择题 options=[{{"key":"A","content":"原选项"}}]。answer/explanation 只能摘录原文；没有原文答案则 answer=null，没有原文解析则 explanation=null。answer_evidence/explanation_evidence 只填原文中带“答案：/解析：”标记的逐字引文；无标记引文或仅在题干/选项出现不算证据，留 null。禁止推理作答、补答或生成解析。独立答案块仍分类 answer，非空摘要不能改变分类。
@@ -955,6 +966,12 @@ struct PreparedCandidate {
     explanation_incoming: String,
     explanation_verified: Option<bool>,
     explanation_basis: &'static str,
+    /// Verified group hint: only an explicit material block with an explicit
+    /// label list keeps it. The assembly layer still requires each label to
+    /// match a unique real question block.
+    group_is_group: bool,
+    group_sub_questions: Vec<String>,
+    group_hint_risk: Option<&'static str>,
 }
 
 fn compact_text(text: &str) -> String {
@@ -1569,6 +1586,63 @@ fn normalize_candidates(
             risks.push("explanation_evidence_not_in_input_text".to_string());
         }
 
+        // Group hints are proposals, not relations. Keep them only when the
+        // material block itself is grounded, scoped and lists explicit labels;
+        // otherwise drop the hint and require review (never guess an article).
+        let model_is_group = value
+            .get("is_group")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let mut group_sub_questions: Vec<String> = value
+            .get("sub_questions")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(|label| label.trim().to_string())
+                    .filter(|label| !label.is_empty())
+                    .take(64)
+                    .collect()
+            })
+            .unwrap_or_default();
+        {
+            let mut seen = HashSet::new();
+            group_sub_questions.retain(|label| seen.insert(label.clone()));
+        }
+        let mut group_is_group = false;
+        let mut group_hint_risk = None;
+        if model_is_group || !group_sub_questions.is_empty() {
+            let material_role = matches!(
+                kind,
+                ImportBlockKind::Material | ImportBlockKind::Heading | ImportBlockKind::Figure
+            );
+            if !material_role {
+                group_hint_risk = Some("group_hint_on_non_material_block");
+            } else if group_sub_questions.is_empty()
+                || group_sub_questions.len() > 50
+                || group_sub_questions
+                    .iter()
+                    .any(|label| label.chars().count() > 64 || label.contains('\n'))
+            {
+                group_hint_risk = Some("group_hint_without_explicit_labels");
+            } else if section.trim().is_empty() {
+                group_hint_risk = Some("group_hint_without_section_scope");
+            } else if !raw_grounded {
+                group_hint_risk = Some("group_hint_without_grounded_material");
+            } else if group_sub_questions
+                .iter()
+                .any(|child| canonical_label(child) == canonical_label(&label))
+            {
+                group_hint_risk = Some("group_hint_contains_material_itself");
+            } else {
+                group_is_group = true;
+            }
+            if group_hint_risk.is_some() {
+                requires_review = true;
+            }
+        }
+
         prepared.push(PreparedCandidate {
             original_kind,
             kind,
@@ -1588,6 +1662,9 @@ fn normalize_candidates(
             explanation_incoming,
             explanation_verified: (!explanation_ok).then_some(false).or(Some(explanation_ok)),
             explanation_basis,
+            group_is_group,
+            group_sub_questions,
+            group_hint_risk,
         });
     }
 
@@ -1742,6 +1819,24 @@ fn normalize_candidates(
                 }
             }
         }
+        // Persist only evidence-backed hints so resume/checkpoint replay cannot
+        // resurrect an unverified "nearest material" relation.
+        if candidate.group_is_group {
+            value["is_group"] = json!(true);
+            value["sub_questions"] = json!(candidate.group_sub_questions);
+            metadata["group_hint_verified"] = json!(true);
+        } else if candidate.group_hint_risk.is_some()
+            || value.get("is_group").is_some()
+            || value.get("sub_questions").is_some()
+        {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("is_group");
+                object.remove("sub_questions");
+            }
+            if let Some(risk) = candidate.group_hint_risk {
+                metadata["group_hint_rejected"] = json!(risk);
+            }
+        }
         value["source_metadata"] = metadata;
     }
     Ok(values)
@@ -1814,10 +1909,9 @@ fn persist_candidates(
     session_id: &str,
     checkpoint: &ImportCheckpointState,
 ) -> Result<(), AppError> {
-    let value = serde_json::to_value(checkpoint)
-        .map_err(|error| AppError::validation(format!("候选 checkpoint 序列化失败: {}", error)))?;
-    VfsExamRepo::update_import_state(vfs_db, session_id, &value).map_err(|error| {
-        AppError::database(format!("保存候选 checkpoint 失败，未发布题目: {}", error))
+    // A missing/soft-deleted session must never accept candidate checkpoints.
+    super::session_guard::persist_checkpoint_live(vfs_db, session_id, checkpoint).map_err(|error| {
+        AppError::database(format!("保存候选 checkpoint 失败，未发布题目: {error}"))
     })
 }
 
@@ -1868,6 +1962,23 @@ fn to_structured_candidate(value: Value, images: Vec<QuestionImage>) -> Structur
         source_id: field_string(&value, "source_id"),
         label: field_string(&value, "label"),
         raw_text: field_string(&value, "raw_text"),
+        // Only verified hints survive normalize_candidates; carry them into the
+        // typed block so text/DOCX imports assemble groups exactly like visual.
+        is_group: value
+            .get("is_group")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        sub_questions: value
+            .get("sub_questions")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         ..Default::default()
     };
     let span = SourceSpan {
@@ -2029,6 +2140,12 @@ fn candidate_report(
         "source_images_total": total_images,
         "empty_results_confirm_blank": false,
         "answer_merge_deferred_to_publisher": true,
+        "checkpoint_schema_version": checkpoint.schema_version,
+        "pipeline_version": checkpoint.pipeline_version,
+        "input_fingerprint": checkpoint.input_fingerprint,
+        "parser_version": checkpoint.parser_version,
+        "prompt_version": checkpoint.prompt_version,
+        "structurer_version": checkpoint.structurer_version,
     })
 }
 
@@ -2102,6 +2219,214 @@ mod tests {
         normalize_candidates(vec![value], input, &input.fingerprint())
             .unwrap()
             .remove(0)
+    }
+
+    fn assert_group_material_publishes(
+        source_kind: &'static str,
+        section: &str,
+        material: &str,
+        questions: &[(&str, &str)],
+    ) {
+        let mut text = format!("{material}\n\n");
+        for (label, stem) in questions {
+            text.push_str(&format!("{label}. {stem}\n\n"));
+        }
+        let text = text.trim_end().to_string();
+        let (annotated_text, source_ids) = annotate_text(&text, source_kind, 0);
+        let input = CandidateInput {
+            source_kind,
+            index: 0,
+            text: text.clone(),
+            annotated_text,
+            text_byte_start: 0,
+            text_byte_end: text.len(),
+            source_ids,
+            image_indices: Vec::new(),
+            issues: Vec::new(),
+            boundary_split: false,
+            orphan_images: false,
+            answer_section_before: false,
+        };
+        let ids = &input.source_ids;
+        assert_eq!(ids.len(), questions.len() + 1);
+        let mut values = vec![json!({
+            "block_kind": "material",
+            "section": section,
+            "label": "",
+            "source_id": ids[0],
+            "raw_text": material,
+            "content": material,
+            "question_type": "other",
+            "is_group": true,
+            "sub_questions": questions.iter().map(|(label, _)| label.to_string()).collect::<Vec<_>>(),
+        })];
+        for (index, (label, stem)) in questions.iter().enumerate() {
+            values.push(json!({
+                "block_kind": "question",
+                "section": section,
+                "label": label,
+                "source_id": ids[index + 1],
+                "raw_text": format!("{label}. {stem}"),
+                "content": stem,
+                "question_type": "short_answer",
+                "answer": null,
+                "explanation": null,
+            }));
+        }
+        let normalized_values =
+            normalize_candidates(values, &input, &input.fingerprint()).expect("fixture grounds");
+        assert_eq!(normalized_values[0]["is_group"], true);
+        assert_eq!(
+            normalized_values[0]["sub_questions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            questions.len()
+        );
+        assert_eq!(
+            normalized_values[0]["source_metadata"]["group_hint_verified"],
+            true
+        );
+        let structured: Vec<StructuredQuestion> = normalized_values
+            .into_iter()
+            .map(|value| to_structured_candidate(value, Vec::new()))
+            .collect();
+        let typed: Vec<super::super::groups::TypedBlock> = structured
+            .iter()
+            .map(super::super::groups::TypedBlock::from_structured)
+            .collect();
+
+        let (_temp, db) = crate::vfs::database::setup_migrated_test_db();
+        let sheet = crate::vfs::repos::VfsExamRepo::create_exam_sheet(
+            &db,
+            crate::vfs::types::VfsCreateExamSheetParams {
+                exam_name: Some("非视觉题组合成".into()),
+                temp_id: format!("group-{source_kind}"),
+                metadata_json: json!({}),
+                preview_json: json!({"temp_id":"group","exam_name":"非视觉题组合成","pages":[]}),
+                status: "importing".into(),
+                folder_id: None,
+            },
+        )
+        .unwrap();
+        super::super::persistence::publish_candidates_with_groups(
+            &db,
+            &sheet.id,
+            "非视觉题组合成",
+            &structured,
+            0,
+            &[],
+            json!({"document_id": format!("doc-{source_kind}")}),
+            None,
+            Some(typed),
+        )
+        .unwrap();
+
+        let conn = db.get_conn_safe().unwrap();
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE exam_id=?1 AND deleted_at IS NULL",
+                [&sheet.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(live as usize, questions.len());
+        let grouped: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM questions WHERE exam_id=?1 AND group_id IS NOT NULL AND deleted_at IS NULL",
+                [&sheet.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(grouped as usize, questions.len());
+        let metadata: String = conn
+            .query_row(
+                "SELECT metadata_json FROM exam_sheets WHERE id=?1",
+                [&sheet.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let report: Value = serde_json::from_str(&metadata).unwrap();
+        let report = &report["import_report"];
+        assert_eq!(report["status"], "completed");
+        assert_eq!(report["groups"]["group_count"], 1);
+        assert_eq!(report["groups"]["group_child_count"], questions.len());
+        assert_eq!(report["group_child_published_count"], questions.len());
+        assert_eq!(report["publishable_count"], questions.len());
+    }
+
+    #[test]
+    fn english_text_material_and_five_questions_publish_as_one_group() {
+        assert_group_material_publishes(
+            "text",
+            "reading",
+            "Read the passage and answer the questions. The passage is synthetic and short.",
+            &[
+                ("1", "What is the main idea of the passage?"),
+                ("2", "Which sentence supports the answer to question 1?"),
+                ("3", "What does the word agree with in the passage?"),
+                ("4", "Why does the author mention the example?"),
+                ("5", "What can be inferred from the last sentence?"),
+            ],
+        );
+    }
+
+    #[test]
+    fn docx_shared_condition_material_and_three_subquestions_publish_as_one_group() {
+        assert_group_material_publishes(
+            "docx",
+            "shared_condition",
+            "已知函数 f(x)=x^2，回答下列各小题。",
+            &[("1", "求 f(1)"), ("2", "求 f(2)"), ("3", "求 f(3)")],
+        );
+    }
+
+    #[test]
+    fn unverified_group_hint_is_dropped_and_requires_review() {
+        // Material without a section scope cannot bind children: drop the hint.
+        let input = text_input(0, "某段材料正文");
+        let value = json!({
+            "block_kind": "material",
+            "section": "",
+            "label": "",
+            "source_id": input.source_ids[0],
+            "raw_text": "某段材料正文",
+            "content": "某段材料正文",
+            "question_type": "other",
+            "is_group": true,
+            "sub_questions": ["1", "2"],
+        });
+        let normalized_material = normalized(&input, value);
+        assert!(normalized_material.get("is_group").is_none());
+        assert!(normalized_material.get("sub_questions").is_none());
+        assert_eq!(
+            normalized_material["source_metadata"]["group_hint_rejected"],
+            "group_hint_without_section_scope"
+        );
+        assert_eq!(
+            normalized_material["source_metadata"]["requires_review"],
+            true
+        );
+
+        // A question block may never claim group ownership.
+        let input = text_input(0, "1. 题干");
+        let value = json!({
+            "block_kind": "question",
+            "section": "reading",
+            "label": "1",
+            "source_id": input.source_ids[0],
+            "raw_text": "1. 题干",
+            "content": "题干",
+            "question_type": "short_answer",
+            "is_group": true,
+            "sub_questions": ["2"],
+        });
+        let normalized_question = normalized(&input, value);
+        assert!(normalized_question.get("is_group").is_none());
+        assert_eq!(
+            normalized_question["source_metadata"]["group_hint_rejected"],
+            "group_hint_on_non_material_block"
+        );
     }
 
     #[test]

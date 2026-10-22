@@ -41,6 +41,8 @@ import {
 } from '@phosphor-icons/react';
 import { ExamIcon } from '@/features/learning-hub/icons/ResourceIcons';
 import { useTranslation } from 'react-i18next';
+import { parseQuestionGroupContext } from '@/utils/qbankGroupContext';
+import type { QuestionGroupType } from '@/types/qbankGroup';
 import type { Question, QuestionBankStats, QuestionStatus, Difficulty, QuestionType } from '@/api/questionBankApi';
 import { ratioToPercent } from '@/components/stats';
 import { QuestionInlineEditor } from './QuestionInlineEditor';
@@ -382,7 +384,12 @@ const QuestionGridCard: React.FC<{
   isEditMode?: boolean;
   isSelected?: boolean;
   onSelect?: (selected: boolean, shiftKey: boolean) => void;
-} & RowActionProps> = ({ question, index, listIndex, highlight, onClick, onEdit, isEditMode, isSelected, onSelect, ...actionProps }) => {
+  /** #491 题组信息（组头不计题；材料只在连续组块首行展示一次） */
+  groupType?: QuestionGroupType;
+  groupTitle?: string;
+  subLabel?: string;
+  materialPreview?: string;
+} & RowActionProps> = ({ question, index, listIndex, highlight, onClick, onEdit, isEditMode, isSelected, onSelect, groupType, groupTitle, subLabel, materialPreview, ...actionProps }) => {
   const { t } = useTranslation(['practice', 'learningHub']);
   const status = question.status || 'new';
   const hasAttempt = (question.attemptCount ?? 0) > 0;
@@ -418,8 +425,17 @@ const QuestionGridCard: React.FC<{
             {isSelected && <Check size={12} />}
           </div>
         ) : (
-          <span className="text-sm font-medium text-muted-foreground">
+          <span className="flex items-center gap-1.5 text-sm font-medium text-muted-foreground">
             {question.questionLabel || `${index + 1}`}
+            {subLabel && <span className="rounded bg-muted/60 px-1 py-0.5 font-mono text-[10px]">{subLabel}</span>}
+            {groupType && (
+              <span className="rounded bg-primary/10 px-1 py-0.5 text-[10px] text-primary">
+                {t(`exam_sheet:questionBank.group.${
+                  groupType === 'reading' ? 'typeReading' : groupType === 'shared_condition' ? 'typeSharedCondition' : 'typeOther'
+                }`)}
+                {groupTitle ? ` · ${groupTitle}` : ''}
+              </span>
+            )}
           </span>
         )}
         <div className="flex items-center gap-1.5">
@@ -441,6 +457,9 @@ const QuestionGridCard: React.FC<{
         </div>
       </div>
       
+      {materialPreview && (
+        <p className="mb-1.5 text-xs text-muted-foreground/80 line-clamp-2">{materialPreview}</p>
+      )}
       {question.images && question.images.length > 0 && (
         <div className="flex items-center gap-1 mb-1.5 text-xs text-muted-foreground">
           <ImageIcon size={12} />
@@ -486,7 +505,11 @@ const QuestionListRow: React.FC<{
   isEditMode?: boolean;
   isSelected?: boolean;
   onSelect?: (selected: boolean, shiftKey: boolean) => void;
-} & RowActionProps> = ({ question, index, listIndex, highlight, onClick, onEdit, isEditMode, isSelected, onSelect, ...actionProps }) => {
+  groupType?: QuestionGroupType;
+  groupTitle?: string;
+  subLabel?: string;
+  materialPreview?: string;
+} & RowActionProps> = ({ question, index, listIndex, highlight, onClick, onEdit, isEditMode, isSelected, onSelect, groupType, groupTitle, subLabel, materialPreview, ...actionProps }) => {
   const { t } = useTranslation(['practice', 'learningHub']);
   const status = question.status || 'new';
   const hasAttempt = (question.attemptCount ?? 0) > 0;
@@ -521,6 +544,26 @@ const QuestionListRow: React.FC<{
       )}
       
       <div className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', STATUS_CONFIG[status].bg)} />
+
+      {(subLabel || groupType) && (
+        <span className="hidden sm:inline-flex items-center gap-1 text-[11px] text-muted-foreground flex-shrink-0">
+          {subLabel && <span className="rounded bg-muted/60 px-1 py-0.5 font-mono">{subLabel}</span>}
+          {groupType && (
+            <span className="rounded bg-primary/10 px-1 py-0.5 text-primary">
+              {t(`exam_sheet:questionBank.group.${
+                groupType === 'reading' ? 'typeReading' : groupType === 'shared_condition' ? 'typeSharedCondition' : 'typeOther'
+              }`)}
+              {groupTitle ? ` · ${groupTitle}` : ''}
+            </span>
+          )}
+        </span>
+      )}
+
+      {materialPreview && (
+        <span className="hidden lg:inline-block max-w-[16rem] truncate text-[11px] text-muted-foreground/80 flex-shrink-0">
+          {materialPreview}
+        </span>
+      )}
       
       {question.images && question.images.length > 0 && (
         <ImageIcon size={14} className="flex-shrink-0 text-muted-foreground" />
@@ -588,6 +631,31 @@ const LauncherCard: React.FC<{
     <div className="text-xs leading-relaxed text-muted-foreground whitespace-normal">{desc}</div>
   </DsButton>
 );
+
+interface GroupRowDisplay {
+  groupType?: QuestionGroupType;
+  groupTitle?: string;
+  subLabel?: string;
+  materialPreview?: string;
+}
+
+/** #491：按连续组块计算行级展示信息；材料只在组首行展示一次，组头不计题。 */
+function groupDisplayFor(questions: Question[], index: number): GroupRowDisplay {
+  const question = questions[index];
+  if (!question?.groupId && !question?.group_context) return {};
+  const context = parseQuestionGroupContext(question.group_context, 'practice');
+  if (!context) return {};
+  const previous = index > 0 ? questions[index - 1] : undefined;
+  const isFirstOfGroup = !previous || previous.groupId !== context.group.id;
+  const material = context.materials.find((item) => (item.text ?? '').trim().length > 0);
+  return {
+    groupType: context.group.group_type,
+    groupTitle: context.group.title ?? undefined,
+    subLabel: question.subLabel ?? undefined,
+    materialPreview:
+      isFirstOfGroup && material?.text ? material.text.trim().slice(0, 120) : undefined,
+  };
+}
 
 export const QuestionBankListView: React.FC<QuestionBankListViewProps> = ({
   questions,
@@ -1549,10 +1617,16 @@ export const QuestionBankListView: React.FC<QuestionBankListViewProps> = ({
         ) : viewType === 'grid' ? (
           // key=viewType：切换视图时整体重挂载，触发 stagger 淡入形成平滑过渡
           <div key="grid" className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,220px),1fr))] gap-2">
-            {filteredQuestions.map((q, idx) => (
+            {filteredQuestions.map((q, idx) => {
+              const info = groupDisplayFor(filteredQuestions, idx);
+              return (
               <React.Fragment key={q.id}>
                 <QuestionGridCard
                   question={q}
+                  groupType={info.groupType}
+                  groupTitle={info.groupTitle}
+                  subLabel={info.subLabel}
+                  materialPreview={info.materialPreview}
                   index={questionIndexMap.get(q.id) ?? 0}
                   listIndex={idx}
                   highlight={debouncedSearch}
@@ -1579,14 +1653,21 @@ export const QuestionBankListView: React.FC<QuestionBankListViewProps> = ({
                   </div>
                 )}
               </React.Fragment>
-            ))}
+              );
+            })}
           </div>
         ) : (
           <div key="list" className="space-y-0.5">
-            {filteredQuestions.map((q, idx) => (
+            {filteredQuestions.map((q, idx) => {
+              const info = groupDisplayFor(filteredQuestions, idx);
+              return (
               <React.Fragment key={q.id}>
                 <QuestionListRow
                   question={q}
+                  groupType={info.groupType}
+                  groupTitle={info.groupTitle}
+                  subLabel={info.subLabel}
+                  materialPreview={info.materialPreview}
                   index={questionIndexMap.get(q.id) ?? 0}
                   listIndex={idx}
                   highlight={debouncedSearch}
@@ -1613,7 +1694,8 @@ export const QuestionBankListView: React.FC<QuestionBankListViewProps> = ({
                   </div>
                 )}
               </React.Fragment>
-            ))}
+              );
+            })}
           </div>
         )}
       </CustomScrollArea>

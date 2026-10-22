@@ -202,9 +202,26 @@ export interface SaveMistakeResponse {
   source?: 'auto' | 'manual' | string;
 }
 
+export interface QuestionImportRecoveryAction {
+  action: string;
+  reason?: string;
+  severity?: 'blocking' | 'warning';
+  pages?: unknown[];
+  batch_ids?: unknown[];
+  source_ids?: unknown[];
+}
+
+export interface QuestionImportCompletion {
+  status: string;
+  blocking_count: number;
+  warning_count: number;
+  categories?: Record<string, number>;
+}
+
 export interface QuestionImportReport {
   schema_version: 1;
-  status: 'completed' | 'partial' | 'needs_review' | 'failed';
+  /** `excluded` means the user explicitly excluded every source; it is a terminal choice, not a failed import. */
+  status: 'completed' | 'partial' | 'needs_review' | 'failed' | 'excluded';
   failed_pages: unknown[];
   failed_chunks: unknown[];
   degenerate_count: number;
@@ -212,6 +229,10 @@ export interface QuestionImportReport {
   conflicts: unknown[];
   /** Only true when a persisted checkpoint can actually be resumed. */
   resume_available?: boolean;
+  /** Stage-specific, severity-tagged actions; only executable ones justify a resume button. */
+  recovery_actions?: QuestionImportRecoveryAction[];
+  completion?: QuestionImportCompletion;
+  empty_import_reason?: string | null;
   [key: string]: unknown;
 }
 

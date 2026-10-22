@@ -35,6 +35,8 @@ import { canOpenFilesExternally, canRevealInFolder, revealFileOrOpen } from '@/u
 import { registerBackHandler, BACK_PRIORITY } from '@/app/navigation/androidBackCoordinator';
 import { useMobileSubviewChrome } from '@/components/layout';
 import { showGlobalNotification } from './UnifiedNotification';
+import { describeExportCompatibility, parseQuestionGroupContext } from '@/utils/qbankGroupContext';
+import { exportBundleCsv, exportNativeBundleJson } from '@/api/qbankGroupApi';
 import { CustomScrollArea } from './custom-scroll-area';
 import type { Question } from '@/api/questionBankApi';
 
@@ -270,6 +272,17 @@ export const QuestionBankExportDialog: React.FC<QuestionBankExportDialogProps> =
     inline && open && isActive !== false,
   );
 
+  // #491：题目带组关系时，只有后端原生 JSON v2 能保留关系与 assets；
+  // TXT/CSV 是扁平投影（材料展开到每题），必须明确提示不可无损回导。
+  const hasGroupRelations = useMemo(
+    () => questions.some((q) => Boolean(q.groupId || q.group_context?.group?.id)),
+    [questions],
+  );
+  const exportCompatibility = useMemo(
+    () => describeExportCompatibility(format, hasGroupRelations),
+    [format, hasGroupRelations],
+  );
+
   // 当选择包含答题记录时，自动添加相关字段
   const handleIncludeAnswerRecordsChange = useCallback((checked: boolean) => {
     setCsvIncludeAnswerRecords(checked);
@@ -349,6 +362,21 @@ export const QuestionBankExportDialog: React.FC<QuestionBankExportDialogProps> =
     questions.forEach((q, index) => {
       lines.push(`## ${t('exam_sheet:questionBank.export.questionPrefix')} ${index + 1}${q.questionLabel ? ` (${q.questionLabel})` : ''}`);
       lines.push('');
+      // #491 扁平投影：组材料展开到每道题（权威库仍只存一份），并提示无法无损回导
+      const groupContext = parseQuestionGroupContext(q.group_context, 'export');
+      if (groupContext && groupContext.materials.length > 0) {
+        lines.push(`**${t('exam_sheet:questionBank.group.title')}**`);
+        for (const material of groupContext.materials) {
+          if (material.text) {
+            lines.push(material.text);
+          }
+          if (material.images && material.images.length > 0) {
+            lines.push(`[${t('exam_sheet:questionBank.group.materialFigure')} ×${material.images.length}]`);
+          }
+        }
+        lines.push('');
+      }
+
       lines.push(`**${t('exam_sheet:questionBank.export.txtContent')}**`);
       lines.push(q.content);
       lines.push('');
@@ -491,6 +519,20 @@ export const QuestionBankExportDialog: React.FC<QuestionBankExportDialogProps> =
       return null;
     }
 
+    // #491：有题组关系时优先走后端 bundle CSV 投影（材料进 group_context 列），
+    // 该输出仍显式 lossy；命令不可用时退回旧扁平面板并保持提示。
+    if (hasGroupRelations) {
+      const projected = await exportBundleCsv({
+        examId,
+        filePath: savePath,
+        includeStudyState: csvIncludeAnswerRecords,
+      });
+      if (projected) {
+        showGlobalNotification('warning', t('exam_sheet:questionBank.export.csvGroupLossy'));
+        return { path: projected.path, count: projected.rowCount };
+      }
+    }
+
     // 调用后端导出
     const result = await invoke<{
       exported_count: number;
@@ -518,13 +560,77 @@ export const QuestionBankExportDialog: React.FC<QuestionBankExportDialogProps> =
       path: result.file_path || savePath,
       count: result.exported_count,
     };
-  }, [examId, examName, csvFields, csvIncludeAnswerRecords, csvEncoding, t]);
+  }, [examId, examName, csvFields, csvIncludeAnswerRecords, csvEncoding, hasGroupRelations, t]);
 
   const handleExport = useCallback(async () => {
     if (isExporting) return;
     setIsExporting(true);
 
     try {
+      // #491 原生 JSON v2：必须走后端 bundle 服务（含 assets 闭包与关系），
+      // 前端不自造无资产导出包；服务不可用时只做明确标注的扁平兼容导出。
+      if (format === 'json' && examId) {
+        const baseName = examName?.replace(/[/\\?%*:|"<>]/g, '-') || 'question-bank';
+        const timestamp = new Date().toISOString().slice(0, 10);
+        const defaultFileName = `${baseName}-${timestamp}.json`;
+        const savePath = await fileManager.pickSavePath({
+          title: t('exam_sheet:questionBank.export.selectPath'),
+          defaultFileName,
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+        });
+        if (!savePath) return;
+
+        const nativeResult = await exportNativeBundleJson({
+          examId,
+          filePath: savePath,
+          includeStudyState: options.includeStats,
+        });
+        if (nativeResult) {
+          // file_path 缺省时后端直接回传完整 JSON：由 UI 下载保存（含 assets/tombstones）
+          let outcomePath = nativeResult.filePath;
+          if (!outcomePath && nativeResult.json) {
+            const saved = await fileManager.saveTextFile({
+              title: t('exam_sheet:questionBank.export.selectPath'),
+              defaultFileName,
+              filters: [{ name: 'JSON', extensions: ['json'] }],
+              content: nativeResult.json,
+            });
+            if (saved.canceled || !saved.path) return;
+            outcomePath = saved.path;
+          }
+          if (!outcomePath) {
+            showGlobalNotification('error', t('exam_sheet:questionBank.export.failed'));
+            return;
+          }
+          setExportOutcome({ path: outcomePath, count: nativeResult.questions });
+          if (!nativeResult.roundTripSafe) {
+            showGlobalNotification('warning', t('exam_sheet:questionBank.export.nativeExportLossy'));
+          }
+          showGlobalNotification('success', t('exam_sheet:questionBank.export.nativeExportSuccess', {
+            groups: nativeResult.groups,
+            materials: nativeResult.materials,
+            questions: nativeResult.questions,
+            assets: nativeResult.assets,
+          }));
+          for (const warning of nativeResult.warnings) {
+            showGlobalNotification('warning', warning.message);
+          }
+          return;
+        }
+
+        showGlobalNotification('warning', t('exam_sheet:questionBank.export.nativeExportUnavailable'));
+        const legacy = await fileManager.saveTextFile({
+          title: t('exam_sheet:questionBank.export.selectPath'),
+          defaultFileName,
+          filters: [{ name: 'JSON', extensions: ['json'] }],
+          content: generateJsonExport(),
+        });
+        if (!legacy.canceled && legacy.path) {
+          setExportOutcome({ path: legacy.path, count: questions.length });
+        }
+        return;
+      }
+
       // CSV 格式且有 examId 时使用后端导出（支持更多选项）
       if (format === 'csv' && examId) {
         try {
@@ -581,7 +687,7 @@ export const QuestionBankExportDialog: React.FC<QuestionBankExportDialogProps> =
     } finally {
       setIsExporting(false);
     }
-  }, [isExporting, format, examName, examId, questions.length, generateJsonExport, generateTxtExport, generateCsvExport, handleCsvBackendExport, t]);
+  }, [isExporting, format, examName, examId, questions.length, options.includeStats, generateJsonExport, generateTxtExport, generateCsvExport, handleCsvBackendExport, t]);
 
   // 桌面：打开导出文件所在文件夹；Android：用其他应用打开导出的文件
   // （移动端没有文件管理器定位，SAF 保存得到的 content:// 由原生侧转授读取权限）
@@ -622,6 +728,21 @@ export const QuestionBankExportDialog: React.FC<QuestionBankExportDialogProps> =
         }))}
       />
       <p className="text-xs text-muted-foreground">{t(FORMAT_DESC_KEYS[format])}</p>
+      {exportCompatibility.notice === 'group_expand' && (
+        <p className="text-xs text-warning" data-testid="export-group-expand-notice">
+          {t('exam_sheet:questionBank.export.groupNoticeExpand')}
+        </p>
+      )}
+      {hasGroupRelations && format === 'json' && examId && (
+        <p className="text-xs text-muted-foreground" data-testid="export-group-v2-notice">
+          {t('exam_sheet:questionBank.export.groupNoticeV2')}
+        </p>
+      )}
+      {hasGroupRelations && format === 'json' && !examId && (
+        <p className="text-xs text-warning" data-testid="export-group-legacy-notice">
+          {t('exam_sheet:questionBank.export.groupNoticeLegacyJson')}
+        </p>
+      )}
     </div>
   );
 

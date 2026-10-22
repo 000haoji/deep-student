@@ -10,6 +10,7 @@ import type {
   QuestionStatus,
   QuestionType,
 } from '@/api/questionBankApi';
+import { parseQuestionGroupContext } from '@/utils/qbankGroupContext';
 
 export type MistakeSort = 'recent' | 'errors';
 
@@ -59,6 +60,11 @@ interface RawMistake {
   correct_count?: number | null;
   last_attempt_at?: string | null;
   source_ref?: string | null;
+  /** #491 题组关系与上下文（错题入口不得割裂共享材料） */
+  group_id?: string | null;
+  sub_label?: string | null;
+  group_order?: number | null;
+  group_context?: unknown;
 }
 
 interface RawMistakePage {
@@ -89,6 +95,10 @@ function toQuestion(raw: RawMistake): Question {
     correctCount: raw.correct_count ?? 0,
     lastAttemptAt: raw.last_attempt_at ?? undefined,
     sourceRef: raw.source_ref ?? null,
+    groupId: raw.group_id ?? null,
+    subLabel: raw.sub_label ?? null,
+    groupOrder: raw.group_order ?? null,
+    group_context: parseQuestionGroupContext(raw.group_context, 'practice'),
   };
 }
 

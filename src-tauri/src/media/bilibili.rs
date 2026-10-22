@@ -1283,7 +1283,7 @@ mod tests {
         let mut server = Server::new_async().await;
         let view = server
             .mock("GET", "/x/web-interface/view")
-            .match_query(Matcher::UrlEncoded("bvid".into(), "BV1xx411c7mD".into()))
+            .match_query(Matcher::UrlEncoded("bvid".into(), "BV1zz411c7mZ".into()))
             .match_header("referer", "https://www.bilibili.com/")
             .with_status(200)
             .with_header("content-type", "application/json")
@@ -1324,7 +1324,7 @@ mod tests {
 
         let client = BiliClient::for_test(&server.url());
         let lookup = client
-            .lookup("https://www.bilibili.com/video/BV1xx411c7mD?p=2", None)
+            .lookup("https://www.bilibili.com/video/BV1zz411c7mZ?p=2", None)
             .await
             .unwrap();
         assert_eq!(lookup.page.cid, 1002);
@@ -1353,7 +1353,7 @@ mod tests {
 
         // 参数 page 优先于链接里的 ?p=；不存在的分 P 报错
         let e = client
-            .lookup("https://www.bilibili.com/video/BV1xx411c7mD?p=2", Some(9))
+            .lookup("https://www.bilibili.com/video/BV1zz411c7mZ?p=2", Some(9))
             .await
             .unwrap_err();
         assert_eq!(e.code(), ERR_UNAVAILABLE);

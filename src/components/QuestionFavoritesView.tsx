@@ -25,6 +25,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import type { Question as ApiQuestion, QuestionStatus, Difficulty } from '@/api/questionBankApi';
+import { parseQuestionGroupContext } from '@/utils/qbankGroupContext';
 import type { Question as StoreQuestion } from '@/stores/questionBankStore';
 import { showGlobalNotification } from '@/components/UnifiedNotification';
 
@@ -116,6 +117,11 @@ export const QuestionFavoritesView: React.FC<QuestionFavoritesViewProps> = ({
     lastAttemptAt: q.last_attempt_at,
     isFavorite: q.is_favorite,
     images: q.images,
+    // #491：收藏/错题等单题入口不割裂题组上下文
+    groupId: q.group_id ?? null,
+    subLabel: q.sub_label ?? null,
+    groupOrder: q.group_order ?? null,
+    group_context: parseQuestionGroupContext(q.group_context, 'practice'),
   }), []);
 
   const loadFavorites = useCallback(async (options?: { silent?: boolean }) => {

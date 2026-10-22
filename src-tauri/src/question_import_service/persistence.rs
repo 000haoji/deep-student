@@ -16,14 +16,66 @@ pub(super) fn publish_candidates(
     candidates: &[StructuredQuestion],
     degenerate: usize,
     pages: &[PageSlice],
+    report: Value,
+    progress_tx: Option<&UnboundedSender<QuestionImportProgress>>,
+) -> Result<ImportResult, AppError> {
+    publish_candidates_with_groups(
+        vfs_db,
+        session_id,
+        qbank_name,
+        candidates,
+        degenerate,
+        pages,
+        report,
+        progress_tx,
+        None,
+    )
+}
+
+/// Publication entry point that can receive typed group/material blocks captured
+/// *before* answer merging. Groups, materials and their child questions are
+/// published inside the same transaction as standalone questions.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn publish_candidates_with_groups(
+    vfs_db: &VfsDatabase,
+    session_id: &str,
+    qbank_name: &str,
+    candidates: &[StructuredQuestion],
+    degenerate: usize,
+    pages: &[PageSlice],
     mut report: Value,
     progress_tx: Option<&UnboundedSender<QuestionImportProgress>>,
+    typed_blocks: Option<Vec<super::groups::TypedBlock>>,
 ) -> Result<ImportResult, AppError> {
     if !report.is_object() {
         report = json!({"input_report": report});
     }
     let document_id = report["document_id"].as_str().unwrap_or("").to_string();
-    let (structured, outcome) = QuestionImportService::merge_answer_sections(candidates);
+    let (structured, outcome, merge_items) =
+        QuestionImportService::merge_answer_sections(candidates);
+    // Group/material blocks are extracted from the typed blocks *before* the
+    // publisher filters out non-question candidates. Standalone publication must
+    // never see a material pretending to be a question, and a group child must
+    // only be published through its group's transaction.
+    let group_key =
+        super::groups::GroupImportKey::new_session(session_id, &document_id, session_id);
+    let group_blocks = {
+        let mut blocks = match typed_blocks {
+            Some(blocks) => blocks,
+            None => super::groups::blocks_from_merge_items(&merge_items),
+        };
+        super::groups::enrich_with_structured(&mut blocks, &structured);
+        blocks
+    };
+    let group_proposals = super::groups::proposals_from_hints(&group_blocks);
+    let group_assembly =
+        super::groups::assemble_groups(&group_key, &group_blocks, &group_proposals);
+    let group_reserved: HashSet<String> = group_assembly
+        .planned_child_sources
+        .iter()
+        .chain(group_assembly.blocked_child_sources.iter())
+        .cloned()
+        .collect();
     for field in [
         "quarantined_entries",
         "conflicts",
@@ -31,6 +83,7 @@ pub(super) fn publish_candidates(
         "matched_entries",
         "excluded_entries",
         "safe_fill_entries",
+        "preserved_edits",
     ] {
         ensure_array(&mut report, field);
     }
@@ -90,8 +143,9 @@ pub(super) fn publish_candidates(
         metadata["import_report_history"][&old_document_id] = previous;
     } else if old_document_id == document_id {
         // Resume may only contain failed batches. Keep already matched/excluded
-        // evidence, but do not carry resolved failures into the new quality gate.
-        for key in ["matched_entries", "excluded_entries"] {
+        // evidence and durable safe-fill audit, but do not carry resolved failures
+        // into the new quality gate.
+        for key in ["matched_entries", "excluded_entries", "safe_fill_entries"] {
             if let Some(entries) = metadata["import_report"][key].as_array() {
                 for entry in entries {
                     push_audit(&mut report, key, entry.clone());
@@ -137,11 +191,51 @@ pub(super) fn publish_candidates(
         .iter()
         .map(|sq| (sq.source.merged.question.source_id.as_str(), sq))
         .collect();
+    let mut group_outcome = super::groups::GroupPublishOutcome::default();
+    if group_assembly.has_plans() {
+        let mut planned_params: HashMap<String, (String, CreateQuestionParams)> = HashMap::new();
+        for (index, sq) in structured.iter().enumerate() {
+            let source_id = sq.source.merged.question.source_id.clone();
+            if !group_assembly.planned_child_sources.contains(&source_id) {
+                continue;
+            }
+            let card_id = stable_card_id(session_id, &document_id, &source_id);
+            let Ok(mut params) = validated_params(sq, session_id, &card_id, index) else {
+                continue;
+            };
+            params.source_ref = Some(
+                make_source_ref(
+                    sq,
+                    &document_id,
+                    pages,
+                    &page_mapping,
+                    base_order as usize + index + 1,
+                )
+                .to_string(),
+            );
+            params.question_label = Some(sq.source.merged.question.label.clone());
+            params.images = Some(sq.source.images.clone());
+            planned_params.insert(source_id, (card_id, params));
+        }
+        group_outcome =
+            super::groups::publish_assembled_groups(&tx, &group_assembly, |_, child| {
+                planned_params.get(&child.source_id).cloned()
+            })
+            .map_err(|error| AppError::database(format!("题组原子发布失败: {error}")))?;
+    }
+    let group_child_count = group_outcome.published_child_sources.len();
     let mut seen = HashSet::new();
     let mut published_ids = HashSet::new();
     let mut inserted = 0usize;
+    let mut user_excluded_sources = 0usize;
     let mut safe_answer_fills = 0usize;
     let mut safe_explanation_fills = 0usize;
+    let mut changed_question_ids: Vec<String> = group_outcome
+        .receipts
+        .iter()
+        .filter(|receipt| !receipt.reused)
+        .flat_map(|receipt| receipt.child_question_ids.iter().cloned())
+        .collect();
     let mut committed_events = Vec::new();
     for (index, sq) in structured.iter().enumerate() {
         let block = &sq.source.merged.question;
@@ -158,6 +252,18 @@ pub(super) fn publish_candidates(
             let entry = quarantine(sq, &document_id, pages, reason);
             push_audit(&mut report, "identity_risks", entry.clone());
             push_audit(&mut report, "quarantined_entries", entry);
+            continue;
+        }
+        if group_reserved.contains(block.source_id.as_str())
+            || group_outcome
+                .published_child_sources
+                .contains(block.source_id.as_str())
+            || group_outcome
+                .skipped_child_sources
+                .contains(block.source_id.as_str())
+        {
+            // Published (or deliberately blocked) as a group child; publishing
+            // it again standalone would duplicate the question and lose context.
             continue;
         }
         if block.block_kind != ImportBlockKind::Question {
@@ -258,6 +364,7 @@ pub(super) fn publish_candidates(
         }
         if let Some((id, deleted_at)) = existing.first() {
             if deleted_at.is_some() {
+                user_excluded_sources += 1;
                 let mut entry = quarantine(sq, &document_id, pages, "previously_soft_deleted");
                 entry["question_id"] = json!(id);
                 entry["card_id"] = json!(card_id);
@@ -281,6 +388,9 @@ pub(super) fn publish_candidates(
             )?;
             safe_answer_fills += safe_fills.answer;
             safe_explanation_fills += safe_fills.explanation;
+            if safe_fills.answer + safe_fills.explanation > 0 {
+                changed_question_ids.push(existing.id.clone());
+            }
             published_ids.insert(card_id);
             continue;
         }
@@ -302,13 +412,44 @@ pub(super) fn publish_candidates(
             .map_err(|e| AppError::database(format!("标记待审题目失败: {e}")))?;
         }
         inserted += 1;
+        changed_question_ids.push(question.id.clone());
         published_ids.insert(card_id.clone());
+        // Record what this successful import wrote, so a later re-import can
+        // distinguish representation changes from real user edits.
+        let mut initial_baseline = serde_json::Map::new();
+        initial_baseline.insert(
+            "answer".to_string(),
+            json!(question.answer.clone().unwrap_or_default()),
+        );
+        initial_baseline.insert(
+            "explanation".to_string(),
+            json!(question.explanation.clone().unwrap_or_default()),
+        );
+        initial_baseline.insert("content".to_string(), json!(question.content.clone()));
+        initial_baseline.insert(
+            "question_label".to_string(),
+            json!(question.question_label.clone().unwrap_or_default()),
+        );
+        persist_import_baseline(&tx, &question, initial_baseline)?;
         let mut event = serde_json::to_value(&question)
             .map_err(|e| AppError::validation(format!("序列化已发布题目失败: {e}")))?;
         event["card_id"] = json!(card_id);
         committed_events.push(event);
     }
 
+    // Publication and indexing are separate states. Enqueue the changed question
+    // ids in the same transaction (crash-safe ledger, no lost task window) and let
+    // the worker index after commit; a pure replay enqueues nothing.
+    changed_question_ids.sort();
+    changed_question_ids.dedup();
+    if !changed_question_ids.is_empty() {
+        crate::vfs::question_index_ledger::QuestionIndexLedger::enqueue_question_units_with_conn(
+            &tx,
+            &changed_question_ids,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|e| AppError::database(format!("入队题目索引任务失败: {e}")))?;
+    }
     let questions = read_all_questions(&tx, session_id)?;
     preview.project(&questions)?;
     VfsExamRepo::update_preview_json_with_conn(&tx, session_id, preview.root)
@@ -331,25 +472,62 @@ pub(super) fn publish_candidates(
                 })
             })
         });
-    let unresolved = ["quarantined_entries", "conflicts", "identity_risks"]
+    let blocking_findings = ["quarantined_entries", "conflicts", "identity_risks"]
         .iter()
-        .any(|key| collection_len(&report[*key]) > 0);
+        .map(|key| {
+            report[*key]
+                .as_array()
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter(|entry| {
+                            !is_non_blocking_reason(entry["reason"].as_str().unwrap_or_default())
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        })
+        .sum::<usize>();
+    // Rule-recognised page furniture and explicit user exclusions are warnings,
+    // not blockers. Only blocking findings can force review.
+    let unresolved = blocking_findings > 0;
     // Deferred cross-page continuations and figure failures are explicit
     // incompleteness signals from the orchestrator. They can never be published
     // as a completed import: keep the report and the resumable checkpoint.
     let figure_failures = collection_len(&report["figure_failures"]);
     let deferred_continuations = collection_len(&report["deferred_continuations"]);
     let integrity_review = figure_failures > 0 || deferred_continuations > 0;
-    let status = if failed_count > 0 && published_ids.is_empty() {
+    // Zero published sources is never "completed". The reason matters: truly empty
+    // input, candidates that were all non-question blocks, and a user's explicit
+    // exclusion of every source are different terminal states.
+    let published_total = published_ids.len() + group_child_count;
+    let empty_import_reason: Option<&'static str> = if published_total == 0 {
+        if structured.is_empty() {
+            if candidates.is_empty() {
+                Some("no_questions")
+            } else {
+                Some("no_publishable_questions")
+            }
+        } else if user_excluded_sources > 0 && user_excluded_sources >= structured.len() {
+            Some("all_sources_excluded_by_user")
+        } else {
+            Some("no_publishable_questions")
+        }
+    } else {
+        None
+    };
+    let group_review = group_assembly.is_blocking() || group_outcome.is_partial();
+    let status = if failed_count > 0 && published_total == 0 {
         "failed"
     } else if failed_count > 0 {
         "partial"
-    } else if unresolved
-        || degenerate > 0
-        || coverage_review
-        || integrity_review
-        || (candidates.is_empty() && inserted == 0)
-    {
+    } else if published_total == 0 {
+        if empty_import_reason == Some("all_sources_excluded_by_user") {
+            "excluded"
+        } else {
+            "needs_review"
+        }
+    } else if unresolved || degenerate > 0 || coverage_review || integrity_review || group_review {
         "needs_review"
     } else {
         "completed"
@@ -357,6 +535,10 @@ pub(super) fn publish_candidates(
     let checkpoint_exists = checkpoint
         .as_deref()
         .is_some_and(|value| !value.trim().is_empty() && value.trim() != "null");
+    // Report content itself is durable: strip duplicated source material before
+    // storing it. Counts and reasons were computed above from the unredacted
+    // structure (keys are removed, array lengths are preserved).
+    redact_sensitive(&mut report);
     report["schema_version"] = json!(1);
     report["status"] = json!(status);
     report["needs_review"] = json!(
@@ -366,12 +548,46 @@ pub(super) fn publish_candidates(
             || integrity_review
             || degenerate > 0
     );
-    report["resume_available"] = json!(checkpoint_exists && status != "completed");
+    report["empty_import_reason"] = json!(empty_import_reason);
+    report["publishable_count"] = json!(published_total);
+    report["excluded_by_user_count"] = json!(user_excluded_sources);
+    report["incomplete_batch_count"] = json!(collection_len(&report["incomplete_batches"]));
+    report["groups"] = group_assembly.report();
+    report["group_publish"] = group_outcome.report();
+    report["group_child_published_count"] = json!(group_child_count);
+    report["definition_version"] = json!(super::normalize::REPRESENTATION_NORMALIZATION_VERSION);
+    annotate_report_severity(&mut report, status);
+    // A labelled action is only executable when the persisted checkpoint can
+    // actually re-run that stage; otherwise it becomes a review/re-import action.
+    let capabilities = super::session_guard::checkpoint_resume_capabilities(checkpoint.as_deref());
+    let actions = super::session_guard::filter_executable_recovery_actions(
+        super::session_guard::recovery_actions(&report),
+        capabilities,
+    );
+    report["recovery_actions"] = json!(actions.clone());
+    // Only concrete stage retries are executable resumes. Review-only actions
+    // (ambiguity, continuation review, empty-result review) do not pretend a
+    // resume button can fix the import.
+    let resume_executable = actions.iter().any(|action| {
+        matches!(
+            action["action"].as_str(),
+            Some("reidentify_page" | "retry_batches" | "retry_figures")
+        )
+    });
+    // A boolean alone is not an actionable resume signal: only concrete steps
+    // count, and a user's exclusion or a completed import has none.
+    report["resume_available"] = json!(
+        checkpoint_exists
+            && status != "completed"
+            && status != "excluded"
+            && !group_review
+            && resume_executable
+    );
     report["figure_failure_count"] = json!(figure_failures);
     report["deferred_continuation_count"] = json!(deferred_continuations);
     report["candidate_count"] = json!(candidates.len());
     report["question_candidate_count"] = json!(structured.len());
-    report["published_count"] = json!(published_ids.len());
+    report["published_count"] = json!(published_total);
     report["inserted_count"] = json!(inserted);
     report["new_count"] = json!(inserted);
     report["imported_count"] = json!(inserted);
@@ -463,9 +679,22 @@ fn collection_len(value: &Value) -> usize {
 }
 
 fn coverage_failures(report: &Value) -> usize {
-    let explicit = collection_len(&report["failed_pages"])
-        + collection_len(&report["failed_chunks"])
-        + collection_len(&report["failed_batches"]);
+    // The same batch id can appear in failed_batches and incomplete_batches;
+    // count distinct evidence, not array lengths.
+    let mut explicit = std::collections::BTreeSet::new();
+    for key in [
+        "failed_pages",
+        "failed_chunks",
+        "failed_batches",
+        "incomplete_batches",
+    ] {
+        if let Some(items) = report[key].as_array() {
+            for item in items {
+                explicit.insert(item.to_string());
+            }
+        }
+    }
+    let explicit = explicit.len();
     let coverage = ["page_coverage", "chunk_coverage"]
         .iter()
         .map(|key| {
@@ -485,14 +714,181 @@ fn coverage_failures(report: &Value) -> usize {
         .max(usize::from(report["partial"].as_bool().unwrap_or(false)))
 }
 
+fn sha256_hex(text: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(text.as_bytes());
+    format!("{:x}", hash.finalize())
+}
+
+/// Import reports are durable and can be backed up or synced. They may describe
+/// where a fact came from, but must not duplicate user material (raw source text,
+/// answers, model payloads) that already lives in the protected source store.
+fn redact_sensitive(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let mut replacements = Vec::new();
+            for key in [
+                "raw_text",
+                "value",
+                "existing_value",
+                "incoming_value",
+                "existing",
+                "incoming",
+                "evidence",
+                "json",
+            ] {
+                if let Some(original) = map.get(key) {
+                    let text = original
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| original.to_string());
+                    replacements.push((key.to_string(), text));
+                }
+            }
+            for (key, text) in replacements {
+                map.remove(&key);
+                map.insert(format!("{key}_sha256"), json!(sha256_hex(&text)));
+                map.insert(format!("{key}_chars"), json!(text.chars().count()));
+            }
+            for value in map.values_mut() {
+                redact_sensitive(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                redact_sensitive(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_non_blocking_reason(reason: &str) -> bool {
+    // Page furniture recognised by an auditable rule, and entries the user
+    // explicitly excluded, are warnings. Everything else blocks completion.
+    matches!(
+        reason,
+        "classified_non_question"
+            | "previously_soft_deleted"
+            | "identical_source_replay"
+            | "user_edit_preserved"
+    )
+}
+
+/// Completion is derived from classified, severity-tagged findings rather than
+/// "any non-empty report array".
+fn annotate_report_severity(report: &mut Value, status: &str) {
+    for key in [
+        "quarantined_entries",
+        "conflicts",
+        "identity_risks",
+        "excluded_entries",
+        "preserved_edits",
+    ] {
+        if let Some(entries) = report[key].as_array_mut() {
+            for entry in entries {
+                let reason = entry["reason"].as_str().unwrap_or_default();
+                entry["severity"] = json!(if is_non_blocking_reason(reason) {
+                    "warning"
+                } else {
+                    "blocking"
+                });
+                entry["category"] = json!(key);
+            }
+        }
+    }
+    for key in ["figure_failures", "deferred_continuations"] {
+        if let Some(entries) = report[key].as_array_mut() {
+            for entry in entries {
+                if entry.is_object() {
+                    entry["severity"] = json!("blocking");
+                    entry["category"] = json!(key);
+                }
+            }
+        }
+    }
+    // Count severities per entry; array lengths alone would mix warnings with
+    // blockers (e.g. a recognised heading next to an ambiguous source).
+    let mut blocking = collection_len(&report["failed_pages"]);
+    let mut warnings = 0usize;
+    for key in [
+        "quarantined_entries",
+        "conflicts",
+        "identity_risks",
+        "excluded_entries",
+        "preserved_edits",
+        "figure_failures",
+        "deferred_continuations",
+    ] {
+        if let Some(entries) = report[key].as_array() {
+            for entry in entries {
+                match entry["severity"].as_str() {
+                    Some("warning") => warnings += 1,
+                    Some("blocking") => blocking += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let categories = json!({
+        "failed_pages": collection_len(&report["failed_pages"]),
+        "failed_batches": collection_len(&report["failed_batches"]),
+        "incomplete_batches": collection_len(&report["incomplete_batches"]),
+        "figure_failures": collection_len(&report["figure_failures"]),
+        "deferred_continuations": collection_len(&report["deferred_continuations"]),
+        "quarantined": collection_len(&report["quarantined_entries"]),
+        "conflicts": collection_len(&report["conflicts"]),
+        "identity_risks": collection_len(&report["identity_risks"]),
+        "excluded_by_rule_or_user": warnings,
+    });
+    report["completion"] = json!({
+        "status": status,
+        "blocking_count": blocking,
+        "warning_count": warnings,
+        "categories": categories,
+    });
+}
+
+/// Source metadata is model-provided. Reports must use an allowlist rather than
+/// trying to blacklist every possible free-text key it may invent.
+fn safe_source_metadata(sq: &StructuredQuestion) -> Value {
+    const ALLOWED: [&str; 7] = [
+        "text_span",
+        "answer_evidence_verified",
+        "explanation_evidence_verified",
+        "requires_review",
+        "source_kind",
+        "image_indices",
+        "page_span",
+    ];
+    let Some(metadata) = sq.json.get("source_metadata").and_then(Value::as_object) else {
+        return json!({});
+    };
+    let mut safe = serde_json::Map::new();
+    for key in ALLOWED {
+        if let Some(value) = metadata.get(key) {
+            safe.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(safe)
+}
+
 fn source_audit(sq: &StructuredQuestion, document_id: &str, pages: &[PageSlice]) -> Value {
     let source = &sq.source.merged;
     json!({"document_id":document_id,"source_id":source.question.source_id,
         "block_kind":source.question.block_kind,"section":source.question.section,
-        "label":source.question.label,"raw_text":source.question.raw_text,"json":sq.json,
+        "label":source.question.label,
+        "raw_text_sha256":sha256_hex(&source.question.raw_text),
+        "raw_text_chars":source.question.raw_text.chars().count(),
+        "json_sha256":sha256_hex(&sq.json.to_string()),
+        "json_keys":sq.json.as_object().map(|json| {
+            let mut keys: Vec<&String> = json.keys().collect();
+            keys.sort();
+            json!(keys)
+        }).unwrap_or(Value::Null),
         "page_indices":if pages.is_empty(){json!([])}else{json!(source.page_indices)},
         "page_spans":if pages.is_empty(){json!([])}else{json!(source.source_spans)},
-        "source_metadata":sq.json.get("source_metadata").cloned().unwrap_or(Value::Null)})
+        "source_metadata":safe_source_metadata(sq)})
 }
 
 fn quarantine(
@@ -576,14 +972,22 @@ fn validated_params(
             return Err("contradictory_block_kind");
         }
     }
+    // An unknown model-provided enum is not the same as a legitimate "other".
+    // Mapping it silently to Other would let malformed choice payloads bypass the
+    // option gate, so it enters review with an explicit reason.
+    if let Some(kind) = sq.json.get("question_type").and_then(Value::as_str) {
+        let normalized = kind.trim().to_ascii_lowercase();
+        if !normalized.is_empty() && !KNOWN_QUESTION_TYPE_ENUMS.contains(&normalized.as_str()) {
+            return Err("unknown_question_type_enum");
+        }
+    }
     let mut params = super::json_to_question_params(&sq.json, session, card, index);
     // Do not inherit the legacy adapter's text rewriting or synthetic Q{n} label.
     params.content = content.to_string();
     params.answer = params.answer.filter(|answer| !answer.trim().is_empty());
+    let options_value = sq.json.get("options").cloned().unwrap_or(Value::Null);
     if is_choice(params.question_type.as_ref()) {
-        let options = sq.json["options"]
-            .as_array()
-            .ok_or("choice_missing_options")?;
+        let options = options_value.as_array().ok_or("choice_missing_options")?;
         if options.len() < 2 {
             return Err("choice_requires_two_unique_options");
         }
@@ -621,9 +1025,106 @@ fn validated_params(
             });
         }
         params.options = Some(validated);
+    } else if !options_value.is_null() {
+        // Unknown/non-choice types may still carry options. Empty arrays are
+        // dropped; any non-empty payload must satisfy the same structure rules
+        // instead of bypassing validation through the type field.
+        match &options_value {
+            Value::Array(options) if options.is_empty() => params.options = None,
+            Value::Array(options) => {
+                params.options = Some(validated_non_choice_options(options)?);
+            }
+            _ => return Err("invalid_option_structure"),
+        }
     }
     Ok(params)
 }
+
+/// Structural rules for options that are present on a non-choice payload.
+/// Model-written keys/content must never smuggle malformed data into storage.
+fn validated_non_choice_options(
+    options: &[Value],
+) -> Result<Vec<crate::vfs::repos::QuestionOption>, &'static str> {
+    let mut keys = HashSet::new();
+    let mut values = HashSet::new();
+    let mut validated = Vec::with_capacity(options.len());
+    for option in options {
+        let key = option["key"]
+            .as_str()
+            .ok_or("invalid_option_structure")?
+            .trim();
+        let value = option["content"]
+            .as_str()
+            .ok_or("invalid_option_structure")?
+            .trim();
+        if key.is_empty()
+            || key.chars().count() > 16
+            || !key.chars().all(char::is_alphanumeric)
+            || value.is_empty()
+            || value
+                .chars()
+                .any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t'))
+        {
+            return Err("invalid_option_structure");
+        }
+        let canonical = key.to_uppercase();
+        let normalized_value = value
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        if !keys.insert(canonical.clone()) || !values.insert(normalized_value) {
+            return Err("invalid_option_structure");
+        }
+        validated.push(crate::vfs::repos::QuestionOption {
+            key: canonical,
+            content: value.to_string(),
+        });
+    }
+    Ok(validated)
+}
+
+const KNOWN_QUESTION_TYPE_ENUMS: [&str; 39] = [
+    "single_choice",
+    "单选",
+    "单选题",
+    "multiple_choice",
+    "多选",
+    "多选题",
+    "indefinite_choice",
+    "不定项",
+    "fill_blank",
+    "填空",
+    "填空题",
+    "short_answer",
+    "简答",
+    "简答题",
+    "essay",
+    "论述",
+    "论述题",
+    "calculation",
+    "计算",
+    "计算题",
+    "proof",
+    "证明",
+    "证明题",
+    "true_false",
+    "判断",
+    "判断题",
+    "judgment",
+    "matching",
+    "匹配",
+    "匹配题",
+    "连线",
+    "连线题",
+    "ordering",
+    "排序",
+    "排序题",
+    "numeric",
+    "数值",
+    "数值题",
+    "other",
+];
 
 fn is_choice(kind: Option<&crate::vfs::repos::QuestionType>) -> bool {
     matches!(
@@ -898,6 +1399,65 @@ fn incoming_field<'a>(params: &'a CreateQuestionParams, field: &str) -> &'a str 
 }
 
 #[allow(clippy::too_many_arguments)]
+fn option_pairs(options: Option<&Vec<crate::vfs::repos::QuestionOption>>) -> Vec<(String, String)> {
+    options
+        .map(|options| {
+            options
+                .iter()
+                .map(|option| (option.key.clone(), option.content.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Persisted import baseline (`source_ref.import_baseline`) for one question.
+/// Only values written by the import pipeline are recorded; user edits never
+/// become the baseline, so a later re-import can tell them apart.
+fn persisted_baseline(existing: &PersistedQuestion) -> Option<Value> {
+    existing
+        .source_ref
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .and_then(|source| source.get("import_baseline").cloned())
+}
+
+fn baseline_field<'a>(baseline: &'a Option<Value>, field: &str) -> Option<&'a str> {
+    baseline
+        .as_ref()?
+        .get("fields")?
+        .get(field)?
+        .as_str()
+        .filter(|value| !value.is_empty())
+}
+
+/// Store the field-level baseline after a successful publish. Existing evidence
+/// fields on `source_ref` are preserved; only the baseline node is replaced.
+fn persist_import_baseline(
+    conn: &Connection,
+    existing: &PersistedQuestion,
+    fields: serde_json::Map<String, Value>,
+) -> Result<(), AppError> {
+    let mut source = existing
+        .source_ref
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        .unwrap_or_else(|| json!({}));
+    if !source.is_object() {
+        source = json!({"legacy_source_ref": source});
+    }
+    source["import_baseline"] = json!({
+        "version": super::normalize::REPRESENTATION_NORMALIZATION_VERSION,
+        "fields": fields,
+    });
+    conn.execute(
+        "UPDATE questions SET source_ref=?1 WHERE id=?2",
+        rusqlite::params![source.to_string(), existing.id],
+    )
+    .map_err(|e| AppError::database(format!("保存导入字段基线失败: {e}")))?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn preserve_existing(
     conn: &Connection,
     existing: &PersistedQuestion,
@@ -910,12 +1470,33 @@ fn preserve_existing(
     original: Option<&StructuredQuestion>,
     report: &mut Value,
 ) -> Result<SafeFillStats, AppError> {
-    let same_structure = existing.content == incoming.content
-        && existing.options == incoming.options
+    // Representation-safe structural comparison: whitespace, Unicode width and
+    // LaTeX sub/superscript spelling are not user edits; real fact changes are.
+    let same_structure = super::normalize::canonical_stem_key(&existing.content)
+        == super::normalize::canonical_stem_key(&incoming.content)
+        && super::normalize::options_equivalent(
+            &option_pairs(existing.options.as_ref()),
+            &option_pairs(incoming.options.as_ref()),
+        )
         && Some(&existing.question_type) == incoming.question_type.as_ref()
         && existing.question_label == incoming.question_label
         && existing.structured_data == incoming.structured_data
         && existing.images == incoming.images.clone().unwrap_or_default();
+    let baseline = persisted_baseline(existing);
+    let baseline_version = baseline
+        .as_ref()
+        .and_then(|baseline| baseline.get("version"))
+        .and_then(Value::as_u64)
+        .map(|version| version as u32);
+    let baseline = if super::normalize::baseline_version_usable(baseline_version) {
+        baseline
+    } else {
+        None
+    };
+    // A replay with an existing usable baseline must be a pure no-op unless it
+    // actually writes a field. Otherwise merely re-importing would rewrite the
+    // stored baseline (empty fields, shapes) and make previews non-idempotent.
+    let needs_baseline_write = baseline.is_none();
     let mut conflicts: Vec<(&'static str, &'static str, String, String)> = Vec::new();
     if !same_structure {
         conflicts.push((
@@ -924,26 +1505,6 @@ fn preserve_existing(
             existing.content.clone(),
             incoming.content.clone(),
         ));
-    } else {
-        for field in EVIDENCE_FIELDS {
-            let existing_value = persisted_field(existing, field).trim();
-            let incoming_value = incoming_field(incoming, field).trim();
-            if !existing_value.is_empty()
-                && !incoming_value.is_empty()
-                && existing_value != incoming_value
-            {
-                conflicts.push((
-                    if field == "answer" {
-                        "existing_answer_conflict"
-                    } else {
-                        "existing_explanation_conflict"
-                    },
-                    field,
-                    existing_value.to_string(),
-                    incoming_value.to_string(),
-                ));
-            }
-        }
     }
     if !conflicts.is_empty() {
         for (reason, field, existing_value, incoming_value) in conflicts {
@@ -958,10 +1519,11 @@ fn preserve_existing(
         return Ok(SafeFillStats::default());
     }
     let mut fills: Vec<(&'static str, String, Option<FieldProvenance>)> = Vec::new();
+    let mut baseline_fields = serde_json::Map::new();
     for field in EVIDENCE_FIELDS {
         let existing_value = persisted_field(existing, field).trim();
         let incoming_value = incoming_field(incoming, field).trim();
-        if !existing_value.is_empty() || incoming_value.is_empty() {
+        if existing_value.is_empty() && incoming_value.is_empty() {
             continue;
         }
         // Defense in depth: invalid_answer already clears these values, but a
@@ -985,44 +1547,90 @@ fn preserve_existing(
             push_audit(report, "conflicts", entry);
             continue;
         }
-        // Attribute the donor only when this question's own pre-merge payload
-        // did not already carry the field.
-        let own_value_before_merge = original.is_some_and(|original| {
-            original
-                .json
-                .get(field)
-                .and_then(Value::as_str)
-                .is_some_and(|value| !value.trim().is_empty())
+        let decision = super::normalize::decide_field_update(&super::normalize::FieldBaseline {
+            field,
+            baseline: baseline_field(&baseline, field),
+            current: existing_value,
+            proposal: incoming_value,
         });
-        let donor = if own_value_before_merge {
-            None
+        if decision.writes_proposal() {
+            let own_value_before_merge = original.is_some_and(|original| {
+                original
+                    .json
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            });
+            let donor = if own_value_before_merge {
+                None
+            } else {
+                provenance.get(field).cloned()
+            };
+            fills.push((field, incoming_value.to_string(), donor));
+            baseline_fields.insert(field.to_string(), json!(incoming_value));
+        } else if decision.needs_review() {
+            let mut entry = quarantine(sq, document_id, pages, decision.reason());
+            entry["question_id"] = json!(existing.id);
+            entry["card_id"] = json!(existing.card_id);
+            entry["field"] = json!(field);
+            push_audit(report, "conflicts", entry);
         } else {
-            provenance.get(field).cloned()
-        };
-        fills.push((field, incoming_value.to_string(), donor));
+            // The user's value (or an equal representation) is kept. The
+            // import result, not the user's edit, stays the field baseline.
+            let kept = match decision {
+                super::normalize::FieldUpdateDecision::PreserveUserEdit => {
+                    incoming_value.to_string()
+                }
+                super::normalize::FieldUpdateDecision::PreserveOnEmptyProposal => {
+                    baseline_field(&baseline, field)
+                        .unwrap_or(existing_value)
+                        .to_string()
+                }
+                _ => existing_value.to_string(),
+            };
+            if !kept.is_empty() {
+                baseline_fields.insert(field.to_string(), json!(kept));
+            }
+            if decision == super::normalize::FieldUpdateDecision::PreserveUserEdit {
+                let mut entry = quarantine(sq, document_id, pages, decision.reason());
+                entry["question_id"] = json!(existing.id);
+                entry["card_id"] = json!(existing.card_id);
+                entry["field"] = json!(field);
+                push_audit(report, "preserved_edits", entry);
+            }
+        }
     }
-    if fills.is_empty() {
-        return Ok(SafeFillStats::default());
+    if !fills.is_empty() {
+        let answer = fills
+            .iter()
+            .find(|(field, _, _)| *field == "answer")
+            .map(|(_, value, _)| value.clone());
+        let explanation = fills
+            .iter()
+            .find(|(field, _, _)| *field == "explanation")
+            .map(|(_, value, _)| value.clone());
+        VfsQuestionRepo::update_question_with_conn(
+            conn,
+            &existing.id,
+            &UpdateQuestionParams {
+                answer,
+                explanation,
+                expected_updated_at: Some(existing.updated_at.clone()),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| AppError::database(format!("安全回填已有题目答案失败: {e}")))?;
     }
-    let answer = fills
-        .iter()
-        .find(|(field, _, _)| *field == "answer")
-        .map(|(_, value, _)| value.clone());
-    let explanation = fills
-        .iter()
-        .find(|(field, _, _)| *field == "explanation")
-        .map(|(_, value, _)| value.clone());
-    VfsQuestionRepo::update_question_with_conn(
-        conn,
-        &existing.id,
-        &UpdateQuestionParams {
-            answer,
-            explanation,
-            expected_updated_at: Some(existing.updated_at.clone()),
-            ..Default::default()
-        },
-    )
-    .map_err(|e| AppError::database(format!("安全回填已有题目答案失败: {e}")))?;
+    // Content/label baselines let a later import distinguish a representation
+    // change from a user edit without comparing raw strings.
+    baseline_fields.insert("content".to_string(), json!(existing.content));
+    baseline_fields.insert(
+        "question_label".to_string(),
+        json!(existing.question_label.clone().unwrap_or_default()),
+    );
+    if needs_baseline_write || !fills.is_empty() {
+        persist_import_baseline(conn, existing, baseline_fields)?;
+    }
     let mut stats = SafeFillStats::default();
     for (field, value, donor) in fills {
         let source = donor.unwrap_or_else(|| FieldProvenance::from_source(sq, field));
@@ -1489,8 +2097,22 @@ mod tests {
             },
         )
         .expect("create synthetic exam and resource");
-        VfsExamRepo::update_import_state(db, &sheet.id, &json!({"synthetic_checkpoint":true}))
-            .expect("checkpoint");
+        // A realistic versioned visual checkpoint: recovery actions are only
+        // advertised when the persisted state can actually re-run that stage.
+        VfsExamRepo::update_import_state(
+            db,
+            &sheet.id,
+            &json!({
+                "schema_version": super::super::session_guard::CHECKPOINT_SCHEMA_VERSION,
+                "pipeline_version": super::super::session_guard::PIPELINE_VERSION,
+                "current_stage": "vlm_analyzing",
+                "page_blob_hashes": ["synthetic-checkpoint-page"],
+                "vlm_page_results": [],
+                "import_mode": "visual",
+                "source_document_id": "synthetic-document-v1",
+            }),
+        )
+        .expect("checkpoint");
         sheet.id
     }
 
@@ -1778,10 +2400,15 @@ mod tests {
                 .len(),
             38
         );
-        assert!(metadata["import_report"]["matched_entries"][0]["raw_text"]
-            .as_str()
-            .unwrap()
-            .contains("合成原文"));
+        assert!(
+            metadata["import_report"]["matched_entries"][0]["raw_text_sha256"]
+                .as_str()
+                .is_some_and(|hash| hash.len() == 64)
+        );
+        assert_eq!(
+            metadata["import_report"]["matched_entries"][0]["raw_text_chars"],
+            "合成原文 single_choice/1".chars().count()
+        );
         assert!(metadata["import_report"]["matched_entries"][0]["source"]["page_spans"].is_array());
         assert_eq!(metadata["import_report"]["resume_available"], false);
         assert!(metadata["import_report"]["quarantined_entries"]
@@ -2321,7 +2948,15 @@ mod tests {
             .unwrap();
         assert_eq!(quarantine.len(), 1);
         assert_eq!(quarantine[0]["block_kind"], "answer");
-        assert_eq!(quarantine[0]["json"]["content"], "非空答案摘要不应发布");
+        assert!(quarantine[0]["json_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64));
+        assert!(quarantine[0]["source"]["json_keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key == "content"));
+        assert!(quarantine[0].get("json").is_none());
         assert_eq!(quarantine[0]["source"]["page_indices"], json!([]));
     }
 
@@ -2562,8 +3197,10 @@ mod tests {
             .unwrap();
         assert_eq!(answer["question_id"], question.id.as_str());
         assert_eq!(answer["source_id"], "q-fill");
-        assert_eq!(answer["value"], "合成答案");
-        assert_eq!(answer["evidence"], "合成原文：答案");
+        assert!(answer["value_sha256"].is_string());
+        assert!(answer["evidence_sha256"].is_string());
+        assert!(answer.get("value").is_none());
+        assert!(answer.get("evidence").is_none());
         assert_eq!(answer["evidence_source_id"], "a-fill");
         assert_eq!(answer["evidence_kind"], "inline");
         let explanation = entries
@@ -2571,8 +3208,8 @@ mod tests {
             .find(|entry| entry["field"] == "explanation")
             .unwrap();
         assert_eq!(explanation["source_id"], "q-fill");
-        assert_eq!(explanation["value"], "合成解析");
-        assert_eq!(explanation["evidence"], "合成原文：解析");
+        assert!(explanation["value_sha256"].is_string());
+        assert!(explanation["evidence_sha256"].is_string());
         assert_eq!(explanation["evidence_source_id"], "e-fill");
         assert!(metadata["import_report"]["conflicts"]
             .as_array()
@@ -2659,11 +3296,697 @@ mod tests {
             let (metadata, _, status, checkpoint) = state(&db, &id);
             assert_eq!(status, "needs_review", "{key} must not complete");
             assert!(checkpoint.is_some(), "{key} must keep the checkpoint");
-            assert_eq!(metadata["import_report"]["resume_available"], true);
+            // Only stage-retry actions are executable resumes; a deferred
+            // continuation is review-only until adjacent pages are supplied.
+            let expected_resume = key == "figure_failures";
+            assert_eq!(
+                metadata["import_report"]["resume_available"], expected_resume,
+                "{key}"
+            );
             assert_eq!(metadata["import_report"]["needs_review"], true);
             assert_eq!(metadata["import_report"][count_key], 1);
             assert_eq!(metadata["import_report"][key].as_array().unwrap().len(), 1);
         }
+    }
+
+    #[test]
+    fn cached_unresolved_continuation_pages_are_reidentified_not_just_reviewed() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let input = vec![block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q-cont",
+            None,
+            Some("合成答案"),
+        )];
+        let mut report = report();
+        report["deferred_continuations"] = json!([{
+            "source_id": "q-cont",
+            "page_spans": [{"page_index": 0}, {"page_index": 1}],
+            "reason": "unresolved_continuation",
+        }]);
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report, None).unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "needs_review");
+        let report = &metadata["import_report"];
+        assert_eq!(report["resume_available"], true);
+        let action = report["recovery_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["action"] == "reidentify_page")
+            .expect("continuation pages must be re-recognisable");
+        assert_eq!(action["pages"], json!([0, 1]));
+        assert_eq!(action["reason"], "unresolved_page_continuation");
+    }
+
+    #[test]
+    fn heading_or_material_only_candidates_never_complete_an_empty_import() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let mut heading = block(ImportBlockKind::Heading, "", "一、选择题", "h1", None, None);
+        heading.json["content"] = json!("一、选择题");
+        let mut material = block(ImportBlockKind::Material, "reading", "", "m1", None, None);
+        material.json["content"] = json!("阅读理解材料正文");
+        let input = vec![heading, material];
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        assert_projection(&db, &id, 0);
+        let (metadata, _, status, checkpoint) = state(&db, &id);
+        assert_eq!(status, "needs_review");
+        assert!(
+            checkpoint.is_some(),
+            "an empty publication must keep the checkpoint for review"
+        );
+        assert_eq!(
+            metadata["import_report"]["empty_import_reason"],
+            "no_publishable_questions"
+        );
+        assert_eq!(metadata["import_report"]["publishable_count"], 0);
+        assert_eq!(metadata["import_report"]["needs_review"], true);
+    }
+
+    #[test]
+    fn truly_empty_input_is_distinguished_from_discarded_candidates() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        publish_candidates(&db, &id, "合成导入回归", &[], 0, &[], report(), None).unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "needs_review");
+        assert_eq!(
+            metadata["import_report"]["empty_import_reason"],
+            "no_questions"
+        );
+    }
+
+    #[test]
+    fn user_excluded_sources_have_a_distinct_terminal_state_without_review() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let input = vec![block(ImportBlockKind::Question, "s", "1", "q1", None, None)];
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        let row = questions(&db, &id).pop().unwrap();
+        VfsQuestionRepo::delete_question(&db, &row.id).unwrap();
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "excluded");
+        assert_eq!(
+            metadata["import_report"]["empty_import_reason"],
+            "all_sources_excluded_by_user"
+        );
+        assert_eq!(metadata["import_report"]["excluded_by_user_count"], 1);
+        assert_eq!(metadata["import_report"]["needs_review"], false);
+        assert_eq!(metadata["import_report"]["resume_available"], false);
+    }
+
+    #[test]
+    fn replay_of_existing_sources_is_effective_publication_coverage() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let input = vec![block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q-replay",
+            None,
+            Some("合成答案"),
+        )];
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        let result =
+            publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        assert_eq!(result.imported_count, 0);
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "completed");
+        assert_eq!(metadata["import_report"]["published_count"], 1);
+        assert_eq!(metadata["import_report"]["inserted_count"], 0);
+        assert!(metadata["import_report"]["empty_import_reason"].is_null());
+    }
+
+    #[test]
+    fn publication_enqueues_index_units_for_changed_questions_in_the_same_transaction() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let input = vec![block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q-index",
+            None,
+            Some("A"),
+        )];
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        let row = questions(&db, &id).pop().unwrap();
+        let units = |question_id: &str| -> i64 {
+            let conn = db.get_conn_safe().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM vfs_index_units WHERE resource_id=?1 AND unit_index=0",
+                [question_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let unit_updated_at = |question_id: &str| -> i64 {
+            let conn = db.get_conn_safe().unwrap();
+            conn.query_row(
+                "SELECT updated_at FROM vfs_index_units WHERE resource_id=?1 AND unit_index=0",
+                [question_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(units(&row.id), 1);
+        let before = unit_updated_at(&row.id);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // A pure replay changes nothing and must not bump the index generation.
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        assert_eq!(units(&row.id), 1);
+        assert_eq!(unit_updated_at(&row.id), before);
+    }
+
+    #[test]
+    fn incomplete_batches_are_failures_not_a_completed_import() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let input = vec![block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q-batch",
+            None,
+            Some("合成答案"),
+        )];
+        let mut report = report();
+        report["incomplete_batches"] = json!([3]);
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report, None).unwrap();
+        let (metadata, _, status, checkpoint) = state(&db, &id);
+        assert_eq!(status, "partial");
+        assert!(checkpoint.is_some());
+        assert_eq!(metadata["import_report"]["incomplete_batch_count"], 1);
+        assert_eq!(metadata["import_report"]["failed_count"], 1);
+        assert_eq!(metadata["import_report"]["resume_available"], true);
+    }
+
+    #[test]
+    fn resume_keeps_safe_fill_audit_entries() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let target = block(ImportBlockKind::Question, "s", "1", "q-fill", None, None);
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&target),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let donor = block(
+            ImportBlockKind::Answer,
+            "s",
+            "1",
+            "a-fill",
+            None,
+            Some("合成答案"),
+        );
+        let input = vec![target.clone(), donor];
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        let (filled, _, _, _) = state(&db, &id);
+        assert_eq!(
+            filled["import_report"]["safe_fill_entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        // A later resume of the same document must not erase durable backfill audit.
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&target),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let (resumed, _, status, _) = state(&db, &id);
+        assert_eq!(status, "completed");
+        assert_eq!(
+            resumed["import_report"]["safe_fill_entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn report_audit_redacts_material_text_and_model_payload() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let mut question = block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q-secret",
+            None,
+            Some("SECRET-ANSWER-TEXT"),
+        );
+        question.source.merged.question.raw_text = "SECRET-RAW-STUDENT-MATERIAL".into();
+        question.json["content"] = json!("SECRET-QUESTION-CONTENT");
+        let unmatched = block(
+            ImportBlockKind::Answer,
+            "s",
+            "99",
+            "a-secret",
+            None,
+            Some("SECRET-UNMATCHED-ANSWER"),
+        );
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            &[question, unmatched],
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let (metadata, _, _, _) = state(&db, &id);
+        let serialized = metadata["import_report"].to_string();
+        for secret in [
+            "SECRET-ANSWER-TEXT",
+            "SECRET-RAW-STUDENT-MATERIAL",
+            "SECRET-QUESTION-CONTENT",
+            "SECRET-UNMATCHED-ANSWER",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "import report must not duplicate source material: {secret}"
+            );
+        }
+        let quarantine = metadata["import_report"]["quarantined_entries"]
+            .as_array()
+            .unwrap();
+        assert_eq!(quarantine.len(), 1);
+        assert!(quarantine[0].get("raw_text").is_none());
+        assert!(quarantine[0].get("json").is_none());
+        assert!(quarantine[0]["raw_text_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64));
+        assert!(quarantine[0]["json_sha256"]
+            .as_str()
+            .is_some_and(|hash| hash.len() == 64));
+        assert!(quarantine[0]["source"]["raw_text_sha256"].is_string());
+    }
+
+    #[test]
+    fn options_on_unexpected_question_types_are_validated_and_unknown_enums_reviewed() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let mut malformed = block(ImportBlockKind::Question, "s", "1", "opt-dup", None, None);
+        malformed.json["question_type"] = json!("essay");
+        malformed.json["options"] = json!([
+            {"key":"A","content":"合成甲"},
+            {"key":"A","content":"合成乙"}
+        ]);
+        let mut unknown_enum = block(ImportBlockKind::Question, "s", "2", "enum", None, None);
+        unknown_enum.json["question_type"] = json!("quantum_choice");
+        let good = block(ImportBlockKind::Question, "s", "3", "good", None, None);
+        let input = vec![malformed, unknown_enum, good];
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report(), None).unwrap();
+        assert_projection(&db, &id, 1);
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "needs_review");
+        let reasons: HashSet<_> = metadata["import_report"]["quarantined_entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["reason"].as_str())
+            .collect();
+        assert!(reasons.contains("invalid_option_structure"));
+        assert!(reasons.contains("unknown_question_type_enum"));
+    }
+
+    #[test]
+    fn report_exposes_severity_tagged_actions_instead_of_a_bare_resume_flag() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let input = vec![block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q-action",
+            None,
+            Some("合成答案"),
+        )];
+        let mut report = report();
+        report["failed_pages"] = json!([2]);
+        report["figure_failures"] = json!([{"source_id":"q-action","reason":"合成图失败"}]);
+        publish_candidates(&db, &id, "合成导入回归", &input, 0, &[], report, None).unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "partial");
+        let report = &metadata["import_report"];
+        let actions = report["recovery_actions"].as_array().unwrap();
+        let names: HashSet<_> = actions
+            .iter()
+            .filter_map(|action| action["action"].as_str())
+            .collect();
+        assert!(names.contains("reidentify_page"));
+        assert!(names.contains("retry_figures"));
+        assert_eq!(report["resume_available"], true);
+        assert_eq!(report["completion"]["blocking_count"], 2);
+        assert_eq!(report["figure_failures"][0]["severity"], "blocking");
+    }
+
+    #[test]
+    fn classified_non_question_entries_are_warnings_not_blockers() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let question = block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "q1",
+            None,
+            Some("合成答案"),
+        );
+        let mut heading = block(ImportBlockKind::Heading, "", "一、单选", "h1", None, None);
+        heading.json["content"] = json!("一、单选");
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            &[question, heading],
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "completed");
+        let report = &metadata["import_report"];
+        let excluded = report["excluded_entries"].as_array().unwrap();
+        assert!(excluded.iter().all(|entry| entry["severity"] == "warning"));
+        assert_eq!(report["completion"]["blocking_count"], 0);
+        assert_eq!(report["completion"]["warning_count"], 1);
+        assert!(report["recovery_actions"].as_array().unwrap().is_empty());
+        assert_eq!(report["resume_available"], false);
+    }
+
+    #[test]
+    fn representation_equivalent_stem_is_not_a_user_edit() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let mut first = block(ImportBlockKind::Question, "chem", "1", "chem-1", None, None);
+        first.json["content"] = json!("Ca²⁺浓度对平衡的影响");
+        first.source.merged.question.raw_text = "1. Ca²⁺浓度对平衡的影响".into();
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&first),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let mut replay = first.clone();
+        replay.json["content"] = json!("$Ca^{2+}$浓度对平衡的影响");
+        replay.source.merged.question.raw_text = "1. $Ca^{2+}$浓度对平衡的影响".into();
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&replay),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "completed");
+        assert!(metadata["import_report"]["conflicts"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(questions(&db, &id).len(), 1);
+    }
+
+    #[test]
+    fn different_charge_is_a_real_representation_conflict() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let mut first = block(ImportBlockKind::Question, "chem", "1", "chem-2", None, None);
+        first.json["content"] = json!("Ca²⁺浓度对平衡的影响");
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&first),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let mut replay = first.clone();
+        replay.json["content"] = json!("$Ca^{3+}$浓度对平衡的影响");
+        replay.source.merged.question.raw_text = "1. $Ca^{3+}$浓度对平衡的影响".into();
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&replay),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "needs_review");
+        let conflicts = metadata["import_report"]["conflicts"].as_array().unwrap();
+        assert!(conflicts
+            .iter()
+            .any(|entry| entry["reason"] == "existing_question_edited"));
+        assert_eq!(questions(&db, &id)[0].content, "Ca²⁺浓度对平衡的影响");
+    }
+
+    #[test]
+    fn user_edit_is_preserved_through_three_way_baseline() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let q = block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "baseline-q",
+            None,
+            Some("A"),
+        );
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&q),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        // Second import records the field baseline ("A").
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&q),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let row = questions(&db, &id).pop().unwrap();
+        VfsQuestionRepo::update_question(
+            &db,
+            &row.id,
+            &UpdateQuestionParams {
+                answer: Some("用户答案".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&q),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let after = questions(&db, &id).pop().unwrap();
+        assert_eq!(after.answer.as_deref(), Some("用户答案"));
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "completed");
+        assert!(metadata["import_report"]["conflicts"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(metadata["import_report"]["preserved_edits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["reason"] == "user_edit_preserved"));
+    }
+
+    #[test]
+    fn legacy_record_without_baseline_is_reviewed_not_blamed_on_the_user() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let q = block(
+            ImportBlockKind::Question,
+            "s",
+            "1",
+            "legacy-q",
+            None,
+            Some("A"),
+        );
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&q),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let row = questions(&db, &id).pop().unwrap();
+        // Emulate a record created before field baselines existed.
+        {
+            let conn = db.get_conn_safe().unwrap();
+            let source: String = conn
+                .query_row(
+                    "SELECT source_ref FROM questions WHERE id=?1",
+                    [&row.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let mut source: Value = serde_json::from_str(&source).unwrap();
+            source.as_object_mut().unwrap().remove("import_baseline");
+            conn.execute(
+                "UPDATE questions SET source_ref=?1 WHERE id=?2",
+                rusqlite::params![source.to_string(), row.id],
+            )
+            .unwrap();
+        }
+        VfsQuestionRepo::update_question(
+            &db,
+            &row.id,
+            &UpdateQuestionParams {
+                answer: Some("用户答案".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut replay = q.clone();
+        replay.json["answer"] = json!("B");
+        publish_candidates(
+            &db,
+            &id,
+            "合成导入回归",
+            std::slice::from_ref(&replay),
+            0,
+            &[],
+            report(),
+            None,
+        )
+        .unwrap();
+        let (metadata, _, status, _) = state(&db, &id);
+        assert_eq!(status, "needs_review");
+        let conflicts = metadata["import_report"]["conflicts"].as_array().unwrap();
+        assert!(conflicts
+            .iter()
+            .any(|entry| entry["reason"] == "legacy_record_without_baseline"));
+        assert_eq!(questions(&db, &id)[0].answer.as_deref(), Some("用户答案"));
+    }
+
+    #[test]
+    fn group_materials_and_children_publish_in_one_transaction_without_standalone_duplicates() {
+        let (_temp, db) = setup_migrated_test_db();
+        let id = exam(&db, &[]);
+        let mut material = block(
+            ImportBlockKind::Material,
+            "reading",
+            "",
+            "material-1",
+            None,
+            None,
+        );
+        material.json["content"] = json!("阅读材料：合成短文");
+        material.source.merged.question.raw_text = "阅读材料：合成短文".into();
+        material.source.merged.question.is_group = true;
+        material.source.merged.question.sub_questions = vec!["1".into(), "2".into()];
+        let mut first = block(
+            ImportBlockKind::Question,
+            "reading",
+            "1",
+            "child-1",
+            None,
+            None,
+        );
+        first.json["content"] = json!("子题一");
+        let mut second = block(
+            ImportBlockKind::Question,
+            "reading",
+            "2",
+            "child-2",
+            None,
+            None,
+        );
+        second.json["content"] = json!("子题二");
+        let input = vec![material, first, second];
+        let sources: Vec<_> = input.iter().map(|sq| sq.source.clone()).collect();
+        let typed_blocks =
+            crate::question_import_service::groups::blocks_before_answer_merge(&sources);
+        publish_candidates_with_groups(
+            &db,
+            &id,
+            "合成导入回归",
+            &input,
+            0,
+            &[],
+            report(),
+            None,
+            Some(typed_blocks),
+        )
+        .unwrap();
+        // Only the two children are answerable questions; the group header and
+        // material never become a question, and nothing is published twice.
+        assert_eq!(questions(&db, &id).len(), 2);
+        let (metadata, _, status, checkpoint) = state(&db, &id);
+        assert_eq!(status, "completed");
+        assert!(checkpoint.is_none());
+        let report = &metadata["import_report"];
+        assert_eq!(report["groups"]["group_count"], 1);
+        assert_eq!(report["groups"]["group_child_count"], 2);
+        assert_eq!(report["group_child_published_count"], 2);
+        assert_eq!(report["groups"]["unconsumed_material_count"], 0);
+        assert_eq!(report["publishable_count"], 2);
     }
 
     #[test]

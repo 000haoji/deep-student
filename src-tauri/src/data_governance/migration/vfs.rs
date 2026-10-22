@@ -1092,6 +1092,42 @@ pub const V20261006_STUDY_TIME: MigrationDef = MigrationDef::new(
 .with_expected_tables(&["study_time_daily"])
 .idempotent();
 
+/// V20261021: 题组（Issue #491）——平级组 + 多有序材料 + 子题 nullable 关系。
+///
+/// 设计契约：docs/dev/qbank-question-groups.md。新增 question_groups /
+/// question_group_materials、questions 四个 nullable 列、材料独立 FTS、
+/// 完整性触发器、__change_log 触发器与本地乱序暂存表。
+pub const V20261021_QUESTION_GROUPS: MigrationDef = MigrationDef::new(
+    20261021,
+    "question_groups",
+    include_str!("../../../migrations/vfs/V20261021__question_groups.sql"),
+)
+.with_expected_tables(&[
+    "question_groups",
+    "question_group_materials",
+    "question_group_materials_fts",
+    "__question_group_sync_staging",
+])
+.with_expected_columns(&[
+    ("questions", "group_id"),
+    ("questions", "sub_label"),
+    ("questions", "group_order"),
+    ("questions", "group_version"),
+    ("question_groups", "expected_child_ids_json"),
+    ("question_groups", "expected_material_ids_json"),
+    ("question_group_materials", "group_version"),
+])
+.with_expected_indexes(&[
+    "idx_question_groups_exam",
+    "idx_question_groups_publish",
+    "idx_qgm_group_order",
+    "uidx_qgm_group_order",
+    "idx_questions_group",
+    "uidx_questions_group_order",
+    "uidx_questions_group_sub_label",
+])
+.idempotent();
+
 pub const VFS_MIGRATIONS: &[MigrationDef] = &[
     V20260130_INIT,
     V20260131_CHANGE_LOG,
@@ -1162,6 +1198,7 @@ pub const VFS_MIGRATIONS: &[MigrationDef] = &[
     V20260924_NOTE_EDITOR_LEASES,
     V20261005_MEDIA_TRANSCRIPTS,
     V20261006_STUDY_TIME,
+    V20261021_QUESTION_GROUPS,
 ];
 
 /// VFS 当前 Schema 版本，始终由已注册迁移的最后一项推导。
@@ -1244,27 +1281,32 @@ pub const VFS_ALL_TABLE_NAMES: &[&str] = &[
     "media_progress",
     // 学习时长（V20261006，设备本地计数）
     "study_time_daily",
+    // 题组与材料（V20261021，Issue #491）
+    "question_groups",
+    "question_group_materials",
     // 本地辅助队列
     "__blob_deletion_queue",
     "__asset_deletion_queue",
     "__file_deletion_journal",
     "__lance_orphan_queue",
+    "__question_group_sync_staging",
     // FTS5 虚拟表
     "questions_fts",
     "notes_fts",
+    "question_group_materials_fts",
 ];
 
 /// VFS 数据库中的视图
 pub const VFS_VIEW_NAMES: &[&str] = &["trash_view"];
 
 /// VFS 数据库当前保留表总数（不含视图、虚拟表、已废弃表）
-pub const VFS_TABLE_COUNT: usize = 58;
+pub const VFS_TABLE_COUNT: usize = 61;
 
 /// VFS 数据库视图总数
 pub const VFS_VIEW_COUNT: usize = 1;
 
-/// VFS 数据库 FTS5 虚拟表总数（questions_fts + notes_fts）
-pub const VFS_FTS_TABLE_COUNT: usize = 2;
+/// VFS 数据库 FTS5 虚拟表总数（questions_fts + notes_fts + question_group_materials_fts）
+pub const VFS_FTS_TABLE_COUNT: usize = 3;
 
 // ============================================================================
 // 测试
@@ -1332,16 +1374,22 @@ mod tests {
 
     #[test]
     fn test_note_history_is_registered_as_vfs_schema_head() {
-        assert_eq!(VFS_SCHEMA_VERSION, 20261006);
+        assert_eq!(VFS_SCHEMA_VERSION, 20261021);
         assert_eq!(
             V20260912_QBANK_GENERATION_TASKS.expected_tables,
             &["qbank_generation_tasks"]
         );
         assert_eq!(
             VFS_MIGRATIONS.last().map(|migration| migration.name),
-            Some("study_time")
+            Some("question_groups")
         );
         assert_eq!(V20261006_STUDY_TIME.expected_tables, &["study_time_daily"]);
+        assert!(V20261021_QUESTION_GROUPS
+            .expected_tables
+            .contains(&"question_groups"));
+        assert!(V20261021_QUESTION_GROUPS
+            .expected_tables
+            .contains(&"question_group_materials"));
         assert!(V20260907_INSIGHT_CARDS
             .expected_tables
             .contains(&"insights"));

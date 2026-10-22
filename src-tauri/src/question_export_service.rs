@@ -73,6 +73,11 @@ pub const EXPORTABLE_FIELDS: &[(&str, &str)] = &[
     ("tags", "标签"),
     ("images", "关联图片"),
     ("question_label", "题号"),
+    // Issue #491：题组关系（扁平列；共享材料正文不在此展开，
+    // 需要展开材料请使用 question_bundle_service 的 CSV 投影）
+    ("group_id", "题组ID"),
+    ("sub_label", "组内小问标签"),
+    ("group_order", "组内顺序"),
     ("user_answer", "用户答案"),
     ("is_correct", "是否正确"),
     ("attempt_count", "答题次数"),
@@ -321,6 +326,12 @@ impl CsvExportService {
                 .unwrap_or_default(),
             "tags" => question.tags.join(","),
             "question_label" => question.question_label.clone().unwrap_or_default(),
+            "group_id" => question.group_id.clone().unwrap_or_default(),
+            "sub_label" => question.sub_label.clone().unwrap_or_default(),
+            "group_order" => question
+                .group_order
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             "user_answer" => question.user_answer.clone().unwrap_or_default(),
             "is_correct" => question
                 .is_correct

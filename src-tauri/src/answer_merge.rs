@@ -3,6 +3,15 @@
 //! Stems, option counts and block lengths are deliberately not identities. Ordinary
 //! questions are never deduplicated here. Non-question source blocks are excluded
 //! from publication, with matched evidence or a serializable quarantine record.
+//!
+//! Labeled answer tables (`1  2  3` over `B  C  A`, or `1. B`) are parsed from row
+//! and column coordinates. Every accepted cell carries its source id, section,
+//! row/col and byte spans. A label set such as `4、5` is reported as a set but is
+//! never expanded unless the source gives one explicit cell per label; compact
+//! strings and ragged rows become located `unsupported_answer_layout` /
+//! `ambiguous_multi_label_answer` records instead of guesses. Call
+//! [`collect_non_question_candidates`] before merging to hand materials, figures
+//! and headings to the typed assembly step; nothing is promoted to a question.
 
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -74,22 +83,35 @@ impl MergeItem {
             || self.json.get("requires_review").and_then(Value::as_bool) == Some(true)
     }
 
-    fn upgrade_legacy_marker(&mut self) {
+    /// Classification without mutation: pre-merge consumers (the typed assembly
+    /// step for shared materials) must see the same kinds the merge will use.
+    pub fn effective_kind(&self) -> ImportBlockKind {
         // A split/incomplete source cannot be promoted by an old text marker or
         // by a caller-provided kind. Recheck at merge time as metadata is public.
         if self.requires_review() {
-            self.kind = ImportBlockKind::Unknown;
-            return;
+            return ImportBlockKind::Unknown;
         }
-        if self.raw_text.trim_start().starts_with("[答案区]")
+        if self.has_legacy_answer_marker() {
+            return ImportBlockKind::Answer;
+        }
+        self.kind
+    }
+
+    fn has_legacy_answer_marker(&self) -> bool {
+        self.raw_text.trim_start().starts_with("[答案区]")
+            || self.raw_text.trim_start().starts_with("【答案区】")
             || self
                 .json
                 .get("content")
                 .and_then(Value::as_str)
-                .is_some_and(|s| s.trim_start().starts_with("[答案区]"))
-        {
-            self.kind = ImportBlockKind::Answer;
-        }
+                .is_some_and(|s| {
+                    s.trim_start().starts_with("[答案区]")
+                        || s.trim_start().starts_with("【答案区】")
+                })
+    }
+
+    fn upgrade_legacy_marker(&mut self) {
+        self.kind = self.effective_kind();
     }
 
     fn field(&self, field: &str) -> &str {
@@ -139,6 +161,9 @@ pub struct QuarantinedEntry {
     pub raw_text: String,
     pub json: Value,
     pub reason: String,
+    /// Row/column/byte-span evidence when the entry came from an answer table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<AnswerLayoutIssue>,
 }
 
 impl QuarantinedEntry {
@@ -151,7 +176,14 @@ impl QuarantinedEntry {
             raw_text: item.raw_text.clone(),
             json: item.json.clone(),
             reason: reason.to_string(),
+            layout: None,
         }
+    }
+
+    fn from_item_layout(item: &MergeItem, reason: &str, layout: Option<AnswerLayoutIssue>) -> Self {
+        let mut entry = Self::from_item(item, reason);
+        entry.layout = layout;
+        entry
     }
 }
 
@@ -176,6 +208,8 @@ pub struct MergeOutcome {
     pub answers_from_block: usize,
     pub unmatched_answer_entries: usize,
     pub answers_matched: usize,
+    /// Explicit (label, value) answer-table cells that carried their own evidence.
+    pub answer_table_cells: usize,
     pub matched: Vec<Value>,
     pub quarantined: Vec<QuarantinedEntry>,
     pub excluded: Vec<QuarantinedEntry>,
@@ -214,15 +248,16 @@ fn normalized_section(section: &str) -> String {
     }
 }
 
-fn find_target(item: &MergeItem, items: &[MergeItem]) -> Result<usize, &'static str> {
-    let label = normalized_label(&item.label);
+fn find_target_by_label(
+    label: &str,
+    section: &str,
+    items: &[MergeItem],
+) -> Result<usize, &'static str> {
+    let label = normalized_label(label);
     if label.is_empty() {
         return Err("missing_original_label");
     }
-    if !item.json.is_object() {
-        return Err("invalid_answer_payload");
-    }
-    let section = normalized_section(&item.section);
+    let section = normalized_section(section);
     let by_label: Vec<usize> = items
         .iter()
         .enumerate()
@@ -260,12 +295,931 @@ fn find_target(item: &MergeItem, items: &[MergeItem]) -> Result<usize, &'static 
     }
 }
 
-/// Link by unique (semantic section, original label), never by stem or position.
+fn find_target(item: &MergeItem, items: &[MergeItem]) -> Result<usize, &'static str> {
+    if normalized_label(&item.label).is_empty() {
+        return Err("missing_original_label");
+    }
+    if !item.json.is_object() {
+        return Err("invalid_answer_payload");
+    }
+    find_target_by_label(&item.label, &item.section, items)
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic labeled answer tables: row/column coordinates plus explicit
+// labels. A single answer cell may only be used when the source itself states
+// the label→value correspondence; equal counts are never treated as evidence.
+// ---------------------------------------------------------------------------
+
+/// A cell longer than this is prose, not a table cell.
+const MAX_ANSWER_CELL_CHARS: usize = 32;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerTableMapping {
+    /// `1 B` / `1. B`: the label and its value are adjacent in one cell or row.
+    CellPair,
+    /// A label row (`1  2  3`) followed by a value row aligned by column.
+    ColumnAlignment,
+    /// One enumerated label cell (`4、5`) with one distinct value cell per label.
+    LabelRun,
+}
+
+/// One answer cell. Text is never copied into reports; spans and hashes are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnswerCellEvidence {
+    pub source_id: String,
+    pub section: String,
+    /// 0-based line index inside the answer block's raw text.
+    pub row: usize,
+    /// 0-based cell index inside that line.
+    pub col: usize,
+    /// Byte range of the label in raw text.
+    pub label_span: [usize; 2],
+    /// Byte range of the value in raw text.
+    pub value_span: [usize; 2],
+    pub label_sha256: String,
+    pub value_sha256: String,
+    pub mapping: AnswerTableMapping,
+}
+
+/// Typed, located layout failure. `evidence_sha256` hashes the offending cell so
+/// diagnostics stay useful without duplicating answer text into reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AnswerLayoutIssue {
+    pub reason: &'static str,
+    pub source_id: String,
+    pub section: String,
+    pub row: usize,
+    pub col: Option<usize>,
+    pub span: [usize; 2],
+    pub evidence_sha256: String,
+    pub parsed_labels: Vec<String>,
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct TableCell<'a> {
+    text: &'a str,
+    /// Absolute byte range inside the answer block's raw text.
+    span: [usize; 2],
+}
+
+fn push_cell<'a>(
+    cells: &mut Vec<TableCell<'a>>,
+    line: &'a str,
+    start: usize,
+    end: usize,
+    base: usize,
+) {
+    let raw = &line[start..end];
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let offset = raw.len() - raw.trim_start().len();
+    let begin = base + start + offset;
+    cells.push(TableCell {
+        text: trimmed,
+        span: [begin, begin + trimmed.len()],
+    });
+}
+
+/// Split on `|`, tab, ideographic space and runs of two or more spaces. A single
+/// space stays inside a cell so `1 B` remains one auditable cell.
+fn split_cells(line: &str, base: usize) -> Vec<TableCell<'_>> {
+    let mut cells = Vec::new();
+    let mut cursor: Option<usize> = None;
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        let separator = match ch {
+            '\t' | '\u{3000}' | '|' => true,
+            ' ' => {
+                let mut run = 1;
+                while let Some(&(_, ' ')) = chars.peek() {
+                    chars.next();
+                    run += 1;
+                }
+                run >= 2
+            }
+            _ => false,
+        };
+        if separator {
+            if let Some(start) = cursor.take() {
+                push_cell(&mut cells, line, start, idx, base);
+            }
+        } else if cursor.is_none() {
+            cursor = Some(idx);
+        }
+    }
+    if let Some(start) = cursor {
+        push_cell(&mut cells, line, start, line.len(), base);
+    }
+    cells
+}
+
+fn cell_tokens<'a>(cell: &TableCell<'a>) -> Vec<TableCell<'a>> {
+    let mut tokens = Vec::new();
+    let mut cursor: Option<usize> = None;
+    for (idx, ch) in cell.text.char_indices() {
+        if ch.is_whitespace() {
+            if let Some(start) = cursor.take() {
+                tokens.push(TableCell {
+                    text: &cell.text[start..idx],
+                    span: [cell.span[0] + start, cell.span[0] + idx],
+                });
+            }
+        } else if cursor.is_none() {
+            cursor = Some(idx);
+        }
+    }
+    if let Some(start) = cursor {
+        tokens.push(TableCell {
+            text: &cell.text[start..],
+            span: [cell.span[0] + start, cell.span[0] + cell.text.len()],
+        });
+    }
+    tokens
+}
+
+fn range_bounds(part: &str) -> Option<(u32, u32)> {
+    for separator in ["-", "~", "～", "—", "–", "至"] {
+        if let Some((low, high)) = part.split_once(separator) {
+            return Some((low.trim().parse().ok()?, high.trim().parse().ok()?));
+        }
+    }
+    None
+}
+
+/// Parse one label cell into its explicit label set. `4、5` and `1-5` are sets;
+/// the set is reported as evidence even when the mapping itself is rejected.
+fn label_set(text: &str) -> Option<Vec<String>> {
+    let mut label = text.trim();
+    if label.is_empty() {
+        return None;
+    }
+    label = label.trim_start_matches(['(', '（', '[', '【', '〔']);
+    label = label.trim_end_matches([
+        ')', '）', ']', '】', '〕', '.', '．', '、', ':', '：', ',', '，',
+    ]);
+    label = label.trim();
+    if let Some(rest) = label.strip_prefix('第') {
+        label = rest;
+    }
+    if let Some(rest) = label.strip_suffix('题') {
+        label = rest;
+    }
+    label = label.trim();
+    let label = label
+        .strip_prefix(['Q', 'q'])
+        .filter(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .unwrap_or(label);
+    if label.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = label
+        .split(['、', ',', '，', '/', '|'])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let mut labels = Vec::new();
+    for part in parts {
+        if let Some((low, high)) = range_bounds(part) {
+            if high < low || high - low > 60 {
+                return None;
+            }
+            for number in low..=high {
+                labels.push(number.to_string());
+            }
+        } else if part.chars().all(|c| c.is_ascii_digit()) && part.len() <= 4 {
+            labels.push(part.to_string());
+        } else {
+            return None;
+        }
+    }
+    (!labels.is_empty()).then_some(labels)
+}
+
+fn is_answer_value(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > MAX_ANSWER_CELL_CHARS {
+        return false;
+    }
+    if text.contains(['。', '；', ';', '|', '】']) {
+        return false;
+    }
+    text.chars()
+        .any(|c| c.is_alphanumeric() || "√×±°′″+-−=<>÷≈≤≥/".contains(c))
+}
+
+#[derive(Debug)]
+enum RowShape<'a> {
+    /// No cell could be read as a label or a value.
+    Text,
+    /// `1 B`, `1. B  2. C` — every pair is explicit in the source.
+    Pairs(Vec<(usize, TableCell<'a>, TableCell<'a>)>),
+    /// `4、5  B  D` — one enumerated label cell with one value cell per label.
+    LabelRun {
+        label: TableCell<'a>,
+        labels: Vec<String>,
+        values: Vec<TableCell<'a>>,
+        start_col: usize,
+    },
+    /// `1  2  3`
+    Header(Vec<TableCell<'a>>),
+    /// Row of values under a label header, aligned by column.
+    Values(Vec<TableCell<'a>>),
+    /// Values without any label row in the same block.
+    UnlabeledValues(Vec<TableCell<'a>>),
+    Unsolvable {
+        reason: &'static str,
+        col: Option<usize>,
+        span: [usize; 2],
+        sha: String,
+        labels: Vec<String>,
+    },
+}
+
+fn classify_cells<'a>(
+    cells: Vec<TableCell<'a>>,
+    pending_header: bool,
+    strong_columns: bool,
+) -> RowShape<'a> {
+    let cell_count = cells.len();
+    let logical: Vec<TableCell<'a>> = cells
+        .into_iter()
+        .filter(|cell| label_set(cell.text).is_some() || is_answer_value(cell.text))
+        .collect();
+    if logical.is_empty() {
+        return RowShape::Text;
+    }
+    if logical.len() != cell_count {
+        // A long prose cell in a single-cell line is an answer, not a table row.
+        if !strong_columns {
+            return RowShape::Text;
+        }
+        // A prose cell next to numbered columns cannot be aligned deterministically.
+        return RowShape::Unsolvable {
+            reason: "unsupported_answer_layout",
+            col: None,
+            span: [logical[0].span[0], logical[logical.len() - 1].span[1]],
+            sha: sha256_hex(logical[0].text),
+            labels: Vec::new(),
+        };
+    }
+    let all_labels = logical.iter().all(|cell| label_set(cell.text).is_some());
+    if all_labels {
+        return if pending_header {
+            RowShape::Values(logical)
+        } else {
+            RowShape::Header(logical)
+        };
+    }
+    // A row that starts with a value can only be a value row; anything else is
+    // an unlabeled value list that cannot be attributed deterministically.
+    if label_set(logical[0].text).is_none() {
+        return if pending_header {
+            RowShape::Values(logical)
+        } else if strong_columns {
+            RowShape::UnlabeledValues(logical)
+        } else {
+            // Whitespace-separated tokens without a label are usually prose.
+            RowShape::Text
+        };
+    }
+    let mut pairs = Vec::new();
+    let mut run: Option<RowShape<'a>> = None;
+    let mut index = 0;
+    while index < logical.len() {
+        let Some(labels) = label_set(logical[index].text) else {
+            return RowShape::Unsolvable {
+                reason: "unsupported_answer_layout",
+                col: Some(index),
+                span: logical[index].span,
+                sha: sha256_hex(logical[index].text),
+                labels: Vec::new(),
+            };
+        };
+        let label = logical[index].clone();
+        if labels.len() == 1 {
+            let Some(value) = logical.get(index + 1) else {
+                return RowShape::Unsolvable {
+                    reason: "unsupported_answer_layout",
+                    col: Some(index),
+                    span: label.span,
+                    sha: sha256_hex(label.text),
+                    labels,
+                };
+            };
+            if label_set(value.text).is_some() && !is_answer_value(value.text) {
+                return RowShape::Unsolvable {
+                    reason: "unsupported_answer_layout",
+                    col: Some(index + 1),
+                    span: value.span,
+                    sha: sha256_hex(value.text),
+                    labels,
+                };
+            }
+            if !is_answer_value(value.text) {
+                return RowShape::Unsolvable {
+                    reason: "unsupported_answer_layout",
+                    col: Some(index + 1),
+                    span: value.span,
+                    sha: sha256_hex(value.text),
+                    labels,
+                };
+            }
+            pairs.push((index, label, value.clone()));
+            index += 2;
+        } else {
+            let values: Vec<TableCell<'a>> = logical
+                .iter()
+                .skip(index + 1)
+                .take(labels.len())
+                .cloned()
+                .collect();
+            if values.len() < labels.len() {
+                return RowShape::Unsolvable {
+                    reason: "ambiguous_multi_label_answer",
+                    col: Some(index),
+                    span: label.span,
+                    sha: sha256_hex(label.text),
+                    labels,
+                };
+            }
+            if index + 1 + labels.len() != logical.len() {
+                return RowShape::Unsolvable {
+                    reason: "unsupported_answer_layout",
+                    col: Some(index),
+                    span: label.span,
+                    sha: sha256_hex(label.text),
+                    labels,
+                };
+            }
+            if run.is_some() || !pairs.is_empty() {
+                return RowShape::Unsolvable {
+                    reason: "unsupported_answer_layout",
+                    col: Some(index),
+                    span: label.span,
+                    sha: sha256_hex(label.text),
+                    labels,
+                };
+            }
+            let start_col = index + 1;
+            run = Some(RowShape::LabelRun {
+                label,
+                labels,
+                values,
+                start_col,
+            });
+            index = logical.len();
+        }
+    }
+    match run {
+        Some(shape) => shape,
+        None => RowShape::Pairs(pairs),
+    }
+}
+
+fn strip_answer_marker(raw: &str) -> (&str, usize) {
+    let lead = raw.len() - raw.trim_start().len();
+    let rest = &raw[lead..];
+    for marker in ["[答案区]", "【答案区】"] {
+        if rest.starts_with(marker) {
+            let consumed = lead + marker.len();
+            return (&raw[consumed..], consumed);
+        }
+    }
+    (raw, 0)
+}
+
+fn lines_with_offsets(text: &str) -> Vec<(usize, &str)> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            lines.push((start, &text[start..index]));
+            start = index + 1;
+        }
+    }
+    lines.push((start, &text[start..]));
+    lines
+}
+
+#[derive(Debug, Clone)]
+struct AnswerAtom {
+    label: String,
+    value: String,
+    evidence: AnswerCellEvidence,
+}
+
+#[derive(Debug, Default)]
+struct ParsedAnswerTable {
+    atoms: Vec<AnswerAtom>,
+    issues: Vec<AnswerLayoutIssue>,
+    /// Whether the block carries real column structure (or an explicit
+    /// multi-label cell). Without it a single label/value line stays legacy.
+    table_like: bool,
+}
+
+fn row_span(cells: &[TableCell<'_>]) -> [usize; 2] {
+    [
+        cells.first().map(|cell| cell.span[0]).unwrap_or(0),
+        cells.last().map(|cell| cell.span[1]).unwrap_or(0),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_issue(
+    reason: &'static str,
+    source_id: &str,
+    section: &str,
+    row: usize,
+    col: Option<usize>,
+    span: [usize; 2],
+    evidence_sha256: String,
+    parsed_labels: Vec<String>,
+) -> AnswerLayoutIssue {
+    AnswerLayoutIssue {
+        reason,
+        source_id: source_id.to_string(),
+        section: section.to_string(),
+        row,
+        col,
+        span,
+        evidence_sha256,
+        parsed_labels,
+    }
+}
+
+fn cell_evidence(
+    source_id: &str,
+    section: &str,
+    row: usize,
+    col: usize,
+    label: &TableCell<'_>,
+    value: &TableCell<'_>,
+    mapping: AnswerTableMapping,
+) -> AnswerCellEvidence {
+    AnswerCellEvidence {
+        source_id: source_id.to_string(),
+        section: section.to_string(),
+        row,
+        col,
+        label_span: label.span,
+        value_span: value.span,
+        label_sha256: sha256_hex(label.text),
+        value_sha256: sha256_hex(value.text),
+        mapping,
+    }
+}
+
+/// Deterministic parse of one answer block. Only explicit correspondences are
+/// emitted: adjacent cell pairs, a value row under a label header, or one
+/// enumerated label cell with one distinct value cell per label. Equal counts, a
+/// single value for several labels and compact `1-5 BCADB` strings are reported
+/// as located issues instead of being expanded by guesswork.
+fn parse_answer_table(raw_text: &str, source_id: &str, section: &str) -> ParsedAnswerTable {
+    let (text, base) = strip_answer_marker(raw_text);
+    let mut rows: Vec<(usize, RowShape<'_>, bool)> = Vec::new();
+    for (row, (offset, line)) in lines_with_offsets(text).into_iter().enumerate() {
+        let cells = split_cells(line, base + offset);
+        if cells.is_empty() {
+            continue;
+        }
+        let strong_columns = cells.len() > 1;
+        let shape = if cells.len() == 1 {
+            let tokens = cell_tokens(&cells[0]);
+            if tokens.len() < 2 {
+                RowShape::Text
+            } else {
+                classify_cells(tokens, false, false)
+            }
+        } else {
+            classify_cells(cells, false, true)
+        };
+        rows.push((row, shape, strong_columns));
+    }
+
+    let table_like = rows.iter().any(|(_, shape, strong_columns)| {
+        *strong_columns
+            || matches!(
+                shape,
+                RowShape::Pairs(_)
+                    | RowShape::LabelRun { .. }
+                    | RowShape::Unsolvable {
+                        reason: "ambiguous_multi_label_answer",
+                        ..
+                    }
+            )
+    });
+    if !table_like {
+        // A plain answer such as `B C` or `1. 一段定义` must stay a plain answer.
+        return ParsedAnswerTable::default();
+    }
+
+    let mut out = ParsedAnswerTable {
+        table_like,
+        ..ParsedAnswerTable::default()
+    };
+    let mut pending: Option<(Vec<TableCell<'_>>, usize)> = None;
+    for (row, shape, _) in rows {
+        let shape = match shape {
+            RowShape::Header(cells) if pending.is_some() => RowShape::Values(cells),
+            RowShape::UnlabeledValues(cells) if pending.is_some() => RowShape::Values(cells),
+            other => other,
+        };
+        match shape {
+            RowShape::Text => {}
+            RowShape::Header(cells) => {
+                if let Some((previous, previous_row)) = pending.take() {
+                    out.issues.push(layout_issue(
+                        "unsupported_answer_layout",
+                        source_id,
+                        section,
+                        previous_row,
+                        None,
+                        row_span(&previous),
+                        sha256_hex(previous[0].text),
+                        Vec::new(),
+                    ));
+                }
+                pending = Some((cells, row));
+            }
+            RowShape::Values(values) => match pending.take() {
+                Some((header, _)) if header.len() == values.len() => {
+                    for (col, (label_cell, value_cell)) in
+                        header.iter().zip(values.iter()).enumerate()
+                    {
+                        let labels = label_set(label_cell.text).unwrap_or_default();
+                        if labels.len() != 1 {
+                            out.issues.push(layout_issue(
+                                "ambiguous_multi_label_answer",
+                                source_id,
+                                section,
+                                row,
+                                Some(col),
+                                value_cell.span,
+                                sha256_hex(value_cell.text),
+                                labels,
+                            ));
+                            continue;
+                        }
+                        out.atoms.push(AnswerAtom {
+                            label: labels[0].clone(),
+                            value: value_cell.text.to_string(),
+                            evidence: cell_evidence(
+                                source_id,
+                                section,
+                                row,
+                                col,
+                                label_cell,
+                                value_cell,
+                                AnswerTableMapping::ColumnAlignment,
+                            ),
+                        });
+                    }
+                }
+                Some((header, header_row)) => out.issues.push(layout_issue(
+                    "unsupported_answer_layout",
+                    source_id,
+                    section,
+                    header_row,
+                    None,
+                    row_span(&header),
+                    sha256_hex(header[0].text),
+                    header
+                        .iter()
+                        .filter_map(|cell| label_set(cell.text))
+                        .flatten()
+                        .collect(),
+                )),
+                None => out.issues.push(layout_issue(
+                    "unsupported_answer_layout",
+                    source_id,
+                    section,
+                    row,
+                    Some(0),
+                    row_span(&values),
+                    sha256_hex(values[0].text),
+                    Vec::new(),
+                )),
+            },
+            RowShape::Pairs(pairs) => {
+                if let Some((header, header_row)) = pending.take() {
+                    out.issues.push(layout_issue(
+                        "unsupported_answer_layout",
+                        source_id,
+                        section,
+                        header_row,
+                        None,
+                        row_span(&header),
+                        sha256_hex(header[0].text),
+                        Vec::new(),
+                    ));
+                }
+                for (col, label_cell, value_cell) in pairs {
+                    let labels = label_set(label_cell.text).unwrap_or_default();
+                    if labels.len() != 1 {
+                        out.issues.push(layout_issue(
+                            "ambiguous_multi_label_answer",
+                            source_id,
+                            section,
+                            row,
+                            Some(col),
+                            label_cell.span,
+                            sha256_hex(label_cell.text),
+                            labels,
+                        ));
+                        continue;
+                    }
+                    out.atoms.push(AnswerAtom {
+                        label: labels[0].clone(),
+                        value: value_cell.text.to_string(),
+                        evidence: cell_evidence(
+                            source_id,
+                            section,
+                            row,
+                            col,
+                            &label_cell,
+                            &value_cell,
+                            AnswerTableMapping::CellPair,
+                        ),
+                    });
+                }
+            }
+            RowShape::LabelRun {
+                label,
+                labels,
+                values,
+                start_col,
+            } => {
+                if let Some((header, header_row)) = pending.take() {
+                    out.issues.push(layout_issue(
+                        "unsupported_answer_layout",
+                        source_id,
+                        section,
+                        header_row,
+                        None,
+                        row_span(&header),
+                        sha256_hex(header[0].text),
+                        Vec::new(),
+                    ));
+                }
+                for (offset, value_cell) in values.iter().enumerate() {
+                    let Some(target_label) = labels.get(offset) else {
+                        continue;
+                    };
+                    out.atoms.push(AnswerAtom {
+                        label: target_label.clone(),
+                        value: value_cell.text.to_string(),
+                        evidence: cell_evidence(
+                            source_id,
+                            section,
+                            row,
+                            start_col + offset,
+                            &label,
+                            value_cell,
+                            AnswerTableMapping::LabelRun,
+                        ),
+                    });
+                }
+            }
+            RowShape::UnlabeledValues(values) => out.issues.push(layout_issue(
+                "unsupported_answer_layout",
+                source_id,
+                section,
+                row,
+                Some(0),
+                row_span(&values),
+                sha256_hex(values[0].text),
+                Vec::new(),
+            )),
+            RowShape::Unsolvable {
+                reason,
+                col,
+                span,
+                sha,
+                labels,
+            } => out.issues.push(layout_issue(
+                reason, source_id, section, row, col, span, sha, labels,
+            )),
+        }
+    }
+    if let Some((header, header_row)) = pending {
+        out.issues.push(layout_issue(
+            "unsupported_answer_layout",
+            source_id,
+            section,
+            header_row,
+            None,
+            row_span(&header),
+            sha256_hex(header[0].text),
+            Vec::new(),
+        ));
+    }
+    out
+}
+
+#[derive(Debug)]
+struct FieldProposal {
+    donor: usize,
+    field: &'static str,
+    value: String,
+    evidence: Option<AnswerCellEvidence>,
+}
+
+#[derive(Debug, Default)]
+struct DonorExpansion {
+    assignments: Vec<(usize, &'static str, String, Option<AnswerCellEvidence>)>,
+    quarantine: Vec<(String, Option<AnswerLayoutIssue>)>,
+    table_cells: usize,
+}
+
+fn expand_typed_fields(item: &MergeItem, items: &[MergeItem], expansion: &mut DonorExpansion) {
+    let values: Vec<(&'static str, String)> = ["answer", "explanation"]
+        .into_iter()
+        .filter_map(|field| {
+            let value = item.payload(field);
+            (!value.is_empty()).then(|| (field, value.to_string()))
+        })
+        .collect();
+    if values.is_empty() {
+        expansion
+            .quarantine
+            .push(("empty_answer_payload".to_string(), None));
+        return;
+    }
+    match find_target(item, items) {
+        Ok(target) => {
+            for (field, value) in values {
+                expansion.assignments.push((target, field, value, None));
+            }
+        }
+        Err(reason) => expansion.quarantine.push((reason.to_string(), None)),
+    }
+}
+
+fn expand_donor(index: usize, items: &[MergeItem]) -> DonorExpansion {
+    let item = &items[index];
+    let mut expansion = DonorExpansion::default();
+    if item.kind != ImportBlockKind::Answer {
+        expand_typed_fields(item, items, &mut expansion);
+        return expansion;
+    }
+    let parsed = parse_answer_table(&item.raw_text, &item.source_id, &item.section);
+    let donor_label = normalized_label(&item.label);
+    let single_explicit = parsed.issues.is_empty()
+        && parsed.atoms.len() == 1
+        && !donor_label.is_empty()
+        && normalized_label(&parsed.atoms[0].label) == donor_label;
+    if single_explicit || !parsed.table_like {
+        expand_typed_fields(item, items, &mut expansion);
+        if single_explicit {
+            if let Some(atom) = parsed.atoms.into_iter().next() {
+                for assignment in expansion.assignments.iter_mut() {
+                    if assignment.1 == "answer" && assignment.3.is_none() {
+                        assignment.3 = Some(atom.evidence.clone());
+                    }
+                }
+            }
+        }
+        return expansion;
+    }
+
+    let ParsedAnswerTable { atoms, issues, .. } = parsed;
+    let atom_labels: Vec<String> = atoms.iter().map(|atom| atom.label.clone()).collect();
+    let verified = item.evidence_verified("answer");
+    let mut unverified: Option<AnswerCellEvidence> = None;
+    for atom in atoms {
+        expansion.table_cells += 1;
+        if !verified {
+            if unverified.is_none() {
+                unverified = Some(atom.evidence.clone());
+            }
+            continue;
+        }
+        match find_target_by_label(&atom.label, &item.section, items) {
+            Ok(target) => {
+                expansion
+                    .assignments
+                    .push((target, "answer", atom.value, Some(atom.evidence)))
+            }
+            Err(reason) => expansion.quarantine.push((
+                reason.to_string(),
+                Some(layout_issue(
+                    reason,
+                    &atom.evidence.source_id,
+                    &atom.evidence.section,
+                    atom.evidence.row,
+                    Some(atom.evidence.col),
+                    atom.evidence.value_span,
+                    atom.evidence.value_sha256.clone(),
+                    vec![atom.label.clone()],
+                )),
+            )),
+        }
+    }
+    if let Some(evidence) = unverified {
+        expansion.quarantine.push((
+            "answer_evidence_not_verified".to_string(),
+            Some(layout_issue(
+                "answer_evidence_not_verified",
+                &evidence.source_id,
+                &evidence.section,
+                evidence.row,
+                Some(evidence.col),
+                evidence.value_span,
+                evidence.value_sha256,
+                Vec::new(),
+            )),
+        ));
+    }
+    for issue in issues {
+        expansion
+            .quarantine
+            .push((issue.reason.to_string(), Some(issue)));
+    }
+    // A block-level explanation is only usable when its own label matches an
+    // explicit table cell; otherwise it stays review material.
+    let explanation = item.field("explanation").trim();
+    if !explanation.is_empty() {
+        let exact = !donor_label.is_empty()
+            && atom_labels
+                .iter()
+                .any(|label| normalized_label(label) == donor_label);
+        if exact {
+            if let Ok(target) = find_target_by_label(&donor_label, &item.section, items) {
+                expansion
+                    .assignments
+                    .push((target, "explanation", explanation.to_string(), None));
+            }
+        } else {
+            expansion
+                .quarantine
+                .push(("explanation_without_explicit_label".to_string(), None));
+        }
+    }
+    expansion
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NonQuestionCandidate {
+    pub index: usize,
+    pub label: String,
+    pub block_kind: ImportBlockKind,
+    pub section: String,
+    pub source_id: String,
+    pub raw_text: String,
+    pub json: Value,
+}
+
+impl NonQuestionCandidate {
+    pub fn is_material(&self) -> bool {
+        self.block_kind == ImportBlockKind::Material
+    }
+}
+
+/// Snapshot every non-question candidate before `merge_answer_sections` excludes
+/// it, so shared materials, figures and headings can be handed to the typed
+/// assembly step instead of being silently dropped. Pure: no mutation.
+pub fn collect_non_question_candidates(items: &[MergeItem]) -> Vec<NonQuestionCandidate> {
+    items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| {
+            let kind = item.effective_kind();
+            (kind != ImportBlockKind::Question).then(|| NonQuestionCandidate {
+                index,
+                label: item.label.clone(),
+                block_kind: kind,
+                section: item.section.clone(),
+                source_id: item.source_id.clone(),
+                raw_text: item.raw_text.clone(),
+                json: item.json.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Missing scope requires global label uniqueness. Conflicting values never
 /// overwrite the original question, including a blank original with two donors.
 pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
     let mut outcome = MergeOutcome::default();
-    let mut by_target: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut by_target: BTreeMap<usize, Vec<FieldProposal>> = BTreeMap::new();
     for item in items.iter_mut() {
         item.upgrade_legacy_marker();
     }
@@ -283,11 +1237,22 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
                 ));
             }
             ImportBlockKind::Answer | ImportBlockKind::Explanation => {
-                match find_target(&items[index], items) {
-                    Ok(target) => by_target.entry(target).or_default().push(index),
-                    Err(reason) => outcome
-                        .quarantined
-                        .push(QuarantinedEntry::from_item(&items[index], reason)),
+                let expansion = expand_donor(index, items);
+                outcome.answer_table_cells += expansion.table_cells;
+                for (target, field, value, evidence) in expansion.assignments {
+                    by_target.entry(target).or_default().push(FieldProposal {
+                        donor: index,
+                        field,
+                        value,
+                        evidence,
+                    });
+                }
+                for (reason, layout) in expansion.quarantine {
+                    outcome.quarantined.push(QuarantinedEntry::from_item_layout(
+                        &items[index],
+                        &reason,
+                        layout,
+                    ));
                 }
             }
             _ => outcome.quarantined.push(QuarantinedEntry::from_item(
@@ -301,27 +1266,27 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
         }
     }
 
-    for (target, donors) in by_target {
-        let mut matched_fields: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
-        let mut conflicting_donors = Vec::new();
+    for (target, proposals) in by_target {
+        let mut matched_fields: BTreeMap<usize, Vec<&'static str>> = BTreeMap::new();
+        let mut matched_evidence: BTreeMap<usize, Vec<AnswerCellEvidence>> = BTreeMap::new();
+        let mut conflicting_donors: Vec<usize> = Vec::new();
         let mut rejected_donors: HashSet<(usize, &'static str)> = HashSet::new();
         let mut filled_answer = false;
         for field in ["answer", "explanation"] {
             let field: &'static str = field;
             let original = items[target].field(field).trim().to_string();
-            let mut values: Vec<(usize, String)> = Vec::new();
-            for index in donors.iter().copied() {
-                let value = items[index].payload(field);
-                if value.is_empty() {
+            let mut values: Vec<(usize, String, Option<AnswerCellEvidence>)> = Vec::new();
+            for proposal in proposals.iter().filter(|proposal| proposal.field == field) {
+                if proposal.value.is_empty() {
                     continue;
                 }
                 // A donor that explicitly failed evidence verification never
                 // transfers the field. Other verified fields from the same donor
                 // may still be used.
-                if !items[index].evidence_verified(field) {
-                    if rejected_donors.insert((index, field)) {
+                if !items[proposal.donor].evidence_verified(field) {
+                    if rejected_donors.insert((proposal.donor, field)) {
                         outcome.quarantined.push(QuarantinedEntry::from_item(
-                            &items[index],
+                            &items[proposal.donor],
                             if field == "answer" {
                                 "answer_evidence_not_verified"
                             } else {
@@ -331,9 +1296,13 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
                     }
                     continue;
                 }
-                values.push((index, value.to_string()));
+                values.push((
+                    proposal.donor,
+                    proposal.value.clone(),
+                    proposal.evidence.clone(),
+                ));
             }
-            let Some((_, proposed)) = values.first() else {
+            let Some((_, proposed, _)) = values.first() else {
                 continue;
             };
             let reference = if original.is_empty() {
@@ -341,9 +1310,9 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
             } else {
                 original.as_str()
             };
-            let conflict = values.iter().any(|(_, value)| value != reference);
+            let conflict = values.iter().any(|(_, value, _)| value != reference);
             if conflict {
-                for (index, incoming) in &values {
+                for (index, incoming, _) in &values {
                     if !conflicting_donors.contains(index) {
                         conflicting_donors.push(*index);
                     }
@@ -364,16 +1333,25 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
                 items[target].json[field] = Value::String(proposed.clone());
                 filled_answer |= field == "answer";
             }
-            for (index, _) in values {
-                matched_fields.entry(index).or_default().push(field);
+            for (index, _, evidence) in &values {
+                matched_fields.entry(*index).or_default().push(field);
+                if let Some(evidence) = evidence {
+                    matched_evidence
+                        .entry(*index)
+                        .or_default()
+                        .push(evidence.clone());
+                }
             }
         }
         if filled_answer {
             outcome.answers_matched += 1;
         }
+        let mut donors: Vec<usize> = proposals.iter().map(|proposal| proposal.donor).collect();
+        donors.sort_unstable();
+        donors.dedup();
         for index in donors {
             if let Some(fields) = matched_fields.get(&index) {
-                outcome.matched.push(json!({
+                let mut entry = json!({
                     "target_source_id": items[target].source_id,
                     "target_label": items[target].label,
                     "target_section": items[target].section,
@@ -384,7 +1362,12 @@ pub fn merge_answer_sections(items: &mut [MergeItem]) -> MergeOutcome {
                     "raw_text": items[index].raw_text,
                     "json": items[index].json,
                     "matched_fields": fields,
-                }));
+                });
+                if let Some(evidence) = matched_evidence.get(&index) {
+                    entry["answer_evidence"] =
+                        serde_json::to_value(evidence).unwrap_or(Value::Null);
+                }
+                outcome.matched.push(entry);
             }
             if conflicting_donors.contains(&index) {
                 outcome.quarantined.push(QuarantinedEntry::from_item(
@@ -782,5 +1765,327 @@ mod tests {
         assert_eq!(items[0].json["answer"], "B");
         assert_eq!(outcome.answers_matched, 1);
         assert!(outcome.quarantined.is_empty());
+    }
+
+    fn table_answer(section: &str, label: &str, raw: &str) -> MergeItem {
+        MergeItem::new(label.to_string(), json!({"content":"答案表","answer":null}))
+            .with_source(
+                ImportBlockKind::Answer,
+                section,
+                format!("a:table:{section}:{label}"),
+            )
+            .with_raw_text(raw)
+    }
+
+    #[test]
+    fn answer_table_header_and_value_row_map_by_column() {
+        let mut items: Vec<MergeItem> = (1..=5)
+            .map(|n| question("single_choice", &n.to_string(), &format!("题干{n}")))
+            .collect();
+        items.push(table_answer(
+            "single_choice",
+            "",
+            "参考答案\n1  2  3  4  5\nB  C  A  D  B",
+        ));
+        let outcome = merge_answer_sections(&mut items);
+        assert!(outcome.quarantined.is_empty(), "{:?}", outcome.quarantined);
+        assert!(outcome.conflicts.is_empty());
+        assert_eq!(outcome.answer_table_cells, 5);
+        assert_eq!(outcome.answers_matched, 5);
+        assert_eq!(outcome.matched.len(), 5);
+        assert_eq!(items[0].json["answer"], "B");
+        assert_eq!(items[2].json["answer"], "A");
+        assert_eq!(items[4].json["answer"], "B");
+        let evidence = &outcome.matched[0]["answer_evidence"][0];
+        assert_eq!(evidence["row"], 2);
+        assert_eq!(evidence["col"], 0);
+        assert_eq!(evidence["section"], "single_choice");
+        assert_eq!(evidence["mapping"], "column_alignment");
+        assert!(evidence["label_span"][0].as_u64().unwrap() > 0);
+        assert!(
+            evidence["value_span"][1].as_u64().unwrap()
+                > evidence["value_span"][0].as_u64().unwrap()
+        );
+        // Text is not copied into evidence; only spans and hashes are.
+        assert!(evidence.get("value_text").is_none());
+        assert_eq!(evidence["value_sha256"].as_str().map(str::len), Some(64));
+    }
+
+    /// Red case from the old production source: a whole answer table arriving
+    /// as one block labelled `1` used to be written into question 1 verbatim.
+    #[test]
+    fn answer_table_block_with_single_vlm_label_still_uses_every_cell() {
+        let mut items: Vec<MergeItem> = (1..=5)
+            .map(|n| question("single_choice", &n.to_string(), &format!("题干{n}")))
+            .collect();
+        items.push(table_answer(
+            "single_choice",
+            "1",
+            "1  2  3  4  5\nB  C  A  D  B",
+        ));
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 5);
+        assert_eq!(outcome.answer_table_cells, 5);
+        assert_eq!(items[0].json["answer"], "B");
+        assert_eq!(items[1].json["answer"], "C");
+        assert_eq!(items[2].json["answer"], "A");
+        assert_eq!(items[3].json["answer"], "D");
+        assert_eq!(items[4].json["answer"], "B");
+        assert!(outcome.quarantined.is_empty(), "{:?}", outcome.quarantined);
+    }
+
+    #[test]
+    fn answer_table_labeled_rows_keep_row_col_evidence() {
+        let mut items = vec![
+            question("short_answer", "1", "第一题"),
+            question("short_answer", "2", "第二题"),
+            table_answer("short_answer", "", "1. 甲\n2. 乙"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 2);
+        assert_eq!(items[0].json["answer"], "甲");
+        assert_eq!(items[1].json["answer"], "乙");
+        assert_eq!(outcome.matched[0]["answer_evidence"][0]["row"], 0);
+        assert_eq!(outcome.matched[1]["answer_evidence"][0]["row"], 1);
+        assert_eq!(outcome.matched[1]["answer_evidence"][0]["col"], 0);
+        assert_eq!(
+            outcome.matched[0]["answer_evidence"][0]["mapping"],
+            "cell_pair"
+        );
+    }
+
+    #[test]
+    fn multi_label_cell_with_single_value_is_not_duplicated() {
+        let mut items = vec![
+            question("single_choice", "4", "第四题"),
+            question("single_choice", "5", "第五题"),
+            table_answer("single_choice", "", "4、5  B"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 0);
+        assert_eq!(outcome.answer_table_cells, 0);
+        assert!(items[0].json["answer"].is_null());
+        assert!(items[1].json["answer"].is_null());
+        assert_eq!(outcome.quarantined.len(), 1);
+        assert_eq!(
+            outcome.quarantined[0].reason,
+            "ambiguous_multi_label_answer"
+        );
+        let layout = outcome.quarantined[0]
+            .layout
+            .as_ref()
+            .expect("located issue");
+        assert_eq!(layout.parsed_labels, vec!["4".to_string(), "5".to_string()]);
+        assert_eq!(layout.row, 0);
+        assert_eq!(layout.col, Some(0));
+        assert!(!layout.evidence_sha256.is_empty());
+        assert_eq!(layout.evidence_sha256.len(), 64);
+    }
+
+    #[test]
+    fn compact_range_answer_string_is_not_count_matched() {
+        let mut items: Vec<MergeItem> = (1..=5)
+            .map(|n| question("single_choice", &n.to_string(), &format!("题干{n}")))
+            .collect();
+        items.push(table_answer("single_choice", "", "1-5 BCADB"));
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 0);
+        assert!(items[..5].iter().all(|item| item.json["answer"].is_null()));
+        assert_eq!(
+            outcome.quarantined[0].reason,
+            "ambiguous_multi_label_answer"
+        );
+        assert_eq!(
+            outcome.quarantined[0]
+                .layout
+                .as_ref()
+                .unwrap()
+                .parsed_labels
+                .len(),
+            5
+        );
+    }
+
+    #[test]
+    fn ragged_answer_table_reports_unsupported_layout_with_location() {
+        let mut items = vec![
+            question("single_choice", "1", "第一题"),
+            table_answer("single_choice", "", "1  B  C"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 0);
+        assert!(items[0].json["answer"].is_null());
+        assert_eq!(outcome.quarantined.len(), 1);
+        assert_eq!(outcome.quarantined[0].reason, "unsupported_answer_layout");
+        let layout = outcome.quarantined[0]
+            .layout
+            .as_ref()
+            .expect("located issue");
+        assert_eq!(layout.row, 0);
+        assert_eq!(layout.col, Some(2));
+        assert!(layout.span[1] > layout.span[0]);
+        assert_eq!(layout.source_id, "a:table:single_choice:");
+        assert_eq!(layout.section, "single_choice");
+    }
+
+    #[test]
+    fn answer_table_never_crosses_sections() {
+        let mut items = vec![
+            question("term_definition", "1", "名词一"),
+            question("term_definition", "2", "名词二"),
+            table_answer("single_choice", "", "1  2\nB  C"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 0);
+        assert!(items[..2].iter().all(|item| item.json["answer"].is_null()));
+        assert_eq!(outcome.quarantined.len(), 2);
+        assert!(outcome
+            .quarantined
+            .iter()
+            .all(|entry| entry.reason == "section_mismatch"));
+        assert!(outcome
+            .quarantined
+            .iter()
+            .all(|entry| entry.layout.is_some()));
+    }
+
+    #[test]
+    fn answer_table_duplicate_labels_across_sections_are_blocked() {
+        let mut items = vec![
+            question("chapter1/single_choice", "1", "第一章第一题"),
+            question("chapter2/single_choice", "1", "第二章第一题"),
+            table_answer("", "", "1  2\nB  C"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(outcome.answers_matched, 0);
+        assert!(items[..2].iter().all(|item| item.json["answer"].is_null()));
+        assert!(outcome
+            .quarantined
+            .iter()
+            .any(|entry| entry.reason == "ambiguous_question_identity"));
+        assert!(outcome
+            .quarantined
+            .iter()
+            .any(|entry| entry.reason == "question_not_found"));
+    }
+
+    #[test]
+    fn answer_table_does_not_overwrite_existing_answer() {
+        let mut first = question("single_choice", "1", "第一题");
+        first.json["answer"] = json!("D");
+        let mut items = vec![
+            first,
+            question("single_choice", "2", "第二题"),
+            table_answer("single_choice", "", "1  2\nB  C"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(items[0].json["answer"], "D");
+        assert_eq!(items[1].json["answer"], "C");
+        assert_eq!(outcome.answers_matched, 1);
+        assert_eq!(outcome.conflicts.len(), 1);
+        assert!(outcome
+            .quarantined
+            .iter()
+            .any(|entry| entry.reason == "conflicting_answer_or_explanation"));
+    }
+
+    #[test]
+    fn answer_table_never_promotes_answer_or_material_to_question() {
+        let mut items = vec![
+            question("single_choice", "1", "第一题"),
+            MergeItem::new("".into(), json!({"content":"共享材料正文"})).with_source(
+                ImportBlockKind::Material,
+                "single_choice",
+                "m1",
+            ),
+            table_answer("single_choice", "", "1  2\nB  C"),
+        ];
+        let candidates = collect_non_question_candidates(&items);
+        assert!(candidates.iter().any(|candidate| candidate.is_material()
+            && candidate.source_id == "m1"
+            && candidate.raw_text.is_empty()
+            && candidate.json["content"] == "共享材料正文"));
+        let outcome = merge_answer_sections(&mut items);
+        assert!(outcome.excluded.iter().any(|entry| entry.source_id == "m1"));
+        assert_eq!(items[1].kind, ImportBlockKind::Material);
+        assert_eq!(items[2].kind, ImportBlockKind::Answer);
+        assert!(items[1].removed && items[2].removed);
+        assert_eq!(items.iter().filter(|item| !item.removed).count(), 1);
+    }
+
+    #[test]
+    fn non_question_candidates_are_exposed_before_exclusion() {
+        let mut items = vec![
+            question("", "1", "第一题"),
+            MergeItem::new("".into(), json!({"content":"一、选择题"})).with_source(
+                ImportBlockKind::Heading,
+                "",
+                "h1",
+            ),
+            MergeItem::new("".into(), json!({"content":"无法识别"})).with_source(
+                ImportBlockKind::Unknown,
+                "",
+                "u1",
+            ),
+            MergeItem::new("1".into(), json!({"content":"摘要","answer":"B"}))
+                .with_source(ImportBlockKind::Question, "", "old")
+                .with_raw_text("[答案区] 1. 答案：B"),
+        ];
+        let candidates = collect_non_question_candidates(&items);
+        assert_eq!(candidates.len(), 3);
+        assert!(items.iter().all(|item| !item.removed));
+        assert!(candidates
+            .iter()
+            .all(|candidate| candidate.block_kind != ImportBlockKind::Question));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.block_kind == ImportBlockKind::Unknown
+                && candidate.source_id == "u1"));
+        // A legacy marker block is reported as an answer candidate, never a question.
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate.source_id == "old"
+                && candidate.block_kind == ImportBlockKind::Answer));
+
+        let outcome = merge_answer_sections(&mut items);
+        // Unknown furniture is retained for review, not silently dropped.
+        assert!(outcome
+            .quarantined
+            .iter()
+            .any(|entry| entry.source_id == "u1" && entry.reason == "unknown_block_kind"));
+        assert_eq!(items[0].json["answer"], "B");
+    }
+
+    #[test]
+    fn single_label_answer_block_keeps_legacy_behavior() {
+        let mut items = vec![
+            question("single_choice", "1", "题干"),
+            answer("single_choice", "1", "B"),
+        ];
+        let outcome = merge_answer_sections(&mut items);
+        assert_eq!(items[0].json["answer"], "B");
+        assert_eq!(outcome.answers_matched, 1);
+        assert_eq!(outcome.answer_table_cells, 0);
+        assert_eq!(
+            outcome.matched[0]["answer_evidence"][0]["mapping"],
+            "cell_pair"
+        );
+    }
+
+    #[test]
+    fn rerun_after_table_merge_is_idempotent_and_keeps_user_edits() {
+        let mut items: Vec<MergeItem> = (1..=3)
+            .map(|n| question("single_choice", &n.to_string(), &format!("题干{n}")))
+            .collect();
+        items.push(table_answer("single_choice", "", "1  2  3\nB  C  A"));
+        let first = merge_answer_sections(&mut items);
+        assert_eq!(first.answers_matched, 3);
+        items[1].json["answer"] = json!("用户改过");
+        let second = merge_answer_sections(&mut items);
+        assert_eq!(second.answers_matched, 0);
+        assert_eq!(items[0].json["answer"], "B");
+        assert_eq!(items[1].json["answer"], "用户改过");
+        assert_eq!(items[2].json["answer"], "A");
+        assert!(second.conflicts.is_empty());
     }
 }

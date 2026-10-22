@@ -109,8 +109,10 @@ pub mod prompt_contracts; // 跨链路共享的 LLM 输出契约常量（LaTeX �
 pub mod providers;
 pub mod qbank_generation;
 pub mod qbank_grading;
+pub mod qbank_group_context; // Issue #491 组上下文投影（读取复用 VfsQuestionGroupRepo）
 #[allow(dead_code)]
 pub mod question_bank_service;
+pub mod question_bundle_service;
 pub mod question_export_service;
 #[allow(dead_code)]
 pub mod question_import_service;
@@ -2723,6 +2725,24 @@ pub fn run() {
             ,crate::commands::qbank_reset_progress
             ,crate::commands::qbank_reset_questions_progress
             // =================================================
+            // 题组命令（Issue #491）
+            // =================================================
+            ,crate::commands::qbank_get_question_group_context
+            ,crate::commands::qbank_get_question_group
+            ,crate::commands::qbank_list_question_groups
+            ,crate::commands::qbank_create_question_group
+            ,crate::commands::qbank_update_question_group
+            ,crate::commands::qbank_preview_group_delete
+            ,crate::commands::qbank_delete_question_group
+            ,crate::commands::qbank_create_group_material
+            ,crate::commands::qbank_update_group_material
+            ,crate::commands::qbank_delete_group_material
+            ,crate::commands::qbank_publish_question_group
+            ,crate::commands::qbank_search_group_materials
+            ,crate::commands::qbank_export_bundle_json
+            ,crate::commands::qbank_import_bundle_json
+            ,crate::commands::qbank_export_bundle_csv
+            // =================================================
             // 时间维度统计命令（2026-01 新增）
             // =================================================
             ,crate::commands::qbank_get_learning_trend
@@ -3010,8 +3030,16 @@ pub fn run() {
         // bilistream://{fileId}：B 站链接条目在应用内播放（后端取地址并转发 CDN 的 Range 请求）
         .register_asynchronous_uri_scheme_protocol("bilistream", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
+            let webview_label = ctx.webview_label().to_string();
             tauri::async_runtime::spawn(async move {
-                responder.respond(crate::media::bilibili_stream::handle(&app, request).await);
+                responder.respond(
+                    crate::media::bilibili_stream::handle_with_webview(
+                        &app,
+                        Some(webview_label.as_str()),
+                        request,
+                    )
+                    .await,
+                );
             });
         })
         // 注册 filestream:// 自定义协议，用于媒体（音频/视频/图片）与通用 blob 流式加载

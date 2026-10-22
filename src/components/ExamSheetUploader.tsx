@@ -585,10 +585,19 @@ export const ExamSheetUploader: React.FC<ExamSheetUploaderProps> = ({
     setImportSummary(buildImportSummary(detail, baselineCardIdsRef.current, questions));
     const report = detail.summary.metadata?.import_report;
     if (report) {
-      // Persisted quality is authoritative even when the terminal event was missed.
-      setImportIncomplete(report.status !== 'completed'
-        || (report.failed_pages?.length || 0) > 0 || (report.failed_chunks?.length || 0) > 0
-        || (report.quarantined_entries?.length || 0) > 0 || (report.conflicts?.length || 0) > 0);
+      // Persisted quality is authoritative even when the terminal event was
+      // missed. Only blocking findings make an import incomplete: recognised
+      // page furniture and the user's own exclusions are warnings, and an
+      // "excluded" terminal state is a completed user decision, not a failure.
+      const blockingCount = Number(
+        (report.completion as { blocking_count?: number } | undefined)?.blocking_count ?? 0,
+      );
+      setImportIncomplete(
+        report.status === 'partial'
+        || report.status === 'failed'
+        || report.status === 'needs_review'
+        || blockingCount > 0,
+      );
       setDegenerateCount(Math.max(0, report.degenerate_count || 0));
     }
     setPendingDetail(detail);

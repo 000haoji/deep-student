@@ -395,7 +395,8 @@ describe('BilibiliEmbedPlayer', () => {
     expect(statuses.at(-1)).toMatchObject({ isReady: false, duration: 300 });
 
     fireEvent.load(frame()!);
-    expect(statuses.at(-1)).toMatchObject({ isReady: true, currentTime: 0 });
+    // 文档载入不等于媒体 ready：不伪造 isReady
+    expect(statuses.at(-1)).toMatchObject({ isReady: false, documentLoaded: true, currentTime: 0 });
     expect(handleRef.current?.getElement()).toBeNull();
 
     act(() => {
@@ -405,7 +406,7 @@ describe('BilibiliEmbedPlayer', () => {
     const url = new URL(frame()!.src);
     expect(url.searchParams.get('t')).toBe('65');
     expect(url.searchParams.get('autoplay')).toBe('1');
-    expect(statuses.at(-1)).toMatchObject({ currentTime: 65.7, isReady: true });
+    expect(statuses.at(-1)).toMatchObject({ currentTime: 65.7, isReady: false });
 
     // 超出时长：钳到结尾
     act(() => handleRef.current!.seekTo(10_000));

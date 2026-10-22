@@ -319,4 +319,26 @@ describe('ExamSheetUploader (streamlined layout)', () => {
     // 失败只在页内说一次，不再额外弹全局错误通知
     expect(mocks.showGlobalNotification).not.toHaveBeenCalledWith('error', expect.anything());
   });
+
+  it('treats a user-excluded import as a terminal state instead of an incomplete import', async () => {
+    mocks.invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === 'qbank_list_questions') return questionPage([]);
+      if (cmd === 'import_question_bank_stream') {
+        const detail = detailWith([]);
+        detail.summary.metadata = { import_report: {
+          schema_version: 1, status: 'excluded', failed_pages: [], failed_chunks: [],
+          degenerate_count: 0, quarantined_entries: [], conflicts: [], resume_available: false,
+          excluded_entries: [{ reason: 'previously_soft_deleted', severity: 'warning' }],
+          completion: { status: 'excluded', blocking_count: 0, warning_count: 1 },
+        } } as any;
+        return detail;
+      }
+      return true;
+    });
+    render(<ExamSheetUploader sessionId="exam_1" />);
+    selectFiles([docx()]);
+    fireEvent.click(screen.getByTestId('exam-uploader-start'));
+    await screen.findByTestId('exam-uploader-summary');
+    expect(screen.queryByText('exam_sheet:uploader.incomplete_warning')).toBeNull();
+  });
 });

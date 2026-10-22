@@ -1096,6 +1096,14 @@
       "path": "vfs/V20261006__study_time.sql",
       "sha256": "9a0519cd9de15432640d71d0d7478f04a24ba0937a34d60168882156673874dd",
       "dangers": []
+    },
+    {
+      "database": "vfs",
+      "version": 20261021,
+      "name": "question_groups",
+      "path": "vfs/V20261021__question_groups.sql",
+      "sha256": "9cc0d6d483095fc0bbd66223335a166b3f2a75a69ddc8676b0d5712e79174a05",
+      "dangers": []
     }
   ]
 }

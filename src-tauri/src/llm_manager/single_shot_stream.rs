@@ -1006,7 +1006,7 @@ impl LLMManager {
         on_delta: Option<DeltaCallback<'_>>,
     ) -> Result<SingleShotCompletion> {
         let label = opts.label.as_str();
-        run_single_shot(
+        let result = run_single_shot(
             opts,
             config,
             |mode, request_timeout| async move {
@@ -1035,7 +1035,18 @@ impl LLMManager {
             },
             on_delta,
         )
-        .await
+        .await;
+
+        // ★ PR #490 §4.7：只有真实授权请求的结果才写入候选健康缓存；
+        // 本模块不发起任何探活/预检请求，分类见 llm_manager::model_health。
+        let health = crate::llm_manager::model_health::model_health();
+        match &result {
+            Ok(_) => health.record_success(config, std::time::Instant::now()),
+            Err(error) => {
+                health.record_failure(config, error, std::time::Instant::now());
+            }
+        }
+        result
     }
 }
 

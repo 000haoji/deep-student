@@ -215,3 +215,68 @@ CREATE TABLE media_progress (
 - **测试**：Rust `media::bilibili::tests`（mockito 模拟三段接口、短链跳转、错误码、链接条目新建 / 复用 / 不解码）；
   真实接口冒烟 `cargo test --lib -- --ignored media::bilibili::tests::live_lookup_fetches_real_subtitles`；
   前端 `media/__tests__/bilibiliLink.test.tsx`。
+
+## 6. 应用内播放代理 `bilistream://`（2026-10-21，#492）
+
+链接条目默认在应用自己的 `<video>` 里播放：`bilistream://localhost/{fileId}?qn={qn}&e={epoch}&s={session}`（Windows /
+Android 为 `http://bilistream.localhost/...`）。协议处理在 `src-tauri/src/media/bilibili_stream.rs`，纯逻辑拆到
+`src-tauri/src/media/http_range.rs`（Range 契约）与 `src-tauri/src/media/bilibili_cdn.rs`（候选 / 重定向安全 / 刷新预算）。
+
+### 6.1 请求与响应契约
+
+- `Range`：支持 `bytes=0-`、`bytes=N-M`、后缀 `bytes=-N`；单次响应的区间上限 `STREAM_CHUNK_BYTES`（4 MiB）。
+  多段 `Range` 与非法语法 → `416`（错误码 `range-unsupported` / `range-unsatisfiable`）。
+- `HEAD`（无 Range）：`200` + `Content-Length` 为**完整资源长度**、空 body；总长来自上游 `bytes=0-0` 的
+  `Content-Range: bytes 0-0/TOTAL`，拿不到时 `502 unknown-length`，不拿探测 body 长度冒充。
+- `416`：总长已知时带 `Content-Range: bytes */TOTAL`；未知时不发该头（`bytes */*` 不是合法语法）。
+- 上游 `206`：校验 `Content-Range` 起点等于请求起点、终点不超请求区间、body 长度与 `Content-Range` 一致
+  （到文件末尾的短响应除外）；不一致 → `502 cdn-range-invalid`。
+- 上游忽略 Range 返回 `200`：只有 `start=0` 时截取前段（有界读取），否则 `502 range-not-honored` 换候选；
+  永不整片缓冲、不把前缀冒充成请求的局部字节。
+- 所有 `Content-Length` 与实际 body 一致；`Accept-Ranges: bytes` 恒定；`X-Media-Error-Code` 暴露稳定错误码。
+
+### 6.2 预算、候选与刷新
+
+- 整个 handler（取址 + 刷新 + 轮换 + 读取）共享 **绝对预算 25 s**（`PROTOCOL_BUDGET`），单候选 `10 s`、
+  playurl `8 s`，都受剩余预算再收窄；耗尽 → `504 budget-exceeded`。平台侧异步协议等待窗口是 30 s
+  （Android `10s × 3`），必须留调度余量。
+- playurl 的 `url` + `backup_url` 过滤成有序候选（`https`、白名单后缀、端口 443/4483、无账号信息、非 IP / 内网），
+  最多 3 个，按顺序有界轮换；同一 `(条目, qn, 账号代次)` 的解析有 single-flight，并发 Range 共享结果。
+- 每次重定向都重新校验 scheme / 账号信息 / 端口 / 主机白名单，域名解析结果必须是公网地址，再用
+  `resolve_to_addrs` pin 到实际连接（避免 TOCTOU）。Cookie 从不发给 CDN。
+- `403/404/410`（地址过期）刷新一次 playurl，10 分钟窗口内最多 2 次；`412/429` 尊重 `Retry-After`
+  （无该头默认 60 s）进入冷却，冷却期不刷新、不轮换。
+- `s=` 是播放会话（16 位十六进制）。协议请求是唯一登记入口；同一 `(条目, e)` 出现新 session 后，
+  旧 session 的后续请求以 `499 session-cancelled` 结束，不再轮换，也不污染新条目。
+
+### 6.3 诊断事件（脱敏、定向）
+
+事件 `media-bilibili-stream` 只 `emit_to` 发起播放的 webview（`EventTarget::Webview`），payload：
+
+```json
+{ "sessionId": "…", "requestId": 3, "stage": "connect", "code": null,
+  "host": "cn-bj-cc-03-01.bilivideo.com", "range": "bytes=0-1048575",
+  "bytes": 1048576, "elapsedMs": 421 }
+```
+
+`stage` ∈ `prepare|resolve|connect|headers|first-byte|complete|error|cancel`；`code` 是稳定错误码。
+不含 URL / 查询签名 / Cookie / 标题 / 账号。未登记的 session、无窗口信息的入口（`handle`）一律不发事件。
+
+### 6.4 命令与错误码
+
+- `media_bilibili_stream_quality(fileId, qn?, epoch?, session?)`：返回值不变
+  `{requested, current, options[]}`；新增可选 `session` 仅作日志关联，**不授权、不登记**。
+- 稳定错误码：`range-unsupported`、`range-unsatisfiable`、`unknown-length`、`budget-exceeded`、
+  `playurl-failed`、`playurl-timeout`、`playurl-refresh-exhausted`、`no-candidate`、`cdn-connect-timeout`、
+  `cdn-connect-failed`、`cdn-read-timeout`、`cdn-read-failed`、`cdn-body-too-long`、`cdn-range-invalid`、
+  `range-not-honored`、`cdn-dns-failed`、`cdn-dns-blocked`、`cdn-redirect-invalid`、`cdn-redirect-blocked`、
+  `cdn-redirect-loop`、`cdn-expired`、`cdn-rate-limited`、`cdn-forbidden`、`cdn-http-error`、
+  `session-cancelled`、`cdn-unavailable`。
+- 前端：`useBilibiliQuality` 暴露 `status/error/retry` 与当前 session 的最后一个事件；
+  `useMediaLoadState` 用首帧 20 s / 无进展 15 s 的有界预算区分 `preparing/loading/playing/stalled/failed/cancelled`
+  （暂停、seek、页面隐藏不触发失败）；外链 iframe 只报「文档已载入」，不再假 ready。
+- **测试隔离**：`media::bilibili` 的视频信息缓存键是 `(api_base, 视频 id)`，而 mockito 服务器释放端口后
+  下一个用例可能复用同一端口；因此每个用例必须用自己的 bvid（不能靠全局清缓存，避免并发下清掉别人的条目）。
+- **测试**：`media::http_range::tests`、`media::bilibili_cdn::tests`、`media::bilibili_stream::tests`
+  （mockito + 本地慢服务器：后缀区间、HEAD 总长、错段拒绝、忽略 Range、403 刷新上限、429 冷却、绝对预算）。
+  前端 `media/__tests__/{mediaLoadState,useMediaLoadState,VideoPlayer.loadState,MediaStudyView.bilibiliFallback,MediaStudyView.bilibiliQualityError}.test.*`。

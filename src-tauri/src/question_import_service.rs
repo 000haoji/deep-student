@@ -52,8 +52,12 @@ use crate::vfs::repos::{
 use crate::vfs::types::VfsCreateExamSheetParams;
 use crate::vlm_grounding_service::{ImportBlockKind, VlmGroundingService, VlmPageAnalysis};
 
+pub(crate) mod groups;
 mod non_visual;
+pub(crate) mod normalize;
+pub(crate) mod option_parser;
 mod persistence;
+mod session_guard;
 
 use persistence::publish_candidates;
 
@@ -255,6 +259,27 @@ pub enum ImportStage {
 /// - `Structuring` + `structuring_batches_completed` → 从断点批次继续 LLM
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportCheckpointState {
+    /// Persisted checkpoint contract version. 0 means an unversioned legacy
+    /// checkpoint whose cached typed results cannot be reinterpreted safely.
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub pipeline_version: u32,
+    /// Stable fingerprint of the imported input, not of page numbering.
+    #[serde(default)]
+    pub input_fingerprint: String,
+    #[serde(default)]
+    pub parser_version: u32,
+    #[serde(default)]
+    pub prompt_version: u32,
+    #[serde(default)]
+    pub structurer_version: u32,
+    /// Identifies one resumable attempt; a competing attempt must not overwrite it.
+    #[serde(default)]
+    pub attempt_id: String,
+    /// Monotonic revision used by the checkpoint compare-and-swap writer.
+    #[serde(default)]
+    pub revision: u64,
     pub qbank_name: String,
     pub model_config_id: Option<String>,
     pub source_format: String,
@@ -396,6 +421,21 @@ impl QuestionImportService {
             .acquire()
             .await
             .map_err(|_| AppError::internal("导入资源队列已关闭"))?;
+        // A caller-supplied session id is an append request, not permission to
+        // reuse arbitrary ids. Validate the target and hold a per-session lease
+        // for the whole (possibly expensive) pipeline.
+        let _session_lease = match request.session_id.as_deref() {
+            Some(session_id) => {
+                session_guard::validate_session_for_operation(
+                    vfs_db,
+                    session_id,
+                    session_guard::SessionOperation::AppendDocument,
+                    import_mode_for_format(&request.format),
+                )?;
+                Some(session_guard::SessionLease::try_acquire(session_id)?)
+            }
+            None => None,
+        };
         let format = request.format.as_str();
 
         // JSON 直接导入（无需 VLM）
@@ -470,6 +510,14 @@ impl QuestionImportService {
 
         // 初始 checkpoint（Stage 1 完成）
         let mut checkpoint = ImportCheckpointState {
+            schema_version: session_guard::CHECKPOINT_SCHEMA_VERSION,
+            pipeline_version: session_guard::PIPELINE_VERSION,
+            input_fingerprint: String::new(),
+            parser_version: session_guard::PARSER_VERSION,
+            prompt_version: session_guard::PROMPT_VERSION,
+            structurer_version: session_guard::STRUCTURER_VERSION,
+            attempt_id: String::new(),
+            revision: 0,
             qbank_name: qbank_name.clone(),
             model_config_id: request.model_config_id.clone(),
             source_format: request.format.clone(),
@@ -519,6 +567,7 @@ impl QuestionImportService {
             &mut checkpoint,
             0, // vlm 从 0 开始
             progress_tx.as_ref(),
+            None,
         )
         .await
     }
@@ -530,16 +579,64 @@ impl QuestionImportService {
         session_id: &str,
         progress_tx: Option<UnboundedSender<QuestionImportProgress>>,
     ) -> Result<ImportResult, AppError> {
+        self.resume_import_cancellable(vfs_db, session_id, progress_tx, None)
+            .await
+    }
+
+    /// Resumable import with explicit cancellation. Cancellation only stops the
+    /// attempt; the checkpoint and any published questions stay untouched.
+    pub async fn resume_import_cancellable(
+        &self,
+        vfs_db: &VfsDatabase,
+        session_id: &str,
+        progress_tx: Option<UnboundedSender<QuestionImportProgress>>,
+        cancel: Option<CancellationToken>,
+    ) -> Result<ImportResult, AppError> {
         let _memory_permit = IMPORT_MEMORY_BUDGET
             .acquire()
             .await
             .map_err(|_| AppError::internal("导入资源队列已关闭"))?;
+        // Missing/deleted/wrong-status sessions must fail before any model call,
+        // and only one attempt may own this session's checkpoint at a time.
+        session_guard::validate_session_for_operation(
+            vfs_db,
+            session_id,
+            session_guard::SessionOperation::Resume,
+            "",
+        )?;
+        let _session_lease = session_guard::SessionLease::try_acquire(session_id)?;
         let state_str = VfsExamRepo::get_import_state(vfs_db, session_id)
             .map_err(|e| AppError::database(format!("读取导入状态失败: {}", e)))?
             .ok_or_else(|| AppError::not_found("未找到可恢复的导入状态"))?;
 
-        let mut checkpoint: ImportCheckpointState = serde_json::from_str(&state_str)
+        let parsed: ImportCheckpointState = serde_json::from_str(&state_str)
             .map_err(|e| AppError::validation(format!("解析导入状态失败: {}", e)))?;
+        // Version/migration gate: legacy caches with typed results are refused
+        // instead of being reinterpreted under the new contract.
+        let mut checkpoint = session_guard::migrate_checkpoint(parsed)?;
+        // CAS: if another attempt changed the checkpoint after we read it, this
+        // resume must not overwrite it.
+        if !session_guard::persist_checkpoint_cas(
+            vfs_db,
+            session_id,
+            &checkpoint,
+            Some(&state_str),
+        )? {
+            return Err(AppError::validation(
+                "该导入断点已被其他操作更新，请刷新后重试",
+            ));
+        }
+        log::info!(
+            "[QuestionImport] 恢复导入: session={}, schema={}, attempt={}, revision={}, stage={:?}",
+            session_id,
+            checkpoint.schema_version,
+            checkpoint.attempt_id,
+            checkpoint.revision,
+            checkpoint.current_stage,
+        );
+        if cancel.as_ref().is_some_and(|token| token.is_cancelled()) {
+            return Err(AppError::validation("题目集导入已取消，断点已保留"));
+        }
 
         if checkpoint.source_document_id.is_empty() {
             let existing = VfsQuestionRepo::list_questions(
@@ -667,6 +764,7 @@ impl QuestionImportService {
             &mut checkpoint,
             vlm_start,
             progress_tx.as_ref(),
+            cancel.as_ref(),
         )
         .await
     }
@@ -681,6 +779,7 @@ impl QuestionImportService {
         checkpoint: &mut ImportCheckpointState,
         _vlm_start_page: usize,
         progress_tx: Option<&UnboundedSender<QuestionImportProgress>>,
+        cancel: Option<&CancellationToken>,
     ) -> Result<ImportResult, AppError> {
         checkpoint.current_stage = ImportStage::VlmAnalyzing;
         if checkpoint.source_document_id.is_empty() {
@@ -700,11 +799,25 @@ impl QuestionImportService {
                     .and_then(|s| serde_json::from_str(s).ok())
             })
             .collect();
+        // Cached pages are normally reused, but an unresolved page continuation
+        // means the VLM boundary itself may be wrong: those pages and their
+        // necessary neighbours must be re-recognised, not just empty/failed ones.
+        let continuation_pages = continuation_reidentify_pages(&page_analyses);
         let pending: Vec<usize> = page_analyses
             .iter()
             .enumerate()
-            .filter_map(|(idx, analysis)| analysis.is_none().then_some(idx))
+            .filter_map(|(idx, analysis)| {
+                (analysis.is_none() || continuation_pages.contains(&idx)).then_some(idx)
+            })
             .collect();
+        for idx in &pending {
+            // Invalidate the cached page result before re-running it. Downstream
+            // structuring is cleared below, so no stale proposal survives.
+            page_analyses[*idx] = None;
+            if let Some(slot) = checkpoint.vlm_page_results.get_mut(*idx) {
+                slot.clear();
+            }
+        }
         if !pending.is_empty() {
             checkpoint.structuring_batches_completed = 0;
             checkpoint.structured_batch_results.clear();
@@ -759,6 +872,9 @@ impl QuestionImportService {
         }
         checkpoint.current_stage = ImportStage::VlmCompleted;
         persist_checkpoint(vfs_db, session_id, checkpoint)?;
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(AppError::validation("题目集导入已取消，断点已保留"));
+        }
         let total_ocr_chars = page_analyses
             .iter()
             .flatten()
@@ -884,6 +1000,9 @@ impl QuestionImportService {
         checkpoint.structuring_batches_completed = outcome.batches_completed;
         checkpoint.structured_batch_results = outcome.batch_results.clone();
         persist_checkpoint(vfs_db, session_id, checkpoint)?;
+        if cancel.is_some_and(|token| token.is_cancelled()) {
+            return Err(AppError::validation("题目集导入已取消，断点已保留"));
+        }
 
         if outcome.is_degraded() {
             log::warn!(
@@ -935,9 +1054,18 @@ impl QuestionImportService {
             "figure_failures": figure_failures,
             "needs_review": !empty_pages.is_empty() || !deferred_continuations.is_empty() || !figure_failures.is_empty() || outcome.is_degraded(),
             "incomplete_batches": outcome.incomplete_batches,
+            "checkpoint_schema_version": checkpoint.schema_version,
+            "pipeline_version": checkpoint.pipeline_version,
+            "input_fingerprint": checkpoint.input_fingerprint,
+            "parser_version": checkpoint.parser_version,
+            "prompt_version": checkpoint.prompt_version,
+            "structurer_version": checkpoint.structurer_version,
             "resume_available": true,
         });
-        self.publish_import_candidates(
+        // Captured after figure extraction and before answer merging: this is
+        // the only layer where material/heading roles and group hints still exist.
+        let typed_blocks = groups::blocks_before_answer_merge(&questions_with_figures);
+        self.publish_import_candidates_with_groups(
             vfs_db,
             session_id,
             qbank_name,
@@ -946,6 +1074,7 @@ impl QuestionImportService {
             pages,
             report,
             progress_tx,
+            Some(typed_blocks),
         )
     }
 
@@ -973,12 +1102,39 @@ impl QuestionImportService {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn publish_import_candidates_with_groups(
+        &self,
+        vfs_db: &VfsDatabase,
+        session_id: &str,
+        qbank_name: &str,
+        candidates: &[crate::llm_structurer::StructuredQuestion],
+        degenerate: usize,
+        pages: &[PageSlice],
+        report: Value,
+        progress_tx: Option<&UnboundedSender<QuestionImportProgress>>,
+        typed_blocks: Option<Vec<groups::TypedBlock>>,
+    ) -> Result<ImportResult, AppError> {
+        persistence::publish_candidates_with_groups(
+            vfs_db,
+            session_id,
+            qbank_name,
+            candidates,
+            degenerate,
+            pages,
+            report,
+            progress_tx,
+            typed_blocks,
+        )
+    }
+
     /// 对结构化结果做答案区合并与同题干去重（纯函数，便于单测）
-    fn merge_answer_sections(
+    pub(super) fn merge_answer_sections(
         source: &[crate::llm_structurer::StructuredQuestion],
     ) -> (
         Vec<crate::llm_structurer::StructuredQuestion>,
         crate::answer_merge::MergeOutcome,
+        Vec<crate::answer_merge::MergeItem>,
     ) {
         use crate::answer_merge::{merge_answer_sections, MergeItem};
 
@@ -998,18 +1154,20 @@ impl QuestionImportService {
 
         let outcome = merge_answer_sections(&mut items);
 
+        // Keep the merged items: group/material assembly consumes them after
+        // answer merging, so they cannot be moved into the projection.
         let merged = source
             .iter()
-            .zip(items.into_iter())
+            .zip(items.iter())
             .filter(|(_, item)| !item.removed)
             .map(|(sq, item)| crate::llm_structurer::StructuredQuestion {
-                json: item.json,
+                json: item.json.clone(),
                 source: sq.source.clone(),
                 origin: sq.origin,
             })
             .collect();
 
-        (merged, outcome)
+        (merged, outcome, items)
     }
 
     // ====== 内部方法 ======
@@ -1183,6 +1341,14 @@ impl QuestionImportService {
 
         // ===== 保存 checkpoint: DocxVlmDirect（图片已提取，准备 VLM 调用） =====
         let mut checkpoint = ImportCheckpointState {
+            schema_version: session_guard::CHECKPOINT_SCHEMA_VERSION,
+            pipeline_version: session_guard::PIPELINE_VERSION,
+            input_fingerprint: String::new(),
+            parser_version: session_guard::PARSER_VERSION,
+            prompt_version: session_guard::PROMPT_VERSION,
+            structurer_version: session_guard::STRUCTURER_VERSION,
+            attempt_id: String::new(),
+            revision: 0,
             qbank_name: qbank_name.clone(),
             model_config_id: request.model_config_id.clone(),
             source_format: "docx".to_string(),
@@ -1337,6 +1503,14 @@ impl QuestionImportService {
 
         // 初始 checkpoint（文本路径）
         let mut checkpoint = ImportCheckpointState {
+            schema_version: session_guard::CHECKPOINT_SCHEMA_VERSION,
+            pipeline_version: session_guard::PIPELINE_VERSION,
+            input_fingerprint: String::new(),
+            parser_version: session_guard::PARSER_VERSION,
+            prompt_version: session_guard::PROMPT_VERSION,
+            structurer_version: session_guard::STRUCTURER_VERSION,
+            attempt_id: String::new(),
+            revision: 0,
             qbank_name: qbank_name.clone(),
             model_config_id: request.model_config_id.clone(),
             source_format: request.format.clone(),
@@ -1397,6 +1571,12 @@ impl QuestionImportService {
         pages: &[PageSlice],
     ) -> Result<String, AppError> {
         if let Some(sid) = &request.session_id {
+            session_guard::validate_session_for_operation(
+                vfs_db,
+                sid,
+                session_guard::SessionOperation::AppendDocument,
+                import_mode_for_format(&request.format),
+            )?;
             return Ok(sid.clone());
         }
 
@@ -1672,6 +1852,32 @@ impl QuestionImportService {
 // ============================================================================
 // 辅助函数
 // ============================================================================
+
+/// Pages that must be re-recognised because cached VLM blocks still contain an
+/// unresolved page continuation. Failed/empty pages are handled separately.
+fn continuation_reidentify_pages(analyses: &[Option<VlmPageAnalysis>]) -> HashSet<usize> {
+    let mut pages = HashSet::new();
+    for block in cross_page_merger::merge_pages(analyses) {
+        let unresolved = block.question.continues_from_previous || block.question.continues_to_next;
+        if !unresolved {
+            continue;
+        }
+        for page in &block.page_indices {
+            pages.insert(*page);
+        }
+        if let (true, Some(first)) = (
+            block.question.continues_from_previous,
+            block.page_indices.first(),
+        ) {
+            pages.insert(first.saturating_sub(1));
+        }
+        if let (true, Some(last)) = (block.question.continues_to_next, block.page_indices.last()) {
+            pages.insert(last.saturating_add(1));
+        }
+    }
+    pages.retain(|page| *page < analyses.len());
+    pages
+}
 
 fn is_image_format(format: &str) -> bool {
     matches!(
@@ -1998,8 +2204,37 @@ fn persist_checkpoint(
 ) -> Result<(), AppError> {
     let value = serde_json::to_value(cp)
         .map_err(|e| AppError::validation(format!("序列化导入状态失败: {}", e)))?;
-    VfsExamRepo::update_import_state(vfs_db, session_id, &value)
-        .map_err(|e| AppError::database(format!("保存导入状态失败: {}", e)))
+    let conn = vfs_db
+        .get_conn_safe()
+        .map_err(|e| AppError::database(format!("保存导入状态连接失败: {}", e)))?;
+    // A missing or soft-deleted session must never accept further checkpoints.
+    let affected = conn
+        .execute(
+            "UPDATE exam_sheets SET import_state_json=?1, updated_at=?2 \
+             WHERE id=?3 AND deleted_at IS NULL",
+            rusqlite::params![
+                value.to_string(),
+                chrono::Utc::now().to_rfc3339(),
+                session_id
+            ],
+        )
+        .map_err(|e| AppError::database(format!("保存导入状态失败: {}", e)))?;
+    if affected != 1 {
+        return Err(AppError::database(
+            "导入会话不存在或已删除，拒绝写入断点".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Import modes are a coarse parser contract, not a per-format cache key.
+fn import_mode_for_format(format: &str) -> &'static str {
+    match format {
+        "json" => "json",
+        "txt" | "md" | "markdown" | "csv" | "xlsx" | "xls" => "text",
+        "docx" => "docx",
+        _ => "visual",
+    }
 }
 
 fn rebuild_pages_from_checkpoint(

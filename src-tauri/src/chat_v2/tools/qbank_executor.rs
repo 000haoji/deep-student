@@ -19,6 +19,9 @@ use crate::models::{
 use crate::qbank_grading::events::QbankGradingEmitter;
 use crate::qbank_grading::pipeline::{run_qbank_grading, QbankGradingDeps};
 use crate::qbank_grading::types::{QbankGradingMode, QbankGradingRequest};
+use crate::qbank_group_context::{
+    attached_context_to_value, load_question_group_context, render_context_prompt, ContextPurpose,
+};
 use crate::question_bank_service::{
     GeneratedPaper, MockExamConfig, MockExamSession, PaperConfig, PaperExportFormat,
     QuestionBankService,
@@ -1030,10 +1033,42 @@ fn bounded_export_preview(questions: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// #491：扁平导出投影——把组材料展开到每道题（权威库仍只存一份），
+/// 并在 markdown/docx 中明确标注“展开自题组，无法无损回导”。
+fn group_material_text(question: &Value) -> Option<String> {
+    let materials = question
+        .get("group_context")?
+        .get("materials")?
+        .as_array()?;
+    let mut parts: Vec<String> = Vec::new();
+    for material in materials {
+        if let Some(text) = material.get("text").and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                parts.push(text.trim().to_string());
+            }
+        }
+        if let Some(images) = material.get("images").and_then(Value::as_array) {
+            if !images.is_empty() {
+                parts.push(format!("[配图 ×{}]", images.len()));
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
 fn render_question_export_markdown(name: &str, questions: &[Value]) -> String {
     let mut markdown = format!("# {name}\n\n");
     for (index, question) in questions.iter().enumerate() {
         markdown.push_str(&format!("## 题目 {}\n\n", index + 1));
+        if let Some(material) = group_material_text(question) {
+            markdown.push_str(&format!(
+                "**题组共享材料（展开自题组，无法无损回导）**\n{material}\n\n"
+            ));
+        }
         markdown.push_str(&format!(
             "**题干**\n{}\n\n",
             question
@@ -1059,6 +1094,13 @@ fn render_question_export_docx(name: &str, questions: &[Value]) -> Result<Vec<u8
     for (index, question) in questions.iter().enumerate() {
         blocks
             .push(json!({ "type": "heading", "level": 2, "text": format!("题目 {}", index + 1) }));
+        if let Some(material) = group_material_text(question) {
+            blocks.push(json!({
+                "type": "paragraph",
+                "text": format!("题组共享材料（展开自题组，无法无损回导）：{material}"),
+                "italic": true
+            }));
+        }
         if let Some(content) = question.get("content").and_then(Value::as_str) {
             blocks.push(json!({ "type": "paragraph", "text": content }));
         }
@@ -1299,6 +1341,72 @@ impl QBankExecutor {
             default
         } else {
             raw as u32
+        }
+    }
+
+    /// #491：单题入口统一附带的题组上下文。优先使用仓库已注入到 `Question`
+    /// 上的 `group_context`（列表/搜索/随机路径已经批量装配），缺失时按 id 回查；
+    /// 无组时返回 JSON null，旧响应形状不变。
+    fn question_group_context_value(
+        &self,
+        ctx: &ExecutionContext,
+        question: &Question,
+        purpose: ContextPurpose,
+    ) -> Value {
+        if question.group_context.is_some() {
+            return attached_context_to_value(
+                question.group_context.as_ref(),
+                purpose,
+                Some(question.id.as_str()),
+            );
+        }
+        if question.group_id.is_none() {
+            return Value::Null;
+        }
+        let Some(db) = ctx.vfs_db.as_ref() else {
+            return Value::Null;
+        };
+        let Ok(conn) = db.get_conn_safe() else {
+            return Value::Null;
+        };
+        let context = load_question_group_context(&conn, &question.id);
+        attached_context_to_value(context.as_ref(), purpose, Some(question.id.as_str()))
+    }
+
+    fn question_group_context_value_by_id(
+        &self,
+        ctx: &ExecutionContext,
+        question_id: &str,
+        purpose: ContextPurpose,
+    ) -> Value {
+        let Some(db) = ctx.vfs_db.as_ref() else {
+            return Value::Null;
+        };
+        let Ok(conn) = db.get_conn_safe() else {
+            return Value::Null;
+        };
+        let context = load_question_group_context(&conn, question_id);
+        attached_context_to_value(context.as_ref(), purpose, Some(question_id))
+    }
+
+    fn question_group_context_prompt(
+        &self,
+        ctx: &ExecutionContext,
+        question: &Question,
+    ) -> Option<String> {
+        let context = match question.group_context.as_ref() {
+            Some(context) => Some(context.clone()),
+            None => {
+                let db = ctx.vfs_db.as_ref()?;
+                let conn = db.get_conn_safe().ok()?;
+                load_question_group_context(&conn, &question.id)
+            }
+        }?;
+        let prompt = render_context_prompt(&context, Some(question.id.as_str()));
+        if prompt.trim().is_empty() {
+            None
+        } else {
+            Some(prompt)
         }
     }
 
@@ -1617,6 +1725,9 @@ impl QBankExecutor {
                         .questions
                         .iter()
                         .map(|q| {
+                            // #491：列表/搜索/随机入口不割裂 context（同一题组材料只随子题返回，不重复入库）
+                            let group_context =
+                                self.question_group_context_value(ctx, q, ContextPurpose::AiTool);
                             json!({
                                 "card_id": q.card_id.clone().unwrap_or_else(|| q.id.clone()),
                                 "label": q.question_label,
@@ -1627,6 +1738,7 @@ impl QBankExecutor {
                                 "attempt_count": q.attempt_count,
                                 "correct_count": q.correct_count,
                                 "has_images": !q.images.is_empty(),
+                                "group_context": group_context,
                             })
                         })
                         .collect();
@@ -1760,6 +1872,9 @@ impl QBankExecutor {
                     })
                     .collect();
                 let updated_at = q.updated_at.clone();
+                // #491：AI 工具/单题入口也带共享材料与必要兄弟题干（无兄弟答案）
+                let group_context =
+                    self.question_group_context_value(ctx, &q, ContextPurpose::AiTool);
 
                 return Ok(json!({
                     // questions 表主键：delete/batch_update/toggle_* 的 OCC 版本映射都以它为键
@@ -1787,6 +1902,7 @@ impl QBankExecutor {
                     "updatedAt": updated_at,
                     "occ_supported": true,
                     "recent_submissions": submissions_json,
+                    "group_context": group_context,
                     "source": "questions_table"
                 }));
             }
@@ -2575,8 +2691,11 @@ impl QBankExecutor {
             .results
             .iter()
             .map(|item| {
+                let group_context =
+                    self.question_group_context_value(ctx, &item.question, ContextPurpose::AiTool);
                 json!({
                     "question": question_to_bounded_value(&item.question),
+                    "group_context": group_context,
                     "highlight_content": bounded_optional_text(item.highlight_content.as_deref()),
                     "highlight_answer": bounded_optional_text(item.highlight_answer.as_deref()),
                     "highlight_explanation": bounded_optional_text(item.highlight_explanation.as_deref()),
@@ -3105,11 +3224,17 @@ impl QBankExecutor {
 
         match response {
             Some(response) => {
-                emit_qbank_changed(ctx, "ai_grade", &[question_id]);
+                emit_qbank_changed(ctx, "ai_grade", &[question_id.clone()]);
                 let standalone_kept_existing =
                     response.submission_id.is_none() && !response.explanation_written;
                 let mut value =
                     serde_json::to_value(response).map_err(|error| error.to_string())?;
+                // #491：判题响应回带同一份组上下文，前端可据此展示共享材料
+                value["group_context"] = self.question_group_context_value_by_id(
+                    ctx,
+                    &question_id,
+                    ContextPurpose::AiTool,
+                );
                 if standalone_kept_existing {
                     // 已有解析不被静默覆盖：告诉模型如何显式替换
                     value["explanation_hint"] = json!(
@@ -3294,17 +3419,22 @@ impl QBankExecutor {
             };
 
             return match next_question {
-                Some(q) => Ok(json!({
-                    "card_id": q.card_id.clone().unwrap_or_else(|| q.id.clone()),
-                    "label": q.question_label,
-                    "content": q.content,
-                    "question_type": q.question_type,
-                    "difficulty": q.difficulty,
-                    "status": q.status,
-                    "tags": q.tags,
-                    "images": q.images,
-                    "source": "questions_table"
-                })),
+                Some(q) => {
+                    let group_context =
+                        self.question_group_context_value(ctx, q, ContextPurpose::AiTool);
+                    Ok(json!({
+                        "card_id": q.card_id.clone().unwrap_or_else(|| q.id.clone()),
+                        "label": q.question_label,
+                        "content": q.content,
+                        "question_type": q.question_type,
+                        "difficulty": q.difficulty,
+                        "status": q.status,
+                        "tags": q.tags,
+                        "images": q.images,
+                        "group_context": group_context,
+                        "source": "questions_table"
+                    }))
+                }
                 None => Ok(with_localized_message(
                     json!({ "found": false }),
                     "chat.tools.qbank.no_more_questions",
@@ -4163,6 +4293,8 @@ impl QBankExecutor {
                 )?
                 .iter()
                 .map(|question| {
+                    let group_context =
+                        self.question_group_context_value(ctx, question, ContextPurpose::Export);
                     json!({
                         "label": question.question_label,
                         "content": question.content,
@@ -4179,6 +4311,7 @@ impl QBankExecutor {
                         "correct_count": question.correct_count,
                         "user_note": question.user_note,
                         "images": question.images,
+                        "group_context": group_context,
                     })
                 })
                 .collect::<Vec<Value>>();
@@ -4286,8 +4419,12 @@ impl QBankExecutor {
                     _ => "请基于以下原题生成一道**相似难度**的变式题。保持相同的知识点、题型和难度，但改变具体数值或细节。",
                 };
 
+                let group_context =
+                    self.question_group_context_value(ctx, &q, ContextPurpose::AiTool);
+                let group_prompt = self.question_group_context_prompt(ctx, &q);
                 return Ok(json!({
                     "action": "generate_variant",
+                    "group_context": group_context,
                     "original_question": {
                         "card_id": q.card_id.clone().unwrap_or_else(|| q.id.clone()),
                         "label": q.question_label,
@@ -4302,8 +4439,9 @@ impl QBankExecutor {
                     "variant_type": variant_type,
                     "prompt": variant_prompt,
                     "instruction": format!(
-                        "{}\n\n**原题**：\n{}\n\n**原题答案**：{}\n\n请生成变式题，包含：1) 新的题干 2) 正确答案 3) 解析",
+                        "{}\n\n{}\n\n**原题**：\n{}\n\n**原题答案**：{}\n\n请生成变式题，包含：1) 新的题干 2) 正确答案 3) 解析（共享材料中的条件必须保留或显式说明变化）",
                         variant_prompt,
+                        group_prompt.unwrap_or_default(),
                         q.content,
                         q.answer.clone().unwrap_or_else(|| "未提供".to_string())
                     ),
@@ -5511,6 +5649,11 @@ mod occ_contract_tests {
             ai_feedback: None,
             ai_score: None,
             ai_graded_at: None,
+            // #491 nullable 组字段（无组）
+            group_id: None,
+            sub_label: None,
+            group_order: None,
+            group_context: None,
         };
 
         let bounded = question_to_bounded_value(&question);
@@ -5814,5 +5957,97 @@ mod occ_contract_tests {
             .expect("fallback service read")
             .expect("question should exist");
         assert_eq!(loaded.content, "fallback probe");
+    }
+
+    /// #491 集成：真实迁移 schema + repo 读取 → 单题入口拿到组上下文，
+    /// 练习/AI 用途裁掉兄弟学习状态，编辑器保留状态，prompt 只含题干。
+    #[test]
+    fn grouped_question_context_is_attached_and_trimmed() {
+        let (_tmp, db) = crate::vfs::database::setup_migrated_test_db();
+        {
+            let conn = db.get_conn().expect("conn");
+            conn.execute(
+                "INSERT INTO exam_sheets (id, exam_name, status, temp_id, metadata_json, preview_json, created_at, updated_at)
+                 VALUES ('exam_1','Exam','completed','tmp','{}','{\"pages\":[]}','now','now')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO question_groups (id, exam_id, group_type, title, version, publish_state,
+                    expected_child_ids_json, expected_material_ids_json, created_at, updated_at)
+                 VALUES ('qg_1','exam_1','shared_condition','Shared',1,'complete',
+                    '[\"q1\",\"q2\"]','[\"qm_1\"]','now','now')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO question_group_materials (id, group_id, exam_id, order_index, content_type, text, images_json,
+                    group_version, created_at, updated_at)
+                 VALUES ('qm_1','qg_1','exam_1',1,'text','SHARED CONDITION TEXT','[]',1,'now','now')",
+                [],
+            )
+            .unwrap();
+            for (id, sub, order, content) in [
+                ("q1", "(1)", 1, "FIRST STEM"),
+                ("q2", "(2)", 2, "SECOND STEM"),
+            ] {
+                conn.execute(
+                    "INSERT INTO questions (id, exam_id, question_label, content, answer, explanation, question_type,
+                        tags, status, source_type, created_at, updated_at, group_id, sub_label, group_order, group_version)
+                     VALUES (?1,'exam_1',?2,?3,'SECRET ANSWER','SECRET EXPLANATION','short_answer','[]','review',
+                        'imported','now','now','qg_1',?2,?4,1)",
+                    rusqlite::params![id, sub, content, order],
+                )
+                .unwrap();
+            }
+        }
+
+        let question = VfsQuestionRepo::get_question(&db, "q1")
+            .expect("read question")
+            .expect("q1 exists");
+        let context = question
+            .group_context
+            .as_ref()
+            .expect("group context attached");
+        assert_eq!(
+            context.siblings.len(),
+            2,
+            "repo returns the full child list"
+        );
+        assert_eq!(context.siblings[0].id, "q1");
+        assert_eq!(context.group_progress.total, 2);
+
+        let practice =
+            attached_context_to_value(Some(context), ContextPurpose::Practice, Some("q1"));
+        assert!(practice["siblings"][0].get("status").is_none());
+        assert!(practice["siblings"][0].get("answer").is_none());
+        assert_eq!(practice["materials"][0]["text"], "SHARED CONDITION TEXT");
+        assert_eq!(practice["siblings"].as_array().unwrap().len(), 1);
+
+        let editor = attached_context_to_value(Some(context), ContextPurpose::Editor, Some("q1"));
+        assert_eq!(editor["siblings"][0]["status"], "review");
+
+        let prompt = render_context_prompt(context, Some("q1"));
+        assert!(prompt.contains("SHARED CONDITION TEXT"));
+        assert!(prompt.contains("SECOND STEM"));
+        assert!(!prompt.contains("SECRET ANSWER"));
+        assert!(!prompt.contains("SECRET EXPLANATION"));
+    }
+
+    /// #491：AI 导出的 Markdown 是扁平投影，必须展开组材料并明示不可无损回导。
+    #[test]
+    fn flat_markdown_export_expands_group_materials_with_lossy_marker() {
+        let questions = vec![json!({
+            "content": "SUB QUESTION",
+            "answer": "A",
+            "group_context": {
+                "materials": [
+                    {"order_index": 1, "content_type": "text", "text": "SHARED MATERIAL", "images": []}
+                ]
+            }
+        })];
+        let markdown = render_question_export_markdown("Exam", &questions);
+        assert!(markdown.contains("SHARED MATERIAL"));
+        assert!(markdown.contains("无法无损回导"));
     }
 }

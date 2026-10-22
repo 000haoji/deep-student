@@ -266,7 +266,16 @@
     "loop": "循环播放",
     "fullscreen": "全屏",
     "exitFullscreen": "退出全屏",
-    "progress": "播放进度"
+    "progress": "播放进度",
+    "title": "视频加载失败",
+    "stalledTitle": "播放停滞",
+    "retry": "重试",
+    "firstFrame": "等待首帧超时",
+    "noProgress": "长时间没有新的播放数据",
+    "network": "网络错误或视频源不可用",
+    "decode": "无法解码这个视频",
+    "unsupported": "这个视频的格式或编码不受支持",
+    "unknown": "播放失败"
   },
   "mediaHandout": {
     "generate": "生成讲义",
@@ -457,7 +466,14 @@
       "useEmbed": "改用 B 站播放器",
       "quality": "清晰度",
       "qualityDowngraded": "B 站没有给出所选清晰度，当前为 {{quality}}。",
-      "embedGuest": "B 站播放器以游客身份播放，清晰度以 B 站限制为准；应用内播放器可用你的登录切换清晰度。"
+      "embedGuest": "B 站播放器以游客身份播放，清晰度以 B 站限制为准；应用内播放器可用你的登录切换清晰度。",
+      "loadFailedTitle": "应用内播放失败",
+      "loadFailedHint": "应用不会自动改用 B 站播放器：可以重试应用内播放、手动改用 B 站播放器，或直接在浏览器打开。",
+      "openExternal": "在浏览器打开",
+      "qualityLoading": "正在获取清晰度…",
+      "qualityFailed": "清晰度信息获取失败，视频仍可尝试播放。",
+      "qualityRetry": "重新获取清晰度",
+      "embedLoaded": "B 站播放器页面已打开；是否起播以 B 站页面为准。"
     }
   },
   "mediaRef": {

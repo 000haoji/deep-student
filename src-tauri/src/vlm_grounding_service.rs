@@ -1178,6 +1178,11 @@ impl VlmGroundingService {
             push(config, "Tier7-any-multimodal");
         }
 
+        // ★ PR #490 §4.7：静态能力筛查 + 健康排序（冷却候选降到队尾，不删除）。
+        // 健康状态只来自 single_shot_completion 的真实授权请求结果；本函数不发探活请求。
+        let (result, _rejected) = crate::llm_manager::model_health::model_health()
+            .prepare_candidates(result, std::time::Instant::now());
+
         debug!(
             "[VLM-Grounding] VLM 候选模型: {}",
             result

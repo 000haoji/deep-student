@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ExamSheetSessionDetail } from '@/utils/tauriApi';
+import type { QuestionGroupContext } from '@/types/qbankGroup';
 import i18n from '@/i18n';
 
 export type QuestionStatus = 'new' | 'in_progress' | 'mastered' | 'review';
@@ -186,6 +187,17 @@ export interface Question {
   structured_data?: QuestionStructuredData | null;
   /** 出处（JSON，如 {"resourceIds":[…]}，AI 出题依据的资料） */
   sourceRef?: string | null;
+  /** #491 所属题组（组头不是题，不计题数）；null/undefined 表示独立题。 */
+  groupId?: string | null;
+  /** #491 组内子题标签，如 "(1)"。 */
+  subLabel?: string | null;
+  /** #491 组内顺序。 */
+  groupOrder?: number | null;
+  /**
+   * #491 单题上下文（后端按 purpose 裁剪）。所有单题入口都应透传，
+   * 不得因分页/随机/错题等入口把它丢掉。
+   */
+  group_context?: QuestionGroupContext | null;
   // AI 评判缓存
   ai_feedback?: string;
   ai_score?: number;

@@ -266,7 +266,16 @@
     "loop": "Loop",
     "fullscreen": "Full screen",
     "exitFullscreen": "Exit full screen",
-    "progress": "Seek"
+    "progress": "Seek",
+    "title": "This video failed to load",
+    "stalledTitle": "Playback stalled",
+    "retry": "Retry",
+    "firstFrame": "Timed out waiting for the first frame",
+    "noProgress": "No new playback data for a long time",
+    "network": "Network error or source unavailable",
+    "decode": "This video cannot be decoded",
+    "unsupported": "This video format or codec is not supported",
+    "unknown": "Playback failed"
   },
   "mediaHandout": {
     "generate": "Handout",
@@ -457,7 +466,14 @@
       "useEmbed": "Use the Bilibili player",
       "quality": "Quality",
       "qualityDowngraded": "Bilibili didn't provide the selected quality; playing {{quality}}.",
-      "embedGuest": "The Bilibili player plays as a guest, so its quality options are limited by Bilibili; the in-app player can use your login to switch quality."
+      "embedGuest": "The Bilibili player plays as a guest, so its quality options are limited by Bilibili; the in-app player can use your login to switch quality.",
+      "loadFailedTitle": "In-app playback failed",
+      "loadFailedHint": "The app will not switch to the Bilibili player automatically: retry in-app playback, switch manually, or open it in your browser.",
+      "openExternal": "Open in browser",
+      "qualityLoading": "Loading quality options…",
+      "qualityFailed": "Could not load quality options; playback may still work.",
+      "qualityRetry": "Retry quality options",
+      "embedLoaded": "The Bilibili player page is open; whether playback starts depends on the Bilibili page."
     }
   },
   "mediaRef": {

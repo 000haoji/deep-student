@@ -29,8 +29,9 @@ use std::sync::Arc;
 use crate::llm_manager::{build_provider_adapter, ApiConfig, LLMManager};
 use crate::models::AppError;
 use crate::providers::ProviderAdapter;
+use crate::qbank_group_context::{load_question_group_context, render_context_prompt};
 use crate::vfs::database::VfsDatabase;
-use crate::vfs::repos::{AnswerSubmission, Question, VfsQuestionRepo};
+use crate::vfs::repos::{AnswerSubmission, Question, QuestionGroupContext, VfsQuestionRepo};
 
 use super::events::QbankGradingEmitter;
 use super::image_answer::{
@@ -139,9 +140,19 @@ pub async fn run_qbank_grading(
         None => Vec::new(),
     };
 
+    // 4.5 #491：题组上下文（有序共享材料 + 必要兄弟题干，绝不包含兄弟答案）。
+    //     判题与通用解析都必须看到共享条件，否则只会针对残缺题干作答。
+    //     读取失败只降级为"无组上下文"，不阻断判题主流程。
+    let group_context = deps
+        .vfs_db
+        .get_conn_safe()
+        .ok()
+        .and_then(|conn| load_question_group_context(&conn, &request.question_id));
+
     // 5. 构造 Prompt
     let (system_prompt, user_prompt) = build_prompts(
         &question,
+        group_context.as_ref(),
         current_submission.as_ref(),
         &submissions,
         &request.mode,
@@ -660,6 +671,7 @@ const QBANK_RESPONSE_LANGUAGE_RULE: &str = "Language: write your feedback in the
 
 fn build_prompts(
     question: &Question,
+    group_context: Option<&QuestionGroupContext>,
     current_submission: Option<&AnswerSubmission>,
     submissions: &[AnswerSubmission],
     mode: &QbankGradingMode,
@@ -683,6 +695,14 @@ fn build_prompts(
     user_prompt.push_str("## 题目\n");
     user_prompt.push_str(&question.content);
     user_prompt.push_str("\n\n");
+
+    // #491：同组共享材料与必要兄弟题干（材料只出现一次；兄弟答案不进入 prompt）
+    if let Some(context) = group_context {
+        let section = render_context_prompt(context, Some(question.id.as_str()));
+        if !section.trim().is_empty() {
+            user_prompt.push_str(&section);
+        }
+    }
 
     // 题型
     user_prompt.push_str(&format!("## 题型\n{:?}\n\n", question.question_type));
@@ -1215,6 +1235,11 @@ mod tests {
             user_note: None,
             is_favorite: false,
             is_bookmarked: false,
+            // #491：测试 fixture 显式初始化 nullable 组字段（无组）
+            group_id: None,
+            sub_label: None,
+            group_order: None,
+            group_context: None,
         }
     }
 
@@ -1250,6 +1275,7 @@ mod tests {
 
         let (_, user_prompt) = build_prompts(
             &question,
+            None, // #491：无组上下文
             Some(&submission),
             &[],
             &QbankGradingMode::Grade,
@@ -1271,6 +1297,7 @@ mod tests {
 
         let (_, user_prompt) = build_prompts(
             &question,
+            None, // #491：无组上下文
             Some(&submission),
             &[],
             &QbankGradingMode::Grade,
@@ -1294,6 +1321,7 @@ mod tests {
 
         let (_, user_prompt) = build_prompts(
             &question,
+            None, // #491：无组上下文
             Some(&submission),
             &[],
             &QbankGradingMode::Grade,
@@ -1320,6 +1348,7 @@ mod tests {
 
             let (_, user_prompt) = build_prompts(
                 &question,
+                None, // #491：无组上下文
                 Some(&submission),
                 &[],
                 &QbankGradingMode::Grade,
@@ -1345,6 +1374,7 @@ mod tests {
 
         let (_, user_prompt) = build_prompts(
             &question,
+            None, // #491：无组上下文
             Some(&current),
             &[history_envelope, history_text],
             &QbankGradingMode::Grade,
@@ -1787,6 +1817,7 @@ mod tests {
 
         let (system_prompt, user_prompt) = build_prompts(
             &question,
+            None, // #491：无组上下文
             None,
             &[history],
             &QbankGradingMode::Analyze,
@@ -1813,6 +1844,7 @@ mod tests {
 
         let (system_prompt, user_prompt) = build_prompts(
             &question,
+            None, // #491：无组上下文
             Some(&submission),
             &[],
             &QbankGradingMode::Analyze,
@@ -1961,5 +1993,89 @@ mod tests {
             false,
         );
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // #491 题组上下文：共享材料进 prompt，兄弟答案绝不进 prompt
+    // ========================================================================
+
+    #[test]
+    fn build_prompts_includes_shared_materials_and_sibling_stems_without_answers() {
+        use crate::vfs::repos::{
+            GroupProgress, GroupPublishState, MaterialContentType, QuestionGroup,
+            QuestionGroupMaterial, QuestionGroupType, QuestionSiblingBrief, QuestionStatus,
+            QuestionType, SourceType,
+        };
+
+        let question = test_question_for_prompt();
+        let context = QuestionGroupContext {
+            group: QuestionGroup {
+                id: "g1".to_string(),
+                exam_id: "e1".to_string(),
+                group_type: QuestionGroupType::SharedCondition,
+                title: Some("Shared".to_string()),
+                source_type: SourceType::Imported,
+                source_ref: None,
+                import_baseline: None,
+                version: 2,
+                publish_state: GroupPublishState::Complete,
+                expected_child_ids: vec!["q1".into(), "q2".into()],
+                expected_material_ids: vec!["m1".into()],
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+                deleted_at: None,
+            },
+            materials: vec![QuestionGroupMaterial {
+                id: "m1".to_string(),
+                group_id: "g1".to_string(),
+                exam_id: "e1".to_string(),
+                order_index: 1,
+                content_type: MaterialContentType::Text,
+                title: None,
+                text: "SHARED CONDITION TEXT".to_string(),
+                images: vec![],
+                source_ref: None,
+                page_index: None,
+                bbox: None,
+                group_version: 2,
+                created_at: "now".to_string(),
+                updated_at: "now".to_string(),
+                deleted_at: None,
+            }],
+            siblings: vec![QuestionSiblingBrief {
+                id: "q2".to_string(),
+                sub_label: Some("(2)".to_string()),
+                question_label: Some("2".to_string()),
+                group_order: Some(2),
+                question_type: QuestionType::ShortAnswer,
+                status: QuestionStatus::New,
+                content: "SIBLING STEM".to_string(),
+                options: None,
+            }],
+            sibling_count: 2,
+            group_progress: GroupProgress {
+                total: 2,
+                new: 2,
+                in_progress: 0,
+                mastered: 0,
+                review: 0,
+            },
+        };
+
+        let (_, user_prompt) = build_prompts(
+            &question,
+            Some(&context),
+            None,
+            &[],
+            &QbankGradingMode::Analyze,
+            None,
+        )
+        .unwrap();
+
+        assert!(user_prompt.contains("SHARED CONDITION TEXT"));
+        assert!(user_prompt.contains("SIBLING STEM"));
+        // 兄弟答案/解析没有进入 prompt（只有本题自己的参考答案段）
+        assert_eq!(user_prompt.matches("参考答案").count(), 1);
+        assert!(!user_prompt.contains("SIBLING ANSWER"));
     }
 }

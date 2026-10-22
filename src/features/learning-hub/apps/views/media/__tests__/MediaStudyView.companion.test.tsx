@@ -176,17 +176,24 @@ describe('MediaStudyView · Bilibili link items', () => {
     title: '线代', part: '', owner: null, cover: null, durationMs: 60_000, url: 'https://www.bilibili.com/video/BV1xx411c7mD',
   };
 
-  it('plays the link in the app player and falls back to the Bilibili player on error', () => {
+  it('plays the link in the app player and lets the user switch to the Bilibili player on error', () => {
     observedWidth = 1200;
     render(
       <MediaStudyView kind="video" src="" bilibili={LINK as never} resourceId="file_link" fileName="线代.bilibili" onError={vi.fn()} />,
     );
-    expect(screen.getByTestId('video-player').dataset.src).toBe('bilistream://localhost/file_link?qn=80');
+    expect(screen.getByTestId('video-player').dataset.src).toMatch(
+      /^bilistream:\/\/localhost\/file_link\?qn=80&s=[0-9a-f]{16}$/,
+    );
     expect(screen.queryByTestId('bilibili-embed')).toBeNull();
     // 画面可用：截帧按钮在
     expect(screen.getByRole('button', { name: 'learningHub:mediaTranscript.captureFrame' })).toBeTruthy();
 
+    // 失败不再自动切外链：先给可执行出口
     act(() => lastVideo.current?.onError());
+    expect(screen.queryByTestId('bilibili-embed')).toBeNull();
+    expect(document.querySelector('[data-bilibili-stream-error]')).toBeTruthy();
+
+    fireEvent.click(document.querySelector('[data-bilibili-action="use-embed"]')!);
     expect(screen.getByTestId('bilibili-embed')).toBeTruthy();
     expect(document.querySelector('[data-bilibili-fallback]')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'learningHub:mediaTranscript.captureFrame' })).toBeNull();

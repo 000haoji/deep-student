@@ -107,6 +107,12 @@ export interface Question {
   source_type: SourceType;
   source_ref?: string;
   parent_id?: string;
+  /** #491 题组关系（组头不计题）；旧库为 null/undefined。 */
+  group_id?: string | null;
+  sub_label?: string | null;
+  group_order?: number | null;
+  /** #491 单题上下文；所有列表/搜索/随机/错题入口都必须透传。 */
+  group_context?: import('@/types/qbankGroup').QuestionGroupContext | null;
   created_at: string;
   updated_at: string;
   // AI 评判缓存

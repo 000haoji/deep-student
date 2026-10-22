@@ -2,48 +2,128 @@
 
 ## Scope and authorization
 
-The user requested diagnosis of incomplete document imports, answer sections appearing as questions, and inconsistent question counts. After reviewing the diagnosis, the user requested implementation, local tests, a pull request, and Linux deb / Android packages, and subsequently requested continuation of that work.
+The user requested diagnosis of incomplete document imports, answer sections appearing as questions, and inconsistent question counts, then authorized a full implementation of the documented improvement plan. This document describes the implemented contracts and their explicit boundaries.
 
-This change concerns future imports and safe replay of versioned import checkpoints. It does not migrate or delete existing user questions, answers, attempts, notes, or flashcards. Historical banks without stable source identities require a separately authorized, backed-up migration; text similarity must never be used as a deletion identity.
+This change concerns future imports and safe replay of versioned import checkpoints. It does not migrate, rewrite, or delete existing user questions, answers, attempts, notes, or flashcards. Historical banks without stable identities require a separately authorized, backed-up migration; text similarity is never used as a deletion identity. User-excluded source identities and soft-deleted questions are never resurrected by a replay.
+
+All regression work uses synthetic fixtures, temporary directories and migrated test databases. No user database, real document, installed application, or device was used for the implementation or validation described here.
+
+## Checkpoints, attempts and resume
+
+### Versioned checkpoint (schema 2)
+
+`ImportCheckpointState` now persists an explicit contract:
+
+- `schema_version` (current `2`), `pipeline_version`, `parser_version`, `prompt_version`, `structurer_version`;
+- `input_fingerprint`, derived from the persisted source document identity, page/blob hashes and extracted text;
+- `attempt_id` and a monotonic `revision` used by the checkpoint writer.
+
+Compatibility rules on resume:
+
+- A checkpoint with a newer `schema_version` than the running build is rejected; it is never reset silently.
+- A legacy checkpoint (`schema_version` 0) that already contains cached page/batch results is rejected because its typed interpretation predates the current contract.
+- With cached results present, any stage version that differs from the current build fails closed with the stage name and both versions in the error. This includes a schema-2 checkpoint whose stage versions are still `0`.
+- A stored non-empty `input_fingerprint` is recomputed from the persisted input fields; a mismatch rejects reuse instead of resuming against different input.
+- Only a checkpoint without cached results is stamped with the current stage versions during migration.
+
+### Session ownership and append
+
+- A caller-supplied `session_id` is an append request. The session must exist, must not be soft-deleted, must have an allowed status (`importing`, `parsing`, `needs_review`, `partial`, `failed`, `completed`, `excluded`), and must not carry an unfinished import checkpoint. Appending cannot overwrite a resumable attempt.
+- Resume requires a resumable status (`importing`, `needs_review`, `partial`, `failed`) plus a non-empty checkpoint. Bank-level `import_mode` is not used to restrict append document formats; a mode mismatch is only considered for an explicit resume request that declares its mode.
+- One in-process lease per session prevents a resume and an append from interleaving. A competing attempt receives a clear "already running" error instead of racing.
+- The resume entry point compares the checkpoint it read with the stored JSON before writing the migrated attempt (`UPDATE ... WHERE import_state_json IS <read value>`). A stale writer is rejected. All checkpoint writes refuse missing or soft-deleted sessions.
+- Cancelling a resume only stops that attempt; published questions and the checkpoint remain intact.
+
+### Stage-aware resume
+
+Reported recovery actions are executable only when the persisted checkpoint can actually re-run that stage:
+
+- `reidentify_page`: pages with no cached VLM result are re-analysed. Cached pages whose blocks still carry an unresolved `continues_from_previous`/`continues_to_next` marker are invalidated as well, together with the necessary adjacent page(s). Invalidating pages also clears downstream structuring caches.
+- `retry_batches`: visual structuring validates each cached batch independently; sentinel/failed batches are re-requested, including non-contiguous failures. Text/DOCX staging reuses successful slots by input fingerprint and retries cleared slots.
+- `retry_figures`: figure extraction re-runs from the cached page analyses on resume.
+- Review-only findings (ambiguous identity/answer evidence, unresolved continuation without page evidence, empty-result review, incompatible checkpoint) do not produce a resume action. `resume_available` is true only when at least one executable stage action exists and the import is not `completed`/`excluded`.
+
+A checkpoint that cannot execute the reported blocking action produces `reimport_or_review_invalid_checkpoint` and no resume button.
 
 ## Import contracts
 
-### Typed source blocks
+### Typed source blocks and evidence
 
-Extraction produces `question`, `answer`, `explanation`, `heading`, `material`, `figure`, or `unknown` blocks. Only validated question blocks can become practice questions. Unmatched or ambiguous answers remain in the persisted import report rather than being converted into question stems.
+Extraction produces `question`, `answer`, `explanation`, `heading`, `material`, `figure`, or `unknown` blocks. Only validated question blocks can become practice questions. Unmatched or ambiguous answers remain auditable and are never converted into question stems.
 
-Answer association uses a unique original label within its section. A bare label can only be used when it uniquely identifies a question in the document. Counts, array order, or similar stems do not establish ownership. Mathematical punctuation, options, and repeated questions in different sections are not discarded by a fuzzy deduplicator.
+Answer association uses a unique original label within its section. A bare label is only used when it uniquely identifies a question. Counts, array order, or similar stems do not establish ownership. Math punctuation, options, and repeated questions in different sections are not removed by a fuzzy deduplicator.
 
-Source identities and source spans are carried through extraction, cross-page merging, structuring, and publication. Structuring responses must map one-to-one to the supplied source IDs. Truncated or interrupted model responses are failures, not completed batches. Blocks with unresolved continuation markers are deferred rather than published as truncated questions; after neighboring pages are recovered, the complete question is first published under its leading source identity. Declared figures that cannot be extracted are recorded as quality failures instead of silently completing the import.
+Source identities and source spans are carried through extraction, cross-page merging, structuring, and publication. Structuring responses must map one-to-one to supplied source IDs. Truncated or interrupted model responses are failures, not completed batches. Blocks with unresolved continuation markers are deferred rather than published as truncated questions.
 
-### Staging and publication
+Non-visual evidence must be grounded in supplied source text or an explicitly mapped DOCX image, never in the model's own reconstructed `raw_text`. An answer inferred by a model is not an extracted answer.
 
-Text and DOCX extraction results are staged in `ImportCheckpointState.candidate_results`. Failed pages and chunks remain retryable. Visual structuring checkpoints are persisted per batch. Model callbacks do not publish questions directly.
+### Answer tables and explicit multi-label answers
 
-The publication boundary uses an immediate SQLite transaction for questions, the complete preview projection, question-bank statistics, resource data, import report, and checkpoint finalization. Stable card identity derives from the session, document version, and source identity. Replay preserves user edits, answers, notes, attempt history, and soft-deletion tombstones.
+The answer-merge module records answer-table cell evidence and layout diagnostics. Labels such as `4、5` are expanded into an explicit label set, but a mapping is only applied when the source states it; a shared value is never copied across questions by count or position. Layouts the parser cannot support remain review items instead of being silently guessed.
 
-Only a fully completed import clears its checkpoint. Partial, failed, and review-required outcomes retain their quality report and, where usable, their retry material. Questions with failed declared figures are deferred until extraction succeeds, so replay does not have to overwrite an already published imageless question. The report is not proof that a model extracted every semantic detail correctly; uncertain coverage and unmatched answers must remain visible.
+### Options
 
-### Source and answer provenance
+Any non-empty `options` payload is structurally validated, regardless of the declared question type. Keys must be non-empty, alphanumeric and unique (case-insensitively); contents must be non-empty and unique after representation normalization. A non-choice payload can keep valid options; malformed options quarantine the candidate.
 
-`questions.source_ref` retains the document and block identity, original label and section, page indices, source spans, and source metadata. Explicitly unverified answer or explanation evidence cannot be published or used to fill an existing empty field. Safe fills must retain field-level provenance and leave existing user values intact.
+Unknown model question-type enums are not silently coerced to `other`; they quarantine the candidate with `unknown_question_type_enum`. A legitimate `other` value remains valid.
 
-Non-visual evidence must be grounded in supplied source text or an explicitly mapped DOCX image, not in the model's own reconstructed `raw_text`. An answer inferred by a model is not an extracted answer.
+### Representation normalization and three-way edit protection
 
-## API additions and compatibility
+`question_import_service::normalize` provides a versioned, whitelist-only normalization key (`REPRESENTATION_NORMALIZATION_VERSION = 1`): Unicode NFKC, full-/half-width punctuation, whitespace, LaTeX math delimiters, `^`/`_` grouping and a small set of display-only commands. It never claims general algebraic equivalence; charges, exponents, units and coefficient facts remain significant.
 
-### Persisted import report
+Re-import compares three values per field: the current database value, the last successful import baseline, and this proposal.
 
-`ExamSheetSessionMetadata.import_report` is optional for compatibility with older banks. Its version-1 payload includes:
+- The baseline is stored per question in `source_ref.import_baseline` with the normalization version.
+- With a usable baseline: an unchanged user edit is preserved; a representation-only change is not treated as an edit; a real conflict enters review with `baseline_conflict`.
+- Without a baseline, a non-empty current value enters review with `legacy_record_without_baseline`; the code does not invent a baseline from similarity.
+- A pure replay with a usable baseline and no field write does not modify `source_ref`, keeping previews and projections idempotent.
+- A version mismatch of the stored baseline makes it unusable (conservative branch).
 
-- `status`: `completed`, `partial`, `needs_review`, or `failed`.
-- Failed pages/chunks, incomplete batches, quarantined blocks, and conflicts.
-- Matched/excluded source entries and provenance/audit information.
-- `resume_available`, which is true only when a usable checkpoint exists.
+## Publication, report and indexing
 
-The frontend restores warnings from this persisted report instead of relying only on transient progress events.
+### Staging and atomic publication
 
-### Original source images
+Text and DOCX extraction results are staged in `ImportCheckpointState.candidate_results`; visual page analyses and structured batches are staged per page/batch. Model callbacks never publish questions directly.
+
+The publication boundary uses one immediate SQLite transaction for:
+
+- question creation/updates, preview projection, question-bank statistics and resource data;
+- the persisted import report and checkpoint finalization;
+- group, material and child-question publication (below);
+- index task enqueueing (below).
+
+Stable card identity derives from the session, document identity and source identity. Replay preserves user edits, answers, notes, attempt history and soft-deletion tombstones.
+
+### Groups, materials and children
+
+Materials are no longer discarded as non-questions. The pipeline captures typed blocks before answer merging and assembles groups from evidence-backed hints:
+
+- A `material`/`heading`/`figure` block may propose a group only when it is itself source-grounded, has a non-empty section, and lists explicit, bounded, unique sub-question labels. Invalid hints are removed, recorded as `group_hint_rejected`, and require review.
+- Visual imports take hints from the VLM blocks captured after figure extraction and before answer merging. Text and DOCX imports take them from the normalized candidate JSON and rebuild the same typed blocks before publication, so the checkpoint keeps the evidence across resume.
+- Group, materials and children are published inside the caller's publication transaction. Group children are excluded from the standalone path, so a child is never published twice; a blocked group never publishes a partial set.
+- Assembly requires each label to match a unique real question block in the same section. It does not pick the nearest article, use counts, or infer relations from output order. Ambiguity is reported and blocks the group.
+
+The group tables and repository publication are owned by the question-group implementation. This import path only consumes that contract and keeps standalone imports compatible.
+
+### Import report
+
+`metadata.import_report` is an additively extended, versioned report. New and current fields include:
+
+- `status`: `completed`, `partial`, `needs_review`, `failed`, or `excluded`;
+- `empty_import_reason`: `no_questions`, `no_publishable_questions`, or `all_sources_excluded_by_user`;
+- counts: `published_count`, `publishable_count`, `inserted_count`, `failed_count`, `incomplete_batch_count`, `excluded_by_user_count`, figure/deferred counts;
+- `recovery_actions`: stage-specific actions with `action`, `reason`, `severity`, and the affected `pages`/`batch_ids`/`source_ids`;
+- `completion`: derived status, `blocking_count`, `warning_count`, and per-category counts;
+- `groups` and `group_publish`: group counts, conflicts, unconsumed materials and publish outcomes;
+- checkpoint contract versions and the input fingerprint.
+
+A zero-question publication is never `completed`. Truly empty input, input containing only non-question blocks, and a user's explicit exclusion of every source have distinct terminal states. The `excluded` status is a user decision, not an import failure. Rule-recognised page furniture and explicit user exclusions are warnings; failed pages/batches, unresolved continuations, figure failures, identity/validation findings and conflicts are blocking.
+
+### Diagnostics and redaction
+
+The persisted report contains locations, counts, reasons and hashes, not duplicated user material. `raw_text`, field values, evidence quotes, model JSON and conflict values are replaced by SHA-256 plus character counts. Model-provided `source_metadata` is reduced to an allowlist (spans, verification flags, review flags). Original material remains in the protected source/`source_ref` store.
+
+## Original source images
 
 `qbank_get_source_images` accepts optional `pageIndex` and `metadataOnly` arguments in addition to `examId`.
 
@@ -51,32 +131,35 @@ The frontend restores warnings from this persisted report instead of relying onl
 - `metadataOnly: true`: return the source image directory with empty `dataUrl` values and no image reads/base64 encoding.
 - `pageIndex`: read only the selected global preview page.
 
-Responses retain camel-case `blobHash`, `dataUrl`, and `pageIndex`. Preview page indices are global across appended documents; legacy `metadata.source_image_hashes` is only a fallback when the preview has no source blobs. The image dialog prefers `source_ref.preview_page_indices` over document-local page indices, loads one page on demand, and releases its image URLs when closed.
+Responses retain camel-case `blobHash`, `dataUrl`, and `pageIndex`. Preview page indices are global across appended documents; legacy `metadata.source_image_hashes` is only a fallback when the preview has no source blobs. The image dialog prefers `source_ref.preview_page_indices`, loads one page on demand, and releases image URLs when closed.
 
-### Question exclusions
+## Question exclusions
 
-The completion screen reads all formal questions with pagination. Excluding cards resolves exact shared card IDs, soft-deletes those formal questions, and updates preview, resource data, and statistics in one transaction. Legacy banks whose preview and question identities disagree are rejected with `QBANK_IMPORT_REVIEW_REQUIRED`; no text-based guessing or partial deletion is attempted. Exclusion cannot be combined with create/edit operations in one request.
+The completion screen reads all formal questions with pagination. Excluding cards resolves exact shared card IDs, soft-deletes those formal questions, and updates preview, resource data and statistics in one transaction. Legacy banks whose preview and question identities disagree are rejected with `QBANK_IMPORT_REVIEW_REQUIRED`; no text-based guessing or partial deletion is attempted. Exclusion cannot be combined with create/edit operations in one request.
+
+## Indexing
+
+Publication and indexing are separate states. The publisher enqueues the question IDs it actually created or changed into the persistent index ledger (`vfs_index_units`, one unit per question) inside the publication transaction. A pure replay that changes nothing enqueues nothing. After commit, the index worker claims the pending units; a crashed or failed worker is recovered by the ledger's own stale-claim/backoff logic. Index retry never republishes questions.
 
 ## Resource limits
 
 Imports share a single process-wide memory permit. Image input is limited to a 200 MiB batch and 64 million pixels per image, with invalid dimensions rejected before decoding. Frontend image reads are sequential. Figure extraction retains at most three page images in its cache. These are capacity safeguards, not claims of measured end-to-end memory performance.
 
-## Validation and remaining limits
+## Validation status and remaining limits
 
-Regression tests use synthetic content and temporary databases. They cover scoped question/answer association, replay preservation, soft-deletion, complete multi-page projections beyond 100 questions, transaction rollback, truncation/alignment gates, source-image targeting, and completion-screen exclusion behavior.
+Regression fixtures are synthetic and use temporary migrated databases. They cover: scoped question/answer association; replay preservation and tombstone identity; three-way edit baselines including `Ca²⁺`/`$Ca^{2+}$`, different charges, user edits and legacy records; checkpoint schema/stage-version and fingerprint rejection; per-session lease and CAS rejection; empty/all-excluded terminal states; report redaction/severity/recovery actions; index enqueue on change and no-op replay; and text/DOCX/visual group assembly with atomic publication.
 
-Build and test results are recorded in the delivery record for the specific commit. Local application data, original user documents, build logs, and binary packages are not included in this repository or uploaded with the pull request. Installed-application GUI, real-device Android, and live-model acceptance tests must not be claimed unless actually performed.
+The final Rust/Vitest results for a given commit are recorded in the corresponding delivery record. This document does not assert that any suite is green. Application builds, installed-application GUI checks, real-document acceptance and Android device tests were not performed for this documentation update.
 
 ## Known limitations
 
-These are confirmed gaps in the current implementation, not claims that they are acceptable.
+These are confirmed current limits, not claims that they are acceptable.
 
-- **Normalized output versus literal validation.** LaTeX is the intended normalized form for formulas and ions so the frontend can render them consistently. Validation, however, removes only whitespace before comparing the model output with the verified source text. An equivalent form such as `$Ca^{2+}$` against `Ca²⁺`, or a full-width/half-width variation, can therefore reject an otherwise valid question. `preserve_existing` compares raw strings too, so a replay whose fallback path retains `（考点：…）` can be reported as `existing_question_edited` even when the user did not edit anything.
-- **Inline option splitting requires leading whitespace.** `split_inline_option_markers` only starts a new option when the option letter is preceded by whitespace. A source such as `C．……）D．……` keeps `D` inside `C`; the local fallback then publishes the wrong option count, while a model that returns four options is rejected by the exact-count check.
-- **Resume cannot repair VLM-level defects.** Resume reuses the cached per-page VLM analyses and only re-runs structuring. Unresolved `continues_from_previous/to_next` markers therefore remain unresolved on every resume. `resume_available` is true for any non-completed import with a checkpoint, even when no remaining issue is fixable by resuming; the UI can offer an effectively endless retry.
-- **Unknown page furniture blocks completion.** Page headers/footers classified as `unknown` are recorded as quarantined entries, and any quarantined entry keeps the report in `needs_review`. There is no distinction between page furniture and a potentially missed question.
-- **Tabular and multi-label answers are not associated.** Answer blocks shaped as `题号 1 2 … / 答案 B A …`, blocks labelled `4、5`, and labels that are ambiguous across sections cannot be matched to a single question. The answers remain absent rather than being guessed, but an explicit unsupported-format report or deterministic table parser is still missing.
-- **Failed-batch diagnostics are too thin.** A batch that fails identity/schema/coverage validation records only the valid-object count; the raw model response is not retained. Diagnosing whether the cause is formatting, an invented answer, or a malformed option requires reproduction or guesswork.
-- **Model availability is not preflighted.** The VLM candidate chain is tried at import time. Invalid model ids, providers without a channel, and rate limits produce repeated 502/503 retries before a working candidate is found. A cached availability probe or circuit breaker is not implemented.
-- **Publication and indexing can contend on SQLite.** A VFS indexing write concurrent with the publication transaction can fail with `database is locked`. Publication itself remains atomic and questions are committed; the indexing failure is recorded but not retried with a dedicated backoff.
-- **Code versus model boundary.** Page block segmentation is VLM-driven and per-question stem/option splitting is LLM-driven; code performs cross-page assembly, identity/coverage checks, answer association, and publication. Code cannot enumerate every layout variant. The intended boundary is that code enforces structural and evidence invariants, while normalization-aware equivalence and genuinely ambiguous cases should be resolved by canonicalization, a lightweight verifier, or explicit human review rather than repeated retries.
+- **Answer layouts are deliberately narrow.** Only layouts the answer-merge module can align to an explicit label/table cell are associated. Other table shapes, cross-section label reuse, or ambiguous label sets remain in the report as review items; there is no general document-layout solver.
+- **Representation equivalence is whitelist-only.** The normalizer does not decide algebraic equivalence, unit conversion, or arbitrary formula equivalence. Uncovered spellings and expression conflicts require human review.
+- **Group hints require explicit evidence.** There is no automatic "nearest article" binding, arbitrary group nesting, cross-group material sharing, or inference from counts/order. A missing or ambiguous child blocks the whole group rather than producing a partial group.
+- **Cross-session idempotency is not claimed.** Stable card identity includes the session and document identity. Re-importing the same document into a *new* session creates a new bank; merging into an existing bank uses its own namespace and is not an automatic document-version merge.
+- **Group child replay semantics follow the group repository.** Child relations and material updates on replay are owned by that repository; this import path does not re-edit child answers outside its publication contract.
+- **Model health and provider diagnostics are separate.** Preflighting candidate models and recording provider health are handled by the model-health work; this import path does not retry or probe providers itself.
+- **Diagnostics stay local and redacted.** Raw model responses are not persisted in the ordinary import report. Verbatim failure capture, if enabled, must be an explicit, local, time-limited diagnostic mode and must not be uploaded.
+- **Code versus model boundary.** Page segmentation is VLM-driven and per-question splitting is LLM-driven; code enforces identity, coverage, evidence, transaction and state invariants. Code cannot enumerate every layout variant. Genuinely ambiguous cases are expected to reach review, not to be retried until an answer appears.

@@ -4,6 +4,9 @@
  * 外链播放器不提供跳转 / 进度接口，所以对外句柄的 seekTo 是「带 t= 重新加载」，
  * play 只给刚请求的跳转加上自动播放，pause 无法生效；getElement 恒为 null（不能截帧）。
  * 不活跃（保活的隐藏标签）时卸载 iframe：无法暂停，只能卸载才不会在后台出声。
+ *
+ * #492：`iframe.onLoad` 只说明文档载入，不是媒体就绪。这里只上报 `documentLoaded`，
+ * isReady / isPlaying 恒为 false，界面明确提示「是否起播以 B 站页面为准」。
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -36,7 +39,8 @@ export const BilibiliEmbedPlayer: React.FC<BilibiliEmbedPlayerProps> = ({
 }) => {
   const { t } = useTranslation(['learningHub']);
   const [frame, setFrame] = useState<FrameState>({ seconds: 0, autoplay: false, nonce: 0 });
-  const [ready, setReady] = useState(false);
+  /** iframe 文档已载入——不等于媒体 ready，界面不得据此宣称可播放 */
+  const [documentLoaded, setDocumentLoaded] = useState(false);
   const seekPendingRef = useRef(false);
   const durationSec = link.durationMs > 0 ? link.durationMs / 1000 : 0;
 
@@ -51,6 +55,7 @@ export const BilibiliEmbedPlayer: React.FC<BilibiliEmbedPlayerProps> = ({
       seekTo: (seconds: number) => {
         const target = Math.max(0, durationSec > 0 ? Math.min(seconds, durationSec) : seconds);
         seekPendingRef.current = true;
+        setDocumentLoaded(false);
         setFrame((prev) => ({ seconds: target, autoplay: prev.autoplay, nonce: prev.nonce + 1 }));
       },
       play: () => {
@@ -69,13 +74,15 @@ export const BilibiliEmbedPlayer: React.FC<BilibiliEmbedPlayerProps> = ({
       currentTime: frame.seconds,
       duration: durationSec,
       isPlaying: false,
-      isReady: ready,
+      // 外链播放器没有可信的媒体状态：不伪造 isReady
+      isReady: false,
+      documentLoaded,
     });
-  }, [frame.seconds, durationSec, ready, onStatusChange]);
+  }, [frame.seconds, durationSec, documentLoaded, onStatusChange]);
 
   const handleLoad = useCallback(() => {
     seekPendingRef.current = false;
-    setReady(true);
+    setDocumentLoaded(true);
   }, []);
 
   const title = link.pageCount > 1 && link.part ? `${link.title} · P${link.page} ${link.part}` : link.title;
@@ -99,6 +106,15 @@ export const BilibiliEmbedPlayer: React.FC<BilibiliEmbedPlayerProps> = ({
           <Television size={28} weight="duotone" aria-hidden="true" />
           <span className="max-w-xs truncate px-4">{title}</span>
         </div>
+      )}
+      {isActive && documentLoaded && (
+        <p
+          data-bilibili-document-loaded="1"
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-black/60 px-3 py-1 text-[11px] text-white/80"
+          role="status"
+        >
+          {t('learningHub:mediaBilibili.playback.embedLoaded')}
+        </p>
       )}
     </div>
   );

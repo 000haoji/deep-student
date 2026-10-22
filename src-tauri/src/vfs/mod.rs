@@ -34,6 +34,7 @@ pub mod indexing;
 pub mod lance_store;
 pub mod lexical_bm25;
 pub mod media_index;
+pub mod question_index_ledger;
 // lance feature 未启用时（如 mobile-slim），提供同名 API 的 no-op stub，
 // 保持 ~30 个消费方（unified_retriever / indexing / handlers 等）无需逐一门控。
 #[cfg(not(feature = "lance"))]

@@ -21,9 +21,13 @@ import { MarkdownRenderer, StreamingMarkdownRenderer } from '@/features/chat/com
 import { LatexText } from '@/components/LatexText';
 import { ImageCropDialog } from '@/components/ImageCropDialog';
 import { loadQuestionImageUrls, QUESTION_IMAGE_LOAD_ERROR } from '@/components/questionImageLoader';
+import { InlineZoomImage, QuestionImageSlot } from '@/components/QuestionImageViews';
 import { registerBackHandler, BACK_PRIORITY } from '@/app/navigation/androidBackCoordinator';
+import { parseQuestionGroupContext } from '@/utils/qbankGroupContext';
+import type { QuestionGroupContext } from '@/types/qbankGroup';
 import DsAnalysisIconMuted from '@/components/icons/DsAnalysisIconMuted';
 import { AiExplanationWriteButton } from './practice/AiExplanationWriteButton';
+import QuestionGroupPanel from './QuestionGroupPanel';
 import { resolveAiExplanationWrite } from './practice/aiExplanation';
 import {
   CaretLeft,
@@ -167,6 +171,10 @@ export interface QuestionBankEditorProps {
   onDraftNavigationRequested?: (targetIndex: number) => void;
   /** ★ 标签页：当前面板是否为活跃标签页（控制计时器暂停） */
   isActive?: boolean;
+  /** #491 整组删除成功后通知宿主重载列表/统计（单删子题不走这里，也不联动删组）。 */
+  onGroupDeleted?: (groupId: string) => void;
+  /** #491 组材料更新后回传最新上下文（组版本已递增）。 */
+  onGroupContextUpdated?: (context: QuestionGroupContext) => void;
 }
 
 const DIFFICULTY_CONFIG: Record<Difficulty, { color: string; bg: string }> = {
@@ -273,77 +281,11 @@ const QBANK_KEYFRAMES = `
   }
 `;
 
-/** 内联放大预览图片：点击在题目区内展开/收起，不使用遮罩层灯箱 */
-const InlineZoomImage: React.FC<{
-  src: string;
-  alt: string;
-  collapsedClassName?: string;
-}> = React.memo(({ src, alt, collapsedClassName = 'max-h-64' }) => {
-  const [expanded, setExpanded] = React.useState(false);
-  const { t } = useTranslation('practice');
-  return (
-    <button
-      type="button"
-      onClick={() => setExpanded(v => !v)}
-      className={cn(
-        'block w-full focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary/40',
-        expanded ? 'cursor-zoom-out' : 'cursor-zoom-in'
-      )}
-      aria-expanded={expanded}
-      aria-label={expanded ? t('editor.imageCollapse') : t('editor.imageExpand')}
-      title={expanded ? t('editor.imageCollapse') : t('editor.imageExpand')}
-    >
-      <img
-        src={src}
-        alt={alt}
-        loading="lazy"
-        className={cn(
-          'w-full object-contain transition-[max-height] duration-300 ease-out',
-          expanded ? 'max-h-[70vh]' : collapsedClassName
-        )}
-/>
-    </button>
-  );
-});
-InlineZoomImage.displayName = 'InlineZoomImage';
-
 /** 题干 Markdown 渲染 memo 化：计时器每秒 tick 等无关重渲染时跳过富文本重渲染 */
 const QuestionContentBlock = React.memo<{ content: string }>(({ content }) => (
   <MarkdownRenderer content={content} />
 ));
 QuestionContentBlock.displayName = 'QuestionContentBlock';
-
-/** 自动关联的原始图片折叠气泡 — 默认展开 */
-/** 题目图片占位：已加载显示图片，失败显示错误占位，其余显示加载动画 */
-const QuestionImageSlot: React.FC<{
-  url: string | undefined;
-  alt: string;
-  collapsedClassName: string;
-  placeholderClassName: string;
-  iconSize: number;
-}> = ({ url, alt, collapsedClassName, placeholderClassName, iconSize }) => {
-  const { t } = useTranslation('exam_sheet');
-  if (url && url !== QUESTION_IMAGE_LOAD_ERROR) {
-    return <InlineZoomImage src={url} alt={alt} collapsedClassName={collapsedClassName} />;
-  }
-  if (url === QUESTION_IMAGE_LOAD_ERROR) {
-    return (
-      <div
-        role="img"
-        aria-label={t('image.load_failed')}
-        className={cn('w-full flex flex-col items-center justify-center gap-1 text-xs text-muted-foreground', placeholderClassName)}
-      >
-        <WarningCircle size={iconSize} />
-        <span>{t('image.load_failed')}</span>
-      </div>
-    );
-  }
-  return (
-    <div className={cn('w-full flex items-center justify-center text-muted-foreground', placeholderClassName)}>
-      <CircleNotch size={iconSize} className="animate-spin" />
-    </div>
-  );
-};
 
 const SourceImagesBubble: React.FC<{
   images: QuestionImage[];
@@ -576,6 +518,8 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
   onDraftDirtyChange,
   onDraftNavigationRequested,
   isActive,
+  onGroupDeleted,
+  onGroupContextUpdated,
 }) => {
   const { t } = useTranslation('practice');
   const [selectedAnswer, setSelectedAnswer] = useState<string>('');
@@ -961,6 +905,18 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
   }, [selectedTagProp]);
 
   const currentQuestion = questions[currentIndex];
+  // #491：题组上下文随题目透传（练习/浏览/错题/随机/搜索共用同一转换层）；
+  // 这里再解析一次保证测试或旧载荷里的原始 snake_case 也不会漏裁剪兄弟答案。
+  const parsedGroupContext = useMemo(
+    () => parseQuestionGroupContext(currentQuestion?.group_context, 'practice'),
+    [currentQuestion?.group_context],
+  );
+  // 材料编辑成功后的本地权威快照（含递增后的组版本）；切题即失效
+  const [groupContextOverride, setGroupContextOverride] = useState<QuestionGroupContext | null>(null);
+  useEffect(() => {
+    setGroupContextOverride(null);
+  }, [currentQuestion?.id]);
+  const groupContext = groupContextOverride ?? parsedGroupContext;
   const totalQuestions = questions.length;
   const progressPercent = totalQuestions > 0 ? ((currentIndex + 1) / totalQuestions) * 100 : 0;
 
@@ -2751,6 +2707,14 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
                     </div>
                   </CardHeader>
                   <CardContent className="space-y-4">
+                    {groupContext && (
+                      <QuestionGroupPanel
+                        context={groupContext}
+                        mode={browseMode ? 'edit' : 'practice'}
+                        onGroupDeleted={onGroupDeleted}
+                        onMaterialUpdated={onGroupContextUpdated}
+                      />
+                    )}
                     <div className="prose prose-sm dark:prose-invert max-w-none text-base leading-relaxed">
                       <QuestionContentBlock
                         content={currentQuestion.content || currentQuestion.ocrText || t('editor.noContent')}
@@ -3116,6 +3080,18 @@ export const QuestionBankEditor: React.FC<QuestionBankEditorProps> = ({
             </CardHeader>
 
             <CardContent className="space-y-6">
+              {groupContext && (
+                <QuestionGroupPanel
+                  context={groupContext}
+                  currentQuestionId={currentQuestion.id}
+                  mode={browseMode ? 'edit' : 'practice'}
+                  onGroupDeleted={onGroupDeleted}
+                  onMaterialUpdated={(context) => {
+                    setGroupContextOverride(context);
+                    onGroupContextUpdated?.(context);
+                  }}
+                />
+              )}
               <div className="prose prose-sm dark:prose-invert max-w-none">
                 <QuestionContentBlock
                   content={currentQuestion.content || currentQuestion.ocrText || t('editor.noContent')}

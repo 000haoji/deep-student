@@ -198,7 +198,7 @@ describe('MediaStudyView · Bilibili quality', () => {
   it('defaults to the highest quality and lists what the backend can play', async () => {
     qualityBackend();
     renderLink();
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80');
+    expect(video.props?.src).toMatch(/^bilistream:\/\/localhost\/file_link\?qn=80&s=[0-9a-f]{16}$/);
     await flush();
     expect(invokeMock).toHaveBeenCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 0 });
     expect(video.props?.quality?.value).toBe(80);
@@ -218,7 +218,7 @@ describe('MediaStudyView · Bilibili quality', () => {
     const mountsBefore = video.mounts;
 
     act(() => video.props?.quality?.onChange(64));
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=64');
+    expect(video.props?.src).toMatch(/^bilistream:\/\/localhost\/file_link\?qn=64&s=[0-9a-f]{16}$/);
     expect(video.mounts).toBe(mountsBefore + 1);
     expect(getBilibiliQualityPreference()).toBe(64);
     await flush();
@@ -241,7 +241,7 @@ describe('MediaStudyView · Bilibili quality', () => {
     // 偏好是全局的：另一个条目按 360P 请求
     cleanup();
     renderLink('file_other');
-    expect(video.props?.src).toBe('bilistream://localhost/file_other?qn=16');
+    expect(video.props?.src).toMatch(/^bilistream:\/\/localhost\/file_other\?qn=16&s=[0-9a-f]{16}$/);
   });
 
   it('tells the user when Bilibili downgrades the chosen quality', async () => {
@@ -270,10 +270,10 @@ describe('MediaStudyView · Bilibili quality', () => {
     await act(async () => {
       await refreshBilibiliAccount();
     });
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80');
+    expect(video.props?.src).toMatch(/^bilistream:\/\/localhost\/file_link\?qn=80&s=[0-9a-f]{16}$/);
     qualityBackend();
     act(() => setBilibiliAccount({ ...ACCOUNT, loggedIn: true, mid: 7 }));
-    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&e=1');
+    expect(video.props?.src).toMatch(/^bilistream:\/\/localhost\/file_link\?qn=80&e=1&s=[0-9a-f]{16}$/);
     await flush();
     expect(invokeMock).toHaveBeenLastCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 1 });
     // 换地址后同样续上位置

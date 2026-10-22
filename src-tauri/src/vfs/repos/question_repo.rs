@@ -265,6 +265,19 @@ pub struct Question {
     pub ai_feedback: Option<String>,
     pub ai_score: Option<i32>,
     pub ai_graded_at: Option<String>,
+    // ===== Issue #491 题组关系（nullable；旧数据为 None）=====
+    /// 所属题组 ID（组头不是 question；parent_id 仍是变式题语义）
+    #[serde(default)]
+    pub group_id: Option<String>,
+    /// 组内小问标签，如 "(1)" / "(a)"
+    #[serde(default)]
+    pub sub_label: Option<String>,
+    /// 组内顺序（从 1 开始）
+    #[serde(default)]
+    pub group_order: Option<i32>,
+    /// 单题读取时由后端注入的组上下文；不属于组时缺省不序列化。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_context: Option<crate::vfs::repos::question_group_repo::QuestionGroupContext>,
 }
 
 /// 作答历史记录
@@ -503,6 +516,20 @@ pub struct QuestionBankStats {
     pub updated_at: String,
 }
 
+/// 导入/恢复时的学习状态快照（JSON v2 往返需要，不能只恢复题目正文）
+#[derive(Debug, Clone, Default)]
+pub struct QuestionLearningState {
+    pub status: QuestionStatus,
+    pub user_answer: Option<String>,
+    pub is_correct: Option<bool>,
+    pub attempt_count: i32,
+    pub correct_count: i32,
+    pub last_attempt_at: Option<String>,
+    pub is_favorite: bool,
+    pub is_bookmarked: bool,
+    pub user_note: Option<String>,
+}
+
 // ============================================================================
 // VFS 题目表 Repo
 // ============================================================================
@@ -521,7 +548,7 @@ impl VfsQuestionRepo {
     /// `+` `~` `.` `?` `'` `/` 以及 AND/OR/NOT 关键字都会改变语义或直接导致
     /// `MATCH` 语法错误。黑名单式检测无法穷举，因此这里无条件按空白分词并对
     /// 每个词加双引号（词内 `"` 双写转义），词间保持 FTS5 隐式 AND 语义。
-    fn escape_fts5_query(keyword: &str) -> String {
+    pub(crate) fn escape_fts5_query(keyword: &str) -> String {
         keyword
             .split_whitespace()
             .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
@@ -543,6 +570,11 @@ impl VfsQuestionRepo {
         // 限制长度
         let truncated: String = trimmed.chars().take(MAX_SEARCH_KEYWORD_LENGTH).collect();
         Some(truncated)
+    }
+
+    /// Issue #491：题组可见性过滤（staging/不完整组内子题对 UI 不可见）
+    fn group_visibility_condition(alias: &str) -> String {
+        crate::vfs::repos::question_group_repo::visible_child_question_sql(alias)
     }
 
     /// 检查 FTS5 表是否存在
@@ -633,7 +665,10 @@ impl VfsQuestionRepo {
         let offset = (page.saturating_sub(1)) * page_size;
 
         // 5. 构建筛选条件
-        let mut where_clauses = vec!["q.deleted_at IS NULL".to_string()];
+        let mut where_clauses = vec![
+            "q.deleted_at IS NULL".to_string(),
+            Self::group_visibility_condition("q"),
+        ];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![];
         let mut param_idx = 1;
 
@@ -808,6 +843,7 @@ impl VfsQuestionRepo {
                 q.last_attempt_at, q.user_note, q.is_favorite, q.is_bookmarked,
                 q.source_type, q.source_ref, q.images_json, q.parent_id, q.created_at, q.updated_at,
                 q.ai_feedback, q.ai_score, q.ai_graded_at, q.structured_data,
+                q.group_id, q.sub_label, q.group_order,
                 highlight(questions_fts, 0, '<mark>', '</mark>') as hl_content,
                 highlight(questions_fts, 1, '<mark>', '</mark>') as hl_answer,
                 highlight(questions_fts, 2, '<mark>', '</mark>') as hl_explanation,
@@ -838,11 +874,11 @@ impl VfsQuestionRepo {
             // 解析基础 Question 字段
             let question = Self::row_to_question(row)?;
 
-            // 解析高亮和分数字段（索引 30-33；structured_data 在 29）
-            let hl_content: Option<String> = row.get(30)?;
-            let hl_answer: Option<String> = row.get(31)?;
-            let hl_explanation: Option<String> = row.get(32)?;
-            let relevance: f64 = row.get(33)?;
+            // 解析高亮和分数字段（索引 33-36；structured_data 在 29，group 三列在 30-32）
+            let hl_content: Option<String> = row.get(33)?;
+            let hl_answer: Option<String> = row.get(34)?;
+            let hl_explanation: Option<String> = row.get(35)?;
+            let relevance: f64 = row.get(36)?;
 
             Ok(QuestionSearchResult {
                 question,
@@ -853,7 +889,14 @@ impl VfsQuestionRepo {
             })
         })?;
 
-        let results: Vec<QuestionSearchResult> = rows.filter_map(log_and_skip_err).collect();
+        let mut results: Vec<QuestionSearchResult> = rows.filter_map(log_and_skip_err).collect();
+        {
+            let mut questions: Vec<Question> = results.iter().map(|r| r.question.clone()).collect();
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, &mut questions)?;
+            for (result, question) in results.iter_mut().zip(questions.into_iter()) {
+                result.question = question;
+            }
+        }
         let has_more = (offset + page_size) < total as u32;
         let search_time_ms = start_time.elapsed().as_millis() as u64;
 
@@ -890,6 +933,7 @@ impl VfsQuestionRepo {
             "deleted_at IS NULL".to_string(),
             r"(content LIKE ?1 ESCAPE '\' OR answer LIKE ?1 ESCAPE '\' OR explanation LIKE ?1 ESCAPE '\' OR tags LIKE ?1 ESCAPE '\')"
                 .to_string(),
+            Self::group_visibility_condition("questions"),
         ];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(like_pattern.clone())];
         let mut param_idx = 2;
@@ -995,7 +1039,8 @@ impl VfsQuestionRepo {
                    status, user_answer, is_correct, attempt_count, correct_count,
                    last_attempt_at, user_note, is_favorite, is_bookmarked,
                    source_type, source_ref, images_json, parent_id, created_at, updated_at,
-                   ai_feedback, ai_score, ai_graded_at, structured_data
+                   ai_feedback, ai_score, ai_graded_at, structured_data,
+                   group_id, sub_label, group_order
             FROM questions
             WHERE {}
             ORDER BY created_at ASC, id ASC
@@ -1023,7 +1068,14 @@ impl VfsQuestionRepo {
             })
         })?;
 
-        let results: Vec<QuestionSearchResult> = rows.filter_map(log_and_skip_err).collect();
+        let mut results: Vec<QuestionSearchResult> = rows.filter_map(log_and_skip_err).collect();
+        {
+            let mut questions: Vec<Question> = results.iter().map(|r| r.question.clone()).collect();
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, &mut questions)?;
+            for (result, question) in results.iter_mut().zip(questions.into_iter()) {
+                result.question = question;
+            }
+        }
         let has_more = (offset + page_size) < total as u32;
         let search_time_ms = start_time.elapsed().as_millis() as u64;
 
@@ -1127,7 +1179,11 @@ impl VfsQuestionRepo {
         let offset = (page.saturating_sub(1)) * page_size;
 
         // 构建 WHERE 子句
-        let mut conditions = vec!["exam_id = ?1".to_string(), "deleted_at IS NULL".to_string()];
+        let mut conditions = vec![
+            "exam_id = ?1".to_string(),
+            "deleted_at IS NULL".to_string(),
+            Self::group_visibility_condition("questions"),
+        ];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(exam_id.to_string())];
         let mut param_idx = 2;
 
@@ -1264,7 +1320,8 @@ impl VfsQuestionRepo {
                    status, user_answer, is_correct, attempt_count, correct_count,
                    last_attempt_at, user_note, is_favorite, is_bookmarked,
                    source_type, source_ref, images_json, parent_id, created_at, updated_at,
-                   ai_feedback, ai_score, ai_graded_at, structured_data
+                   ai_feedback, ai_score, ai_graded_at, structured_data,
+                   group_id, sub_label, group_order
             FROM questions
             WHERE {}
             ORDER BY created_at ASC, id ASC
@@ -1283,7 +1340,8 @@ impl VfsQuestionRepo {
         let mut stmt = conn.prepare(&query_sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), Self::row_to_question)?;
 
-        let questions: Vec<Question> = rows.filter_map(log_and_skip_err).collect();
+        let mut questions: Vec<Question> = rows.filter_map(log_and_skip_err).collect();
+        crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, &mut questions)?;
         let has_more = (offset + page_size) < total as u32;
 
         debug!(
@@ -1322,12 +1380,17 @@ impl VfsQuestionRepo {
         let page = page.max(1);
         let page_size = page_size.clamp(1, 200);
         let offset = (page.saturating_sub(1)) * page_size;
-        const BASE: &str = "FROM questions q
+        let base = format!(
+            "FROM questions q
              INNER JOIN exam_sheets e ON e.id = q.exam_id AND e.deleted_at IS NULL
-             WHERE q.deleted_at IS NULL AND q.status = 'review'";
+             WHERE q.deleted_at IS NULL AND q.status = 'review'
+               AND {}",
+            Self::group_visibility_condition("q")
+        );
+        let base = base.as_str();
 
         let mut exams_stmt = conn.prepare(&format!(
-            "SELECT q.exam_id, e.exam_name, COUNT(*) AS n {BASE}
+            "SELECT q.exam_id, e.exam_name, COUNT(*) AS n {base}
              GROUP BY q.exam_id ORDER BY n DESC, e.exam_name COLLATE NOCASE ASC"
         ))?;
         let exams = exams_stmt
@@ -1374,7 +1437,7 @@ impl VfsQuestionRepo {
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
         let total: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) {BASE}{extra}"),
+            &format!("SELECT COUNT(*) {base}{extra}"),
             params_refs.as_slice(),
             |row| row.get(0),
         )?;
@@ -1396,8 +1459,9 @@ impl VfsQuestionRepo {
                    q.last_attempt_at, q.user_note, q.is_favorite, q.is_bookmarked,
                    q.source_type, q.source_ref, q.images_json, q.parent_id, q.created_at, q.updated_at,
                    q.ai_feedback, q.ai_score, q.ai_graded_at, q.structured_data,
+                   q.group_id, q.sub_label, q.group_order,
                    e.exam_name
-            {BASE}{extra}
+            {base}{extra}
             ORDER BY {order_by}
             LIMIT ?{limit_idx} OFFSET ?{}
             "#,
@@ -1406,15 +1470,23 @@ impl VfsQuestionRepo {
         let params_refs: Vec<&dyn rusqlite::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&query_sql)?;
-        let items: Vec<MistakeQuestion> = stmt
+        let mut items: Vec<MistakeQuestion> = stmt
             .query_map(params_refs.as_slice(), |row| {
                 Ok(MistakeQuestion {
                     question: Self::row_to_question(row)?,
-                    exam_name: row.get(30)?,
+                    exam_name: row.get(33)?,
                 })
             })?
             .filter_map(log_and_skip_err)
             .collect();
+        {
+            let mut questions: Vec<Question> =
+                items.iter().map(|item| item.question.clone()).collect();
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, &mut questions)?;
+            for (item, question) in items.iter_mut().zip(questions.into_iter()) {
+                item.question = question;
+            }
+        }
         let has_more = (offset as i64 + page_size as i64) < total;
 
         Ok(MistakeListResult {
@@ -1440,7 +1512,11 @@ impl VfsQuestionRepo {
         exclude_ids: &[String],
         last_attempt_before: Option<&str>,
     ) -> (Vec<String>, Vec<Box<dyn rusqlite::ToSql>>, usize) {
-        let mut conditions = vec!["exam_id = ?1".to_string(), "deleted_at IS NULL".to_string()];
+        let mut conditions = vec![
+            "exam_id = ?1".to_string(),
+            "deleted_at IS NULL".to_string(),
+            Self::group_visibility_condition("questions"),
+        ];
         let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(exam_id.to_string())];
         let mut param_idx = 2;
 
@@ -1651,7 +1727,8 @@ impl VfsQuestionRepo {
                    status, user_answer, is_correct, attempt_count, correct_count,
                    last_attempt_at, user_note, is_favorite, is_bookmarked,
                    source_type, source_ref, images_json, parent_id, created_at, updated_at,
-                   ai_feedback, ai_score, ai_graded_at, structured_data
+                   ai_feedback, ai_score, ai_graded_at, structured_data,
+                   group_id, sub_label, group_order
             FROM questions
             WHERE {}
             ORDER BY RANDOM()
@@ -1665,7 +1742,8 @@ impl VfsQuestionRepo {
             params_vec.iter().map(|p| p.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params_refs.as_slice(), Self::row_to_question)?;
-        let questions: Vec<Question> = rows.filter_map(log_and_skip_err).collect();
+        let mut questions: Vec<Question> = rows.filter_map(log_and_skip_err).collect();
+        crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, &mut questions)?;
 
         debug!(
             "[VFS::QuestionRepo] Random selected {} questions for exam_id={}, limit={}",
@@ -1680,11 +1758,11 @@ impl VfsQuestionRepo {
     /// 统计题目数量
     pub fn count_questions(db: &VfsDatabase, exam_id: &str) -> VfsResult<i64> {
         let conn = db.get_conn_safe()?;
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM questions WHERE exam_id = ?1 AND deleted_at IS NULL",
-            params![exam_id],
-            |row| row.get(0),
-        )?;
+        let sql = format!(
+            "SELECT COUNT(*) FROM questions WHERE exam_id = ?1 AND deleted_at IS NULL AND {}",
+            Self::group_visibility_condition("questions")
+        );
+        let count: i64 = conn.query_row(&sql, params![exam_id], |row| row.get(0))?;
         Ok(count)
     }
 
@@ -1703,22 +1781,29 @@ impl VfsQuestionRepo {
         conn: &Connection,
         question_id: &str,
     ) -> VfsResult<Option<Question>> {
-        let mut stmt = conn.prepare(
+        let sql = format!(
             r#"
             SELECT id, exam_id, card_id, question_label, content, options_json,
                    answer, explanation, question_type, difficulty, tags,
                    status, user_answer, is_correct, attempt_count, correct_count,
                    last_attempt_at, user_note, is_favorite, is_bookmarked,
                    source_type, source_ref, images_json, parent_id, created_at, updated_at,
-                   ai_feedback, ai_score, ai_graded_at, structured_data
+                   ai_feedback, ai_score, ai_graded_at, structured_data,
+                   group_id, sub_label, group_order
             FROM questions
             WHERE id = ?1 AND deleted_at IS NULL
+              AND {}
             "#,
-        )?;
+            Self::group_visibility_condition("questions")
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
-        let question = stmt
+        let mut question = stmt
             .query_row(params![question_id], Self::row_to_question)
             .optional()?;
+        if let Some(item) = question.as_mut() {
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, std::slice::from_mut(item))?;
+        }
 
         Ok(question)
     }
@@ -1743,22 +1828,29 @@ impl VfsQuestionRepo {
         exam_id: &str,
         card_id: &str,
     ) -> VfsResult<Option<Question>> {
-        let mut stmt = conn.prepare(
+        let sql = format!(
             r#"
             SELECT id, exam_id, card_id, question_label, content, options_json,
                    answer, explanation, question_type, difficulty, tags,
                    status, user_answer, is_correct, attempt_count, correct_count,
                    last_attempt_at, user_note, is_favorite, is_bookmarked,
                    source_type, source_ref, images_json, parent_id, created_at, updated_at,
-                   ai_feedback, ai_score, ai_graded_at, structured_data
+                   ai_feedback, ai_score, ai_graded_at, structured_data,
+                   group_id, sub_label, group_order
             FROM questions
             WHERE exam_id = ?1 AND (card_id = ?2 OR id = ?2) AND deleted_at IS NULL
+              AND {}
             "#,
-        )?;
+            Self::group_visibility_condition("questions")
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
-        let question = stmt
+        let mut question = stmt
             .query_row(params![exam_id, card_id], Self::row_to_question)
             .optional()?;
+        if let Some(item) = question.as_mut() {
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, std::slice::from_mut(item))?;
+        }
 
         Ok(question)
     }
@@ -1793,11 +1885,14 @@ impl VfsQuestionRepo {
                        status, user_answer, is_correct, attempt_count, correct_count,
                        last_attempt_at, user_note, is_favorite, is_bookmarked,
                        source_type, source_ref, images_json, parent_id, created_at, updated_at,
-                       ai_feedback, ai_score, ai_graded_at, structured_data
+                       ai_feedback, ai_score, ai_graded_at, structured_data,
+                       group_id, sub_label, group_order
                 FROM questions
                 WHERE id IN ({}) AND deleted_at IS NULL
+                  AND {}
                 "#,
-                placeholders.join(", ")
+                placeholders.join(", "),
+                Self::group_visibility_condition("questions"),
             );
 
             let params_refs: Vec<&dyn rusqlite::ToSql> =
@@ -1806,6 +1901,8 @@ impl VfsQuestionRepo {
             let rows = stmt.query_map(params_refs.as_slice(), Self::row_to_question)?;
             questions.extend(rows.filter_map(log_and_skip_err));
         }
+
+        crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::attach_group_contexts_with_conn(conn, &mut questions)?;
 
         Ok(questions)
     }
@@ -2139,6 +2236,60 @@ impl VfsQuestionRepo {
         })
     }
 
+    /// 在**调用方事务内**恢复学习状态（JSON v2 / 备份往返）。
+    ///
+    /// - `expected_updated_at`：可选 CAS；`Some` 时仅当当前值一致才写入。
+    /// - 不改变 `created_at`，`updated_at` 由语句自身前移。
+    pub fn restore_learning_state_with_conn(
+        conn: &Connection,
+        question_id: &str,
+        state: &QuestionLearningState,
+        expected_updated_at: Option<&str>,
+    ) -> VfsResult<Question> {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut sql = String::from(
+            "UPDATE questions SET status = ?1, user_answer = ?2, is_correct = ?3,
+                    attempt_count = ?4, correct_count = ?5, last_attempt_at = ?6,
+                    is_favorite = ?7, is_bookmarked = ?8, user_note = ?9, updated_at = ?10
+             WHERE id = ?11 AND deleted_at IS NULL",
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(state.status.as_str().to_string()),
+            Box::new(state.user_answer.clone()),
+            Box::new(state.is_correct.map(|v| if v { 1 } else { 0 })),
+            Box::new(state.attempt_count),
+            Box::new(state.correct_count),
+            Box::new(state.last_attempt_at.clone()),
+            Box::new(if state.is_favorite { 1 } else { 0 }),
+            Box::new(if state.is_bookmarked { 1 } else { 0 }),
+            Box::new(state.user_note.clone()),
+            Box::new(now),
+            Box::new(question_id.to_string()),
+        ];
+        if let Some(expected) = expected_updated_at {
+            sql.push_str(" AND updated_at = ?12");
+            values.push(Box::new(expected.to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        let affected = conn.execute(&sql, refs.as_slice())?;
+        if affected == 0 {
+            if let Some(current) = Self::get_question_with_conn(conn, question_id)? {
+                return Err(VfsError::Other(format!(
+                    "QBANK_CONFLICT: question_id={}, expected_updated_at={:?}, actual_updated_at={}",
+                    question_id, expected_updated_at, current.updated_at
+                )));
+            }
+            return Err(VfsError::NotFound {
+                resource_type: "question".to_string(),
+                id: question_id.to_string(),
+            });
+        }
+        Self::get_question_with_conn(conn, question_id)?.ok_or_else(|| VfsError::NotFound {
+            resource_type: "question".to_string(),
+            id: question_id.to_string(),
+        })
+    }
+
     /// 增量更新答题状态
     pub fn submit_answer(
         db: &VfsDatabase,
@@ -2237,23 +2388,63 @@ impl VfsQuestionRepo {
 
     /// 软删除题目（使用现有连接）
     pub fn delete_question_with_conn(conn: &Connection, question_id: &str) -> VfsResult<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        let affected = conn.execute(
-            "UPDATE questions SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
-            params![now, question_id],
-        )?;
-
-        if affected == 0 {
-            return Err(VfsError::NotFound {
-                resource_type: "question".to_string(),
-                id: question_id.to_string(),
-            });
-        }
-
-        info!(
-            "[VFS::QuestionRepo] Soft deleted question id={}",
-            question_id
+        // 子题删除 + 组 manifest/版本修复必须原子：使用 SAVEPOINT 兼容外层事务。
+        let savepoint = format!(
+            "sp_delete_question_{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
         );
+        conn.execute(&format!("SAVEPOINT {}", savepoint), [])?;
+        let result = (|| -> VfsResult<()> {
+            let now = chrono::Utc::now().to_rfc3339();
+            let affected = conn.execute(
+                "UPDATE questions SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+                params![now, question_id],
+            )?;
+
+            if affected == 0 {
+                return Err(VfsError::NotFound {
+                    resource_type: "question".to_string(),
+                    id: question_id.to_string(),
+                });
+            }
+
+            Self::sync_group_after_child_delete(conn, question_id)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => {
+                conn.execute(&format!("RELEASE {}", savepoint), [])?;
+                info!(
+                    "[VFS::QuestionRepo] Soft deleted question id={}",
+                    question_id
+                );
+                Ok(())
+            }
+            Err(error) => {
+                let _ = conn.execute(&format!("ROLLBACK TO {}", savepoint), []);
+                let _ = conn.execute(&format!("RELEASE {}", savepoint), []);
+                Err(error)
+            }
+        }
+    }
+
+    /// 子题被软删后同步其题组（manifest/版本/重索引），必须与删除同一事务。
+    fn sync_group_after_child_delete(conn: &Connection, question_id: &str) -> VfsResult<()> {
+        let group_id: Option<Option<String>> = conn
+            .query_row(
+                "SELECT group_id FROM questions WHERE id = ?1",
+                params![question_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(Some(group_id)) = group_id {
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::remove_child_from_group_with_conn(
+                conn,
+                &group_id,
+                question_id,
+            )?;
+        }
         Ok(())
     }
 
@@ -2286,6 +2477,8 @@ impl VfsQuestionRepo {
             });
         }
 
+        Self::sync_group_after_child_delete(conn, question_id)?;
+
         info!(
             "[VFS::QuestionRepo] OCC soft deleted question id={}",
             question_id
@@ -2315,6 +2508,9 @@ impl VfsQuestionRepo {
                     "UPDATE questions SET deleted_at = ?1, updated_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
                     params![now, id],
                 )?;
+                if affected > 0 {
+                    Self::sync_group_after_child_delete(conn, id)?;
+                }
                 deleted += affected;
             }
             Ok(deleted)
@@ -2455,9 +2651,13 @@ impl VfsQuestionRepo {
     /// 按题型统计题目数量（组卷配置的前端余量校验用）
     pub fn count_by_type(db: &VfsDatabase, exam_id: &str) -> VfsResult<HashMap<String, u32>> {
         let conn = db.get_conn_safe()?;
-        let mut stmt = conn.prepare(
-            "SELECT question_type, COUNT(*) FROM questions WHERE exam_id = ?1 GROUP BY question_type",
-        )?;
+        let sql = format!(
+            "SELECT question_type, COUNT(*) FROM questions
+             WHERE exam_id = ?1 AND deleted_at IS NULL AND {}
+             GROUP BY question_type",
+            Self::group_visibility_condition("questions")
+        );
+        let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map(params![exam_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })?;
@@ -2525,7 +2725,7 @@ impl VfsQuestionRepo {
         // 计算各项统计
         // COALESCE：exam 下没有任何题目时 SUM(...) 为 NULL，直接 row.get::<i32>
         // 会报 InvalidColumnType，导致"删空题目集后刷新统计必失败"。
-        let stats: (i32, i32, i32, i32, i32, i32, i32) = conn.query_row(
+        let stats_sql = format!(
             r#"
             SELECT
                 COUNT(*) as total,
@@ -2537,9 +2737,12 @@ impl VfsQuestionRepo {
                 COALESCE(SUM(correct_count), 0) as total_correct
             FROM questions
             WHERE exam_id = ?1 AND deleted_at IS NULL
+              AND {}
             "#,
-            params![exam_id],
-            |row| {
+            Self::group_visibility_condition("questions")
+        );
+        let stats: (i32, i32, i32, i32, i32, i32, i32) =
+            conn.query_row(&stats_sql, params![exam_id], |row| {
                 Ok((
                     row.get::<_, i32>(0)?,
                     row.get::<_, i32>(1)?,
@@ -2549,8 +2752,7 @@ impl VfsQuestionRepo {
                     row.get::<_, i32>(5)?,
                     row.get::<_, i32>(6)?,
                 ))
-            },
-        )?;
+            })?;
 
         let correct_rate = if stats.5 > 0 {
             stats.6 as f64 / stats.5 as f64
@@ -2906,6 +3108,10 @@ impl VfsQuestionRepo {
             ai_feedback: row.get(26)?,
             ai_score,
             ai_graded_at: row.get(28)?,
+            group_id: row.get(30)?,
+            sub_label: row.get(31)?,
+            group_order: row.get(32)?,
+            group_context: None,
         })
     }
 }

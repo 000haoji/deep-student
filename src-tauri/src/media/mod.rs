@@ -12,13 +12,17 @@
 //! - [`commands`]：Tauri 命令（`media_transcribe_*` / `media_transcript_*` / `media_progress_*`）
 //! - [`library`]：「音视频」子应用的资源库视图（`media_library_list` / `media_related_notes`）
 //! - [`bilibili`]：B 站链接 → 字幕（新建链接条目 / 给已有媒体挂字幕，`media_bilibili_*`）
+//! - [`bilibili_stream`]：链接条目的应用内播放（`bilistream://` 代理，Range / 候选轮换 / 诊断）
+//! - [`bilibili_cdn`]、[`http_range`]：播放代理的 CDN 安全校验与 HTTP Range 契约（纯逻辑）
 
 pub mod asr;
 pub mod bilibili;
 pub mod bilibili_auth;
+pub mod bilibili_cdn;
 pub mod bilibili_stream;
 pub mod commands;
 pub mod decoder;
+pub mod http_range;
 pub mod ledger;
 pub mod library;
 pub mod pipeline;

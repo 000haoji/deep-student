@@ -16,4 +16,9 @@ export interface MediaPlayerStatus {
   duration: number;
   isPlaying: boolean;
   isReady: boolean;
+  /**
+   * 仅外链 iframe 使用：文档已载入。**不是**媒体 ready——
+   * 不影响 isReady / isPlaying（恒 false），也不能据此宣称可播放。
+   */
+  documentLoaded?: boolean;
 }

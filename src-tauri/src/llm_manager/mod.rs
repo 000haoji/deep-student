@@ -2,6 +2,7 @@ pub mod adapters;
 mod builtin_vendors;
 mod exam_engine;
 pub(crate) mod model2_pipeline;
+pub mod model_health;
 pub(crate) mod parser;
 pub(crate) mod provider_quirks;
 mod rag_extension;

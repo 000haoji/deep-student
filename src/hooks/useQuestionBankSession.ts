@@ -18,6 +18,7 @@ import {
   type PracticeSessionOwner,
   type DailyProgressSnapshot,
 } from '@/stores/questionBankStore';
+import { parseQuestionGroupContext } from '@/utils/qbankGroupContext';
 
 // Store 侧类型（snake_case，与 Rust 序列化一致）
 export interface StoreQuestion {
@@ -49,6 +50,11 @@ export interface StoreQuestion {
    * 本 hook 只负责透传，不做解析；契约类型见 questionBankApi.QuestionStructuredData。
    */
   structured_data?: QuestionStructuredData | null;
+  /** #491 题组关系与单题上下文（snake_case 透传，由转换层裁剪） */
+  group_id?: string | null;
+  sub_label?: string | null;
+  group_order?: number | null;
+  group_context?: unknown;
 }
 
 interface StoreStats {
@@ -128,6 +134,10 @@ export function convertToApiQuestion(q: StoreQuestion): Question {
     ai_score: q.ai_score,
     ai_graded_at: q.ai_graded_at,
     sourceRef: q.source_ref ?? null,
+    groupId: q.group_id ?? null,
+    subLabel: q.sub_label ?? null,
+    groupOrder: q.group_order ?? null,
+    group_context: parseQuestionGroupContext(q.group_context, 'practice'),
   };
   // 透传新题型结构化数据（不做穷举解析；组件侧经 parse*Data 收窄校验）
   if (q.structured_data !== undefined) {

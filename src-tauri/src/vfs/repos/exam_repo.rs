@@ -921,7 +921,40 @@ impl VfsExamRepo {
             }
         }
 
+        // 3. question_group_materials.images_json 中的材料配图（Issue #491）
+        if Self::table_exists(conn, "question_group_materials") {
+            let mut stmt = conn.prepare(
+                "SELECT images_json FROM question_group_materials
+                 WHERE exam_id = ?1 AND images_json IS NOT NULL AND images_json != '[]'",
+            )?;
+            let material_rows = stmt
+                .query_map(params![exam_id], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok());
+            for images_json in material_rows {
+                if let Ok(images) = serde_json::from_str::<Value>(&images_json) {
+                    if let Some(arr) = images.as_array() {
+                        for img in arr {
+                            if let Some(hash) = img.get("hash").and_then(|h| h.as_str()) {
+                                if !hash.is_empty() {
+                                    hashes.push(hash.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(hashes)
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            params![table],
+            |row| row.get(0),
+        )
+        .unwrap_or(false)
     }
 
     /// 永久删除题目集识别记录（使用现有连接）
@@ -1003,6 +1036,20 @@ impl VfsExamRepo {
                 "DELETE FROM question_bank_stats WHERE exam_id = ?1",
                 params![exam_id],
             )?;
+
+            // 7.5 题组与材料（Issue #491）：先材料后组，避免 FK 约束
+            if Self::table_exists(conn, "question_group_materials") {
+                conn.execute(
+                    "DELETE FROM question_group_materials WHERE exam_id = ?1",
+                    params![exam_id],
+                )?;
+            }
+            if Self::table_exists(conn, "question_groups") {
+                conn.execute(
+                    "DELETE FROM question_groups WHERE exam_id = ?1",
+                    params![exam_id],
+                )?;
+            }
 
             // 8. 删除关联的 questions
             conn.execute("DELETE FROM questions WHERE exam_id = ?1", params![exam_id])?;
@@ -1394,6 +1441,114 @@ impl VfsExamRepo {
 
         debug!("[VFS::ExamRepo] Updated import_state for exam {}", exam_id);
         Ok(())
+    }
+
+    /// 读取有效导入目标（不存在/软删 → NotFound）。
+    ///
+    /// Issue #490：导入/续导开始前必须确认目标题目集仍可写，避免对已删除题目集
+    /// 做昂贵调用后才发现目标不存在。
+    pub fn get_import_target_with_conn(
+        conn: &Connection,
+        exam_id: &str,
+    ) -> VfsResult<VfsExamSheet> {
+        Self::get_exam_sheet_with_conn(conn, exam_id)?.ok_or_else(|| VfsError::NotFound {
+            resource_type: "exam_sheet".to_string(),
+            id: exam_id.to_string(),
+        })
+    }
+
+    /// 导入中间状态 CAS 更新（Issue #490）。
+    ///
+    /// - `expected_state`: 上次读到的 `import_state_json` 原文；`Some` 时仅当当前值
+    ///   完全一致才写入（乐观锁），`None` 表示不比较内容（仍校验存在/状态）。
+    /// - `require_status`: 例如 `Some("importing")`，避免对 completed/failed 题目集
+    ///   回写中间状态。
+    ///
+    /// 返回 `Ok(false)` 表示 CAS/前置条件未命中（**不静默**：调用方必须显式处理，
+    /// 不得当作成功继续发布）。
+    pub fn update_import_state_cas_with_conn(
+        conn: &Connection,
+        exam_id: &str,
+        import_state_json: &Value,
+        expected_state: Option<&str>,
+        require_status: Option<&str>,
+    ) -> VfsResult<bool> {
+        let state_str = serde_json::to_string(import_state_json).map_err(|e| {
+            VfsError::Serialization(format!("Failed to serialize import_state_json: {}", e))
+        })?;
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+
+        let mut sql = String::from(
+            "UPDATE exam_sheets SET import_state_json = ?1, updated_at = ?2 \
+             WHERE id = ?3 AND deleted_at IS NULL",
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![
+            Box::new(state_str),
+            Box::new(now),
+            Box::new(exam_id.to_string()),
+        ];
+        if let Some(expected) = expected_state {
+            sql.push_str(" AND import_state_json IS ?4");
+            values.push(Box::new(expected.to_string()));
+        } else {
+            sql.push_str(" AND import_state_json IS NOT NULL");
+        }
+        if let Some(status) = require_status {
+            let idx = values.len() + 1;
+            sql.push_str(&format!(" AND status = ?{}", idx));
+            values.push(Box::new(status.to_string()));
+        }
+
+        let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        let affected = conn.execute(&sql, refs.as_slice())?;
+        if affected == 0 {
+            warn!(
+                "[VFS::ExamRepo] import_state CAS missed for exam {} (expected_state={:?}, require_status={:?})",
+                exam_id, expected_state, require_status
+            );
+            return Ok(false);
+        }
+        debug!(
+            "[VFS::ExamRepo] import_state CAS updated for exam {}",
+            exam_id
+        );
+        Ok(true)
+    }
+
+    /// 清除导入中间状态的 CAS 版本（`expected_state` 不匹配时不清理）。
+    pub fn clear_import_state_cas_with_conn(
+        conn: &Connection,
+        exam_id: &str,
+        expected_state: Option<&str>,
+    ) -> VfsResult<bool> {
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
+        let mut sql = String::from(
+            "UPDATE exam_sheets SET import_state_json = NULL, updated_at = ?1 WHERE id = ?2",
+        );
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> =
+            vec![Box::new(now), Box::new(exam_id.to_string())];
+        if let Some(expected) = expected_state {
+            sql.push_str(" AND import_state_json IS ?3");
+            values.push(Box::new(expected.to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        let affected = conn.execute(&sql, refs.as_slice())?;
+        if affected == 0 {
+            warn!(
+                "[VFS::ExamRepo] clear_import_state CAS missed for exam {}",
+                exam_id
+            );
+            return Ok(false);
+        }
+        info!(
+            "[VFS::ExamRepo] Cleared import_state (CAS) for exam {}",
+            exam_id
+        );
+        Ok(true)
     }
 
     /// 清除导入中间状态（导入完成后调用）

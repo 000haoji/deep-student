@@ -21,12 +21,15 @@ import {
   ArrowsOut,
   ArrowsIn,
   CircleNotch,
+  WarningCircle,
 } from '@phosphor-icons/react';
 import { cn } from '@/lib/utils';
 import { DsButton } from '@/components/ui/DsButton';
 import { Slider } from '@/components/ui/shad/Slider';
 import { formatMediaTime } from '../previewUtils';
 import { useMediaPlayback } from './useMediaPlayback';
+import { useMediaLoadState } from './useMediaLoadState';
+import { isMediaLoadBlocked, isMediaLoadBusy, mediaLoadFailureKey, type MediaLoadState } from './mediaLoadState';
 import { MediaScrubber, type MediaScrubberMarker, type MediaScrubberRange } from './MediaScrubber';
 import { PlaybackRateMenu } from './PlaybackRateMenu';
 import { QualityMenu, type QualityMenuOption } from './QualityMenu';
@@ -58,6 +61,12 @@ export interface VideoPlayerProps {
   handleRef?: React.Ref<MediaPlayerHandle>;
   /** 播放状态变化（~10Hz，用于字幕跟随高亮与断点续播） */
   onStatusChange?: (status: MediaPlayerStatus) => void;
+  /** 有界加载状态（准备 / 加载 / 缓冲 / 播放 / 停滞 / 失败 / 取消） */
+  onLoadStateChange?: (state: MediaLoadState) => void;
+  /** 重试回调（B 站链接由上层换 session / 地址）；不传时内部重载当前源 */
+  onRetry?: () => void;
+  /** 播放会话 id（B 站链接与 Rust 媒体事件关联）；不传时内部生成 */
+  sessionId?: string;
   /** 渲染在 <video> 内的子节点（WebVTT <track>） */
   trackSlot?: React.ReactNode;
   /** 帧截取需要 CORS 模式读取 filestream，canvas 才不被污染 */
@@ -87,6 +96,9 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
   onError,
   handleRef,
   onStatusChange,
+  onLoadStateChange,
+  onRetry,
+  sessionId,
   trackSlot,
   crossOrigin,
   extraControls,
@@ -125,7 +137,30 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
     toggleMute,
     setRate,
     toggleLoop,
+    reload,
   } = useMediaPlayback<HTMLVideoElement>({ src, isActive, onError });
+
+  const { state: loadState, retry: retryLoad } = useMediaLoadState({
+    mediaRef,
+    sessionKey: src,
+    sessionId,
+  });
+  const loadBlocked = isMediaLoadBlocked(loadState);
+  const loadBusy = isMediaLoadBusy(loadState);
+  const loadFailureKey = mediaLoadFailureKey(loadState);
+
+  useEffect(() => {
+    onLoadStateChange?.(loadState);
+  }, [loadState, onLoadStateChange]);
+
+  const handleRetry = useCallback(() => {
+    if (onRetry) {
+      onRetry();
+      return;
+    }
+    retryLoad();
+    reload();
+  }, [onRetry, retryLoad, reload]);
 
   useImperativeHandle(
     handleRef,
@@ -408,6 +443,7 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       onKeyDown={handleKeyDown}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
+      data-media-load-state={loadState.phase}
       className={cn(
         'group relative flex h-full flex-col overflow-hidden bg-black outline-none',
         'focus-visible:ring-2 focus-visible:ring-ring/40',
@@ -462,15 +498,45 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
         )}
       </div>
 
-      {/* 缓冲指示 */}
-      {(isBuffering || !isReady) && (
+      {/* 缓冲指示：只在有界加载阶段转圈；停滞 / 失败后必须停，改给可执行操作 */}
+      {(isBuffering || !isReady) && !loadBlocked && (
         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
           <CircleNotch size={40} className="animate-spin text-white/80" aria-hidden="true" />
         </div>
       )}
 
+      {/* 停滞 / 失败：停止转圈，显示结构化原因与重试 */}
+      {loadBlocked && (
+        <div
+          data-media-load-failed={loadState.phase === 'failed' ? '' : undefined}
+          data-media-load-stalled={loadState.phase === 'stalled' ? '' : undefined}
+          data-media-load-reason={loadState.reason ?? undefined}
+          className="absolute inset-0 z-10 flex items-center justify-center bg-black/55 px-6"
+        >
+          <div className="flex max-w-sm flex-col items-center gap-2 text-center">
+            <WarningCircle size={32} weight="duotone" className="text-amber-300" aria-hidden="true" />
+            <p className="text-sm font-medium text-white">
+              {loadState.phase === 'failed'
+                ? t('learningHub:mediaPreview.loadFailed.title')
+                : t('learningHub:mediaPreview.loadFailed.stalledTitle')}
+            </p>
+            {loadFailureKey && <p className="text-xs text-white/75">{t(loadFailureKey)}</p>}
+            <DsButton
+              variant="ghost"
+              size="sm"
+              onClick={handleRetry}
+              className="mt-1 gap-1.5 text-xs text-white hover:bg-[var(--overlay-control-hover)] hover:text-white"
+              data-media-load-retry=""
+            >
+              <ArrowClockwise size={14} aria-hidden="true" />
+              {t('learningHub:mediaPreview.loadFailed.retry')}
+            </DsButton>
+          </div>
+        </div>
+      )}
+
       {/* 中央播放按钮（暂停且非缓冲时显示） */}
-      {!isPlaying && isReady && !isBuffering && (
+      {!isPlaying && isReady && !isBuffering && !loadBlocked && (
         <button
           type="button"
           aria-label={t('learningHub:mediaPreview.play')}

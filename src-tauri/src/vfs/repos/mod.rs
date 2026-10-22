@@ -53,6 +53,7 @@ pub mod note_transfer_repo;
 pub mod path_cache_repo;
 pub mod pdf_preview;
 pub mod pomodoro_repo;
+pub mod question_group_repo;
 pub mod question_repo;
 pub mod resource_repo;
 pub mod review_plan_repo;
@@ -76,6 +77,13 @@ pub use mindmap_repo::VfsMindMapRepo;
 pub use note_repo::{VfsNoteMetadataUpdate, VfsNoteRepo};
 pub use path_cache_repo::{PathCacheEntry, PathCacheStats, VfsPathCacheRepo};
 pub use pomodoro_repo::VfsPomodoroRepo;
+pub use question_group_repo::{
+    visible_group_sql, GroupDeletePreview, GroupMaterialHit, GroupProgress, GroupPublishState,
+    GroupUpdate, MaterialContentType, MaterialUpdate, NewMaterial, NewQuestionGroup,
+    ProposedChildQuestion, ProposedGroupBundle, QuestionGroup, QuestionGroupBundle,
+    QuestionGroupContext, QuestionGroupListResult, QuestionGroupMaterial, QuestionGroupType,
+    QuestionSiblingBrief, SoftDeleteSummary, VfsQuestionGroupRepo,
+};
 pub use question_repo::{
     AnswerSubmission,
     CreateQuestionParams,
@@ -85,6 +93,7 @@ pub use question_repo::{
     QuestionFilters,
     QuestionHistory,
     QuestionImage,
+    QuestionLearningState,
     QuestionListResult,
     QuestionOption,
     QuestionSearchFilters,

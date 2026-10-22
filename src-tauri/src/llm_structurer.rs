@@ -8,16 +8,26 @@
 //! 唯一身份。旧 checkpoint 的 `_source_label` 仅在本批输入中唯一时兼容，永不按位置猜配。
 //! 每批完整性同时检查身份、角色与题目 schema；缺失/无效项回退并保留重试状态。
 //! 非题块只保留为对应角色，不能兜底制造题干。答案/解析只允许从原文证据提取，禁止补答。
+//!
+//! 表示契约（计划 §4.2/§4.3）：
+//! * 题干/选项/答案的“是否同一表述”一律走 [`crate::question_import_service::normalize`]
+//!   的版本化受限规范化键（Unicode/LaTeX 上下标、标点/空白），不做语义或代数等价猜测；
+//!   `Ca²⁺` 与 `$Ca^{2+}$` 等价，但不同电荷、指数、单位与题目号/考点之外的正文事实仍必须一致。
+//! * 选项边界由 [`crate::question_import_service::option_parser`] 保守解析并带原文证据区间；
+//!   本地兜底与模型结果校验共用同一结果，本地拆错时只降级为“复核”，不凭数量否决正确模型结果。
+//! * 只要模型返回了 `options` 就验证结构，与题型无关；题型枚举缺失或非法不得静默当作 `other`。
 
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::figure_extractor::QuestionWithFigures;
 use crate::llm_manager::LLMManager;
 use crate::models::AppError;
+use crate::question_import_service::normalize;
+use crate::question_import_service::option_parser;
 use crate::vlm_grounding_service::ImportBlockKind;
 
 /// 结构化结果来源
@@ -439,7 +449,8 @@ impl LlmStructurer {
 1. `_source_id` 必须逐字复制对应输入的 ID，每个 ID 恰好出现一次；禁止改写/重号/按输出位置编号。`_source_label` 仅保留显示题号，不是身份
 2. 选择题必须将选项拆分到 options 数组，content 完整保留原文题干（可移除开头题号与明确的“（考点：…）”元数据）；不得摘要、删减子句、扩写、合并或拆成多题
 3. 题型: single_choice=单选, multiple_choice=多选, fill_blank=填空, short_answer=简答
-4. 公式格式：{latex_brief}
+4. 公式格式：{latex_brief} 校验按“表示规范化”比较（如 `Ca²⁺` 与 `$Ca^{{2+}}$` 视为同形），但电荷、指数、系数、单位与数值必须与原文一致，禁止改写或推算
+   - `options` 只要输出就必须是完整逐项结构；不要漏掉 `）` 紧邻的 `D．` 之类选项
 5. **这是提取，不是解题：禁止推理作答、补答、根据知识猜答案。** 只有该输入 raw_text 中显式给出的答案/解析才能保留，否则 answer/explanation 必须为 null。非空时 answer_evidence/explanation_evidence 必须逐字引用本条 raw_text 中包含答案/解析标记及对应正文的连续原文，不得引用选项冒充答案证据
 6. difficulty 按下方判定标准逐题判断
 7. 输出数组长度必须等于输入题目数量 ({})，每个源 ID 一对一精确匹配
@@ -582,27 +593,17 @@ fn source_kind(qwf: &QuestionWithFigures) -> ImportBlockKind {
     ImportBlockKind::Question
 }
 
+/// 表示规范化键（版本化、受限白名单）。
+///
+/// 只折叠明确的表示差异（Unicode/LaTeX 上下标、标点、空白），不做语义等价猜测：
+/// `Ca²⁺` == `$Ca^{2+}$`，但不同电荷/指数/单位仍然不同。
 fn normalized_text(text: &str) -> String {
-    text.chars().filter(|c| !c.is_whitespace()).collect()
+    normalize::canonical_key(text)
 }
 
-/// 只忽略明确的题号/考点元数据，不删除一般括号、负号、分数或题干子句。
+/// 题干比较键：题号与“（考点：…）”导入器元数据不算变更，正文必须逐字一致。
 fn normalized_stem(text: &str) -> String {
-    let mut stem = strip_question_number(text);
-    for (prefix, close) in [
-        ("（考点：", '）'),
-        ("（考点:", '）'),
-        ("(考点：", ')'),
-        ("(考点:", ')'),
-    ] {
-        while let Some(start) = stem.find(prefix) {
-            let Some(end) = stem[start + prefix.len()..].find(close) else {
-                break;
-            };
-            stem.replace_range(start..start + prefix.len() + end + close.len_utf8(), "");
-        }
-    }
-    normalized_text(&stem)
+    normalize::canonical_stem_key(text)
 }
 
 /// 只接受答案字母和分隔符，不从推理正文/选项文本中猜答案。
@@ -668,85 +669,208 @@ fn extracted_field(value: &Value, field: &str, raw: &str) -> Option<(Value, Valu
     supported.then(|| (json!(text), json!(quote)))
 }
 
-fn validated_question(qwf: &QuestionWithFigures, value: &Value) -> Option<Value> {
-    let source = &qwf.merged.question;
-    let content = value.get("content")?.as_str()?.trim();
-    let question_type = value.get("question_type")?.as_str()?;
-    if content.is_empty()
-        || source_kind(qwf) != ImportBlockKind::Question
-        || !matches!(
-            question_type,
-            "single_choice"
-                | "multiple_choice"
-                | "indefinite_choice"
-                | "fill_blank"
-                | "short_answer"
-                | "essay"
-                | "calculation"
-                | "proof"
-                | "other"
-        )
-    {
+/// 契约内的题型枚举。缺失/非法都要显式拒绝，不能静默当作 `other`。
+fn supported_question_type(raw: &str) -> Option<normalize::CanonicalQuestionType> {
+    normalize::parse_question_type(Some(raw)).known()
+}
+
+/// 选项键必须是单个 A–H 字母（大小写归一为一个大写键）。
+fn single_option_letter(key: &str) -> Option<char> {
+    let trimmed = key.trim();
+    let mut chars = trimmed.chars();
+    let first = chars.next()?;
+    if chars.next().is_some() {
         return None;
     }
+    let upper = first.to_ascii_uppercase();
+    if ('A'..='H').contains(&upper) {
+        Some(upper)
+    } else {
+        None
+    }
+}
+
+/// 解析原文选项（带证据区间）；本地兜底与模型结果校验共用同一结果。
+fn parse_source_options(body: &str) -> Option<option_parser::ParsedOptions> {
+    option_parser::parse_options(body)
+}
+
+/// 把解析结果转成题目 JSON 的 `options` 结构。
+fn options_json(parsed: &option_parser::ParsedOptions) -> Vec<Value> {
+    parsed
+        .options
+        .iter()
+        .map(|option| json!({ "key": option.key.to_string(), "content": option.content }))
+        .collect()
+}
+
+/// 选项证据区间（只保留定位与键，不含额外正文）。
+fn options_evidence_json(parsed: &option_parser::ParsedOptions) -> Value {
+    json!(parsed
+        .options
+        .iter()
+        .map(|option| json!({
+            "key": option.key.to_string(),
+            "content_span": [option.content_span.start, option.content_span.end],
+        }))
+        .collect::<Vec<_>>())
+}
+
+fn validated_question(qwf: &QuestionWithFigures, value: &Value) -> Option<Value> {
+    let source = &qwf.merged.question;
+    // 拒绝路径统一留痕：只记录原因码与源 ID，不打印题干/答案正文。
+    let reject = |reason: &'static str| -> Option<Value> {
+        debug!(
+            "[LlmStructurer] 模型对象校验未通过: reason={}, source_id={}",
+            reason, source.source_id
+        );
+        None
+    };
+    if source_kind(qwf) != ImportBlockKind::Question {
+        return reject("source_block_is_not_question");
+    }
+    let Some(content) = value.get("content").and_then(Value::as_str) else {
+        return reject("missing_content");
+    };
+    let content = content.trim();
+    if content.is_empty() {
+        return reject("empty_content");
+    }
+    // 题型枚举：缺失/未知都不能静默映射 other。
+    let Some(question_type) = value.get("question_type").and_then(Value::as_str) else {
+        return reject("missing_question_type");
+    };
+    let Some(type_kind) = supported_question_type(question_type) else {
+        return reject("invalid_question_type_enum");
+    };
+    let choice = type_kind.is_choice();
     // 原文可本地辨识的题干/选项必须完整保留，不能用合法 JSON 的摘要掩盖截断。
     let body = question_body(&source.raw_text);
-    let source_options = split_options_from_raw_text(body);
+    let source_options = parse_source_options(body);
     let source_stem = source_options
         .as_ref()
-        .map(|(stem, _)| stem.clone())
+        .map(|parsed| parsed.stem.clone())
         .unwrap_or_else(|| strip_question_number(body));
     if normalized_stem(content) != normalized_stem(&source_stem) {
-        return None;
+        return reject("content_not_evidenced_by_source");
     }
     if let Some(kind) = value.get("block_kind") {
         if kind.as_str() != Some("question") {
-            return None;
+            return reject("block_kind_mismatch");
         }
     } else if value.get("_source_id").is_some() {
         // 新协议有 ID 也必须显式返回角色；旧的唯一 label checkpoint 可兼容。
-        return None;
+        return reject("missing_block_kind");
     }
-    let choice = matches!(
-        question_type,
-        "single_choice" | "multiple_choice" | "indefinite_choice"
-    );
-    let mut option_keys = HashSet::new();
-    match value.get("options") {
-        Some(Value::Array(options)) => {
-            if choice && options.len() < 2 {
-                return None;
+
+    // 只要模型返回了 options 就验证结构（与题型无关），并且每一项都要有原文证据。
+    let declared_options = match value.get("options") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(items)) => Some(items),
+        Some(_) => return reject("options_not_array"),
+    };
+    let mut option_keys: HashSet<char> = HashSet::new();
+    match declared_options {
+        None => {
+            if choice {
+                return reject("choice_missing_options");
             }
-            for option in options {
-                let key = option.get("key")?.as_str()?;
-                let text = option.get("content")?.as_str()?.trim();
-                if key.len() != 1
-                    || !matches!(key.as_bytes()[0], b'A'..=b'H')
-                    || !option_keys.insert(key)
-                    || text.is_empty()
-                    || !normalized_text(question_body(&source.raw_text))
-                        .contains(&normalized_text(text))
-                {
-                    return None;
+            if source_options.is_some() {
+                return reject("source_options_dropped_by_model");
+            }
+        }
+        Some(items) if items.is_empty() => {
+            // 空数组不是“没有选项”：选择题必须有选项；非选择题也不能与原文选项证据矛盾。
+            if choice {
+                return reject("choice_empty_options");
+            }
+            if source_options.is_some() {
+                return reject("source_options_dropped_by_model");
+            }
+        }
+        Some(items) => {
+            if items.len() < 2 {
+                return reject("option_count_below_two");
+            }
+            let body_key = normalized_text(body);
+            for option in items {
+                let Some(raw_key) = option.get("key").and_then(Value::as_str) else {
+                    return reject("option_missing_key");
+                };
+                let Some(raw_text) = option.get("content").and_then(Value::as_str) else {
+                    return reject("option_missing_content");
+                };
+                let letter = match single_option_letter(raw_key) {
+                    Some(letter) => letter,
+                    None => return reject("invalid_option_key"),
+                };
+                let text_key = normalized_text(raw_text.trim());
+                if text_key.is_empty() {
+                    return reject("empty_option_content");
+                }
+                if !option_keys.insert(letter) {
+                    return reject("duplicate_option_key");
+                }
+                if !body_key.contains(&text_key) {
+                    return reject("option_content_not_in_source");
                 }
             }
-        }
-        None | Some(Value::Null) if !choice => {}
-        _ => return None,
-    }
-    if let Some((_, expected_options)) = source_options {
-        let actual = value.get("options")?.as_array()?;
-        if !choice || actual.len() != expected_options.len() {
-            return None;
-        }
-        for expected in expected_options {
-            let option = actual
-                .iter()
-                .find(|option| option.get("key") == expected.get("key"))?;
-            if normalized_text(option.get("content")?.as_str()?)
-                != normalized_text(expected.get("content")?.as_str()?)
-            {
-                return None;
+            match &source_options {
+                Some(parsed) if parsed.ambiguous => {
+                    // 原文选项边界存在歧义（弱边界/序列断裂）：不以任何一方的数量作真值，
+                    // 只拒绝与同键已识别内容的明确冲突，其余交给计数/复核流程。
+                    for expected in &parsed.options {
+                        let Some(actual) = items.iter().find(|option| {
+                            option
+                                .get("key")
+                                .and_then(Value::as_str)
+                                .and_then(single_option_letter)
+                                == Some(expected.key)
+                        }) else {
+                            continue;
+                        };
+                        let actual_text = actual
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
+                        if normalized_text(actual_text) != normalized_text(&expected.content) {
+                            return reject("option_conflicts_with_source_evidence");
+                        }
+                    }
+                }
+                Some(parsed) => {
+                    // 本地拆分确定时，模型必须与之逐项一致（题号/选项位置都是事实）。
+                    if !choice {
+                        return reject("type_contradicts_option_evidence");
+                    }
+                    if items.len() != parsed.options.len() {
+                        return reject("option_count_mismatch");
+                    }
+                    for expected in &parsed.options {
+                        let Some(actual) = items.iter().find(|option| {
+                            option
+                                .get("key")
+                                .and_then(Value::as_str)
+                                .and_then(single_option_letter)
+                                == Some(expected.key)
+                        }) else {
+                            return reject("option_key_missing");
+                        };
+                        let actual_text = actual
+                            .get("content")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .trim();
+                        if normalized_text(actual_text) != normalized_text(&expected.content) {
+                            return reject("option_content_mismatch");
+                        }
+                    }
+                }
+                None => {
+                    // 原文没有可确认的选项结构，模型却给出选项列表：结构无证据，进复核。
+                    return reject("options_without_source_option_evidence");
+                }
             }
         }
     }
@@ -755,7 +879,7 @@ fn validated_question(qwf: &QuestionWithFigures, value: &Value) -> Option<Value>
             difficulty.as_str(),
             Some("easy" | "medium" | "hard" | "very_hard")
         ) {
-            return None;
+            return reject("invalid_difficulty_enum");
         }
     }
     if let Some(tags) = value.get("tags") {
@@ -763,7 +887,7 @@ fn validated_question(qwf: &QuestionWithFigures, value: &Value) -> Option<Value>
             .as_array()
             .is_some_and(|tags| tags.iter().all(Value::is_string))
         {
-            return None;
+            return reject("invalid_tags");
         }
     }
     let (answer, answer_evidence) = extracted_field(value, "answer", &source.raw_text)?;
@@ -772,11 +896,9 @@ fn validated_question(qwf: &QuestionWithFigures, value: &Value) -> Option<Value>
     if choice && !answer.is_null() {
         let key = choice_answer_key(answer.as_str()?)?;
         if (question_type == "single_choice" && key.len() != 1)
-            || key
-                .chars()
-                .any(|c| !option_keys.contains(c.to_string().as_str()))
+            || key.chars().any(|c| !option_keys.contains(&c))
         {
-            return None;
+            return reject("answer_key_not_in_options");
         }
     }
     let mut accepted = value.clone();
@@ -789,6 +911,7 @@ fn validated_question(qwf: &QuestionWithFigures, value: &Value) -> Option<Value>
     accepted["explanation"] = explanation;
     accepted["explanation_evidence"] = explanation_evidence;
     accepted["_structure_quality"] = json!("llm_validated");
+    accepted["_representation_version"] = json!(normalize::REPRESENTATION_NORMALIZATION_VERSION);
     Some(accepted)
 }
 
@@ -824,174 +947,22 @@ fn non_question_json(qwf: &QuestionWithFigures, kind: ImportBlockKind) -> Value 
     value
 }
 
-/// 选项分隔符（半角/全角）
-const OPTION_SEPARATORS: [char; 6] = ['．', '.', '、', ')', '）', '：'];
-
-fn normalize_option_letter(c: char) -> Option<char> {
-    let upper = c.to_ascii_uppercase();
-    if ('A'..='H').contains(&upper) {
-        Some(upper)
-    } else {
-        None
-    }
-}
-
-fn next_option_letter(letter: char) -> Option<char> {
-    if letter < 'H' {
-        char::from_u32(letter as u32 + 1)
-    } else {
-        None
-    }
-}
-
-/// 解析形如 `A．选项内容` / `（A）选项内容` 的单行
-fn parse_option_line(line: &str) -> Option<(char, String)> {
-    let trimmed = line.trim_start();
-    let mut chars = trimmed.chars();
-
-    let first = chars.next()?;
-    if let Some(letter) = normalize_option_letter(first) {
-        let rest = chars.as_str();
-        let mut rest_chars = rest.chars();
-        let separator = rest_chars.next()?;
-        if OPTION_SEPARATORS.contains(&separator) {
-            return Some((letter, rest_chars.as_str().trim().to_string()));
-        }
-        return None;
-    }
-
-    // 全角/半角括号包裹：`（A）xxx` / `(A) xxx`
-    if first == '（' || first == '(' {
-        let mut rest_chars = chars.as_str().chars();
-        let letter = normalize_option_letter(rest_chars.next()?)?;
-        let close = rest_chars.next()?;
-        if close == '）' || close == ')' {
-            let after = rest_chars.as_str();
-            return Some((letter, after.trim().to_string()));
-        }
-    }
-
-    None
-}
-
-/// 把同一行里的 `A．xx B．xx C．xx` 拆成多行，便于复用逐行解析
-fn split_inline_option_markers(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len() + 16);
-    let mut expected = 'A';
-    let mut prev: Option<char> = None;
-    let mut chars = raw.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if let Some(letter) = normalize_option_letter(c) {
-            let preceded_by_space = prev.map(|p| p.is_whitespace()).unwrap_or(true);
-            if letter == expected && preceded_by_space {
-                if let Some(next) = chars.peek().copied() {
-                    if OPTION_SEPARATORS.contains(&next) {
-                        if !out.ends_with('\n') {
-                            out.push('\n');
-                        }
-                        out.push(c);
-                        prev = Some(c);
-                        expected = next_option_letter(letter).unwrap_or(letter);
-                        continue;
-                    }
-                }
-            }
-        }
-        out.push(c);
-        prev = Some(c);
-    }
-
-    out
-}
-
-/// 去掉题干前的题号前缀（`9．` / `12.` / `3、`）
-fn strip_question_number(text: &str) -> String {
-    let trimmed = text.trim();
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut idx = 0usize;
-    while idx < chars.len() && idx < 3 && chars[idx].is_ascii_digit() {
-        idx += 1;
-    }
-    if idx == 0 || idx >= chars.len() {
-        return trimmed.to_string();
-    }
-    let separator = chars[idx];
-    if !matches!(separator, '．' | '.' | '、' | ')' | '）' | ':' | '：') {
-        return trimmed.to_string();
-    }
-    let rest: String = chars[idx + 1..].iter().collect();
-    let rest = rest.trim_start();
-    if rest.is_empty() {
-        trimmed.to_string()
-    } else {
-        rest.to_string()
-    }
-}
-
-/// 从 VLM 原文里本地拆分出题干与选项（不依赖 LLM）
+/// 去掉题干前的题号前缀（`9．` / `12.` / `3、`）。
 ///
-/// 命中条件：从 `A` 开始，至少 2 个连续的选项行（或同一行内联标记）。
+/// 实现在 `question_import_service::normalize`，全仓单一实现，避免两处规则漂移。
+fn strip_question_number(text: &str) -> String {
+    normalize::strip_question_number(text)
+}
+
+/// 从 VLM 原文里本地拆分出题干与选项（不依赖 LLM）。
+///
+/// 与模型结果校验共用 [`option_parser::parse_options`] 的同一份解析结果：
+/// 保守边界（标记形态 + A→B→C 序列 + 位置/标点证据），`C．……）D．……` 能拆出 D，
+/// 而 `DNA`、`A.B`、公式变量、`A、B、C 三点共线` 不会被误拆。
+/// 返回 `None` 表示本地无法保守确认，调用方不得据此否决模型结果。
 pub(crate) fn split_options_from_raw_text(raw: &str) -> Option<(String, Vec<Value>)> {
-    let normalized = split_inline_option_markers(raw);
-    let lines: Vec<&str> = normalized.lines().collect();
-
-    let first_idx = lines
-        .iter()
-        .position(|line| parse_option_line(line).is_some())?;
-    let (first_letter, _) = parse_option_line(lines[first_idx])?;
-    if first_letter != 'A' {
-        return None;
-    }
-
-    let stem_lines: Vec<String> = lines[..first_idx].iter().map(|s| s.to_string()).collect();
-    let mut options: Vec<(char, String)> = Vec::new();
-    let mut idx = first_idx;
-    let mut expected = 'A';
-
-    while idx < lines.len() {
-        match parse_option_line(lines[idx]) {
-            Some((letter, mut text)) if letter == expected => {
-                idx += 1;
-                // 选项内容可能换行，拼接到当前选项
-                while idx < lines.len() {
-                    let candidate = lines[idx];
-                    if candidate.trim().is_empty() || parse_option_line(candidate).is_some() {
-                        break;
-                    }
-                    if text.is_empty() {
-                        text.push_str(candidate.trim());
-                    } else {
-                        text.push(' ');
-                        text.push_str(candidate.trim());
-                    }
-                    idx += 1;
-                }
-                options.push((letter, text.trim().to_string()));
-                expected = match next_option_letter(letter) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
-            _ => break,
-        }
-    }
-
-    if options.len() < 2 {
-        return None;
-    }
-
-    let stem = strip_question_number(&stem_lines.join("\n"));
-    if stem.trim().is_empty() {
-        return None;
-    }
-
-    let options_json: Vec<Value> = options
-        .iter()
-        .map(|(key, content)| json!({ "key": key.to_string(), "content": content }))
-        .collect();
-
-    Some((stem, options_json))
+    let parsed = parse_source_options(raw)?;
+    Some((parsed.stem.clone(), options_json(&parsed)))
 }
 
 fn raw_text_to_minimal_json(raw_text: &str, label: &str) -> Value {
@@ -1011,10 +982,15 @@ fn raw_text_to_minimal_json(raw_text: &str, label: &str) -> Value {
 fn fallback_json(raw_text: &str, label: &str) -> (Value, StructureSource) {
     let body = question_body(raw_text);
     let mut value = raw_text_to_minimal_json(body, label);
-    let origin = if let Some((stem, options)) = split_options_from_raw_text(body) {
-        value["content"] = json!(stem);
+    let origin = if let Some(parsed) = parse_source_options(body) {
+        value["content"] = json!(parsed.stem);
         value["question_type"] = json!("single_choice");
-        value["options"] = Value::Array(options);
+        value["options"] = Value::Array(options_json(&parsed));
+        // 证据区间与歧义标记：只记定位/键，不复述正文。
+        value["_option_evidence"] = options_evidence_json(&parsed);
+        if parsed.ambiguous {
+            value["_option_parse"] = json!("ambiguous");
+        }
         StructureSource::LocalSplit
     } else {
         StructureSource::RawFallback
@@ -1390,5 +1366,165 @@ mod tests {
         let (plain, plain_origin) = fallback_json("名词解释：奎尼丁晕厥", "28");
         assert_eq!(plain_origin, StructureSource::RawFallback);
         assert_eq!(plain["question_type"], "other");
+    }
+    // ★ 计划 §4.3 红→绿：`C．……）D．……` 紧邻标记必须拆出 D
+    #[test]
+    fn split_options_adjacent_closing_paren_splits_d() {
+        let raw = "12．以下关于 ATP 的叙述正确的是\nA．甲\nB．乙\nC．丙（含ATP）D．丁";
+        let (stem, options) = split_options_from_raw_text(raw).expect("应拆出四项");
+        assert_eq!(options.len(), 4);
+        assert_eq!(options[3]["key"], "D");
+        assert_eq!(options[3]["content"], "丁");
+        assert_eq!(stem, "以下关于 ATP 的叙述正确的是");
+    }
+
+    #[test]
+    fn model_four_options_accepted_when_source_has_adjacent_d() {
+        let input = source(
+            "a",
+            "12",
+            "12．以下关于 ATP 的叙述正确的是\nA．甲\nB．乙\nC．丙（含ATP）D．丁",
+        );
+        let value = json!({
+            "_source_id":"a", "block_kind":"question",
+            "content":"以下关于 ATP 的叙述正确的是",
+            "question_type":"single_choice",
+            "options":[
+                {"key":"A","content":"甲"},{"key":"B","content":"乙"},
+                {"key":"C","content":"丙（含ATP）"},{"key":"D","content":"丁"}
+            ],
+            "answer":null
+        });
+        let accepted = validated_question(&input, &value).expect("四项应与源解析逐项一致");
+        assert_eq!(accepted["options"].as_array().unwrap().len(), 4);
+        assert_eq!(
+            accepted["_representation_version"],
+            normalize::REPRESENTATION_NORMALIZATION_VERSION
+        );
+    }
+
+    // ★ 计划 §4.2：表示等价通过，不同电荷事实仍拒绝
+    #[test]
+    fn representation_equivalence_accepts_latex_but_never_a_different_charge() {
+        let input = source("a", "1", "写出溶液中钙离子的符号\n答案：Ca²⁺");
+        let mut value = output("a", "写出溶液中钙离子的符号");
+        value["question_type"] = json!("fill_blank");
+        value["answer"] = json!("$Ca^{2+}$");
+        value["answer_evidence"] = json!("答案：Ca²⁺");
+        assert!(
+            validated_question(&input, &value).is_some(),
+            "同一表示的 LaTeX 写法必须通过"
+        );
+        value["answer"] = json!("$Ca^{3+}$");
+        assert!(
+            validated_question(&input, &value).is_none(),
+            "不同电荷不得被规范化吞掉"
+        );
+    }
+
+    // ★ 计划 §4.3/§4.5：只要带 options 就验证结构，与题型无关
+    #[test]
+    fn options_are_validated_regardless_of_question_type() {
+        let input = source("a", "1", "1．下列正确的是\nA．甲\nB．乙\nC．丙\nD．丁");
+        let mut value = json!({
+            "_source_id":"a","block_kind":"question","content":"下列正确的是",
+            "question_type":"fill_blank",
+            "options":[
+                {"key":"A","content":"甲"},{"key":"B","content":"乙"},
+                {"key":"C","content":"丙"},{"key":"D","content":"丁"}
+            ]
+        });
+        // 原文有四项选项，模型却声明填空题型：题型与选项证据矛盾
+        assert!(validated_question(&input, &value).is_none());
+
+        value["question_type"] = json!("single_choice");
+        value["options"] = json!([]);
+        assert!(
+            validated_question(&input, &value).is_none(),
+            "空 options 不是合法选择题"
+        );
+
+        value["options"] = Value::Null;
+        assert!(
+            validated_question(&input, &value).is_none(),
+            "选择题缺 options"
+        );
+
+        // 原文没有选项结构，模型却补出选项列表：结构无证据
+        let plain = source("b", "2", "2．名词解释：有效不应期");
+        let invented = json!({
+            "_source_id":"b","block_kind":"question","content":"名词解释：有效不应期",
+            "question_type":"fill_blank",
+            "options":[{"key":"A","content":"名词解释"},{"key":"B","content":"有效不应期"}]
+        });
+        assert!(validated_question(&plain, &invented).is_none());
+    }
+
+    #[test]
+    fn unknown_question_type_enum_is_rejected_instead_of_mapping_to_other() {
+        let input = source("a", "1", "第一题");
+        for kind in ["multiple", "choice", "single_select", "unknown"] {
+            let mut value = output("a", "第一题");
+            value["question_type"] = json!(kind);
+            assert!(
+                validated_question(&input, &value).is_none(),
+                "{kind} 不是契约枚举，不能静默当 other"
+            );
+        }
+        let mut other = output("a", "第一题");
+        other["question_type"] = json!("other");
+        assert!(
+            validated_question(&input, &other).is_some(),
+            "合法 other 仍应通过"
+        );
+
+        let mut missing = output("a", "第一题");
+        missing.as_object_mut().unwrap().remove("question_type");
+        assert!(
+            validated_question(&input, &missing).is_none(),
+            "缺失题型同样不能当 other"
+        );
+    }
+
+    // ★ 计划 §4.3：本地拆分有歧义时不以数量作真值，也不放过明确冲突
+    #[test]
+    fn ambiguous_source_options_do_not_veto_correct_model_options() {
+        let input = source("a", "7", "7．以下正确的是\nA．甲\nB．乙\nD．丁");
+        let model = json!({
+            "_source_id":"a","block_kind":"question","content":"以下正确的是",
+            "question_type":"single_choice",
+            "options":[
+                {"key":"A","content":"甲"},{"key":"B","content":"乙"},{"key":"D","content":"丁"}
+            ]
+        });
+        assert!(
+            validated_question(&input, &model).is_some(),
+            "本地缺 C 不能否决原文确有证据的三项"
+        );
+        let mut conflicting = model.clone();
+        conflicting["options"][0]["content"] = json!("乙");
+        conflicting["options"][1]["content"] = json!("甲");
+        assert!(
+            validated_question(&input, &conflicting).is_none(),
+            "与同键源证据冲突仍必须拒绝"
+        );
+    }
+
+    #[test]
+    fn fallback_records_option_evidence_and_ambiguity() {
+        let (value, origin) = fallback_json("9．反应速率变化\nA．升高B．降低C．不变", "9");
+        assert_eq!(origin, StructureSource::LocalSplit);
+        assert_eq!(value["options"].as_array().unwrap().len(), 3);
+        assert_eq!(value["_option_parse"], "ambiguous");
+        assert_eq!(value["_option_evidence"].as_array().unwrap().len(), 3);
+        assert_eq!(value["_option_evidence"][1]["key"], "B");
+
+        let (clean, _) = fallback_json("1．下列哪项正确\nA．甲\nB．乙", "1");
+        assert!(clean.get("_option_parse").is_none());
+        assert_eq!(clean["_option_evidence"].as_array().unwrap().len(), 2);
+        // 题干里提到 A、B、C 不是选项
+        let (prose, prose_origin) = fallback_json("已知 A、B、C 三点共线，求 AB 长度", "3");
+        assert_eq!(prose_origin, StructureSource::RawFallback);
+        assert!(prose.get("options").is_none() || prose["options"].is_null());
     }
 }

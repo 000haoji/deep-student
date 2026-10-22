@@ -3912,6 +3912,21 @@ impl VfsFullIndexingService {
         question_id: &str,
         exam_id: &str,
     ) -> VfsResult<(usize, usize)> {
+        self.index_question_with_claim(question_id, exam_id, None)
+            .await
+    }
+
+    /// 带 claim 代际的单题索引。
+    ///
+    /// `claim_token = Some(updated_at)` 时，最终账本回写只在该代际仍有效时生效；
+    /// 若期间有新任务入队（`updated_at` 已推进），本次写入放弃并回滚刚写入的
+    /// SQLite 元数据/Lance 向量，避免旧内容覆盖新任务。
+    pub async fn index_question_with_claim(
+        &self,
+        question_id: &str,
+        exam_id: &str,
+        claim_token: Option<i64>,
+    ) -> VfsResult<(usize, usize)> {
         use crate::vfs::repos::VfsQuestionRepo;
 
         // 1. 获取题目
@@ -3922,56 +3937,65 @@ impl VfsFullIndexingService {
             }
         })?;
 
-        // 2. 构建题目的可索引文本
-        let mut texts = Vec::new();
+        // 2. 构建题目的可索引文本（题组材料进入每个子题，权威仍只存材料表）
+        let group_material_text: Option<String> = {
+            let conn = self.db.get_conn_safe()?;
+            crate::vfs::repos::question_group_repo::VfsQuestionGroupRepo::get_context_for_question_with_conn(
+                &conn,
+                question_id,
+            )?
+            .and_then(|context| {
+                let parts: Vec<String> = context
+                    .materials
+                    .iter()
+                    .filter(|material| !material.text.trim().is_empty())
+                    .map(|material| {
+                        match material
+                            .title
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|title| !title.is_empty())
+                        {
+                            Some(title) => format!("{title}\n{}", material.text.trim()),
+                            None => material.text.trim().to_string(),
+                        }
+                    })
+                    .collect();
+                if parts.is_empty() {
+                    None
+                } else {
+                    Some(parts.join("\n\n"))
+                }
+            })
+        };
 
-        // 题目内容
-        if !question.content.trim().is_empty() {
-            texts.push(format!("题目: {}", question.content.trim()));
-        }
+        let option_pairs: Vec<(String, String)> = question
+            .options
+            .as_ref()
+            .map(|options| {
+                options
+                    .iter()
+                    .map(|option| (option.key.clone(), option.content.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let content = crate::vfs::question_index_ledger::compose_question_index_text(
+            &question.content,
+            &option_pairs,
+            question.answer.as_deref(),
+            question.explanation.as_deref(),
+            &question.tags,
+            question.user_note.as_deref(),
+            group_material_text.as_deref(),
+        );
 
-        // 选项
-        if let Some(options) = &question.options {
-            for opt in options {
-                texts.push(format!("选项{}: {}", opt.key, opt.content));
-            }
-        }
-
-        // 答案
-        if let Some(answer) = &question.answer {
-            if !answer.trim().is_empty() {
-                texts.push(format!("答案: {}", answer.trim()));
-            }
-        }
-
-        // 解析
-        if let Some(explanation) = &question.explanation {
-            if !explanation.trim().is_empty() {
-                texts.push(format!("解析: {}", explanation.trim()));
-            }
-        }
-
-        // 标签
-        if !question.tags.is_empty() {
-            texts.push(format!("标签: {}", question.tags.join(", ")));
-        }
-
-        // 用户笔记
-        if let Some(note) = &question.user_note {
-            if !note.trim().is_empty() {
-                texts.push(format!("笔记: {}", note.trim()));
-            }
-        }
-
-        if texts.is_empty() {
+        if content.trim().is_empty() {
             info!(
                 "[VfsFullIndexingService] Question {} has no indexable content",
                 question_id
             );
             return Ok((0, 0));
         }
-
-        let content = texts.join("\n\n");
 
         // 3. 分块（题目通常较短，可能只有一个块）
         let chunks = VfsChunker::chunk_text(&content, &self.chunking_config);
@@ -4088,11 +4112,17 @@ impl VfsFullIndexingService {
                                 segment_inputs,
                             )?;
 
-                            // 更新 unit 状态
-                            conn.execute(
-                                "UPDATE vfs_index_units SET text_state = 'indexed', text_indexed_at = ?1, text_chunk_count = ?2, text_embedding_dim = ?3, updated_at = ?1 WHERE id = ?4",
-                                rusqlite::params![now, count as i32, dim as i64, unit_id],
+                            // 更新 unit 状态；claim 代际（updated_at）必须匹配，
+                            // 否则说明已有新任务入队，旧内容不得覆盖新状态。
+                            let updated = conn.execute(
+                                "UPDATE vfs_index_units SET text_state = 'indexed', text_indexed_at = ?1, text_chunk_count = ?2, text_embedding_dim = ?3, updated_at = ?1 WHERE id = ?4 AND (?5 IS NULL OR (text_state = 'indexing' AND updated_at = ?5))",
+                                rusqlite::params![now, count as i32, dim as i64, unit_id, claim_token],
                             )?;
+                            if claim_token.is_some() && updated == 0 {
+                                return Err(VfsError::Other(
+                                    "question index claim superseded by a newer task".to_string(),
+                                ));
+                            }
 
                             embedding_dim_repo::refresh_counts_from_segments(&conn)?;
                             Ok(())
@@ -4391,11 +4421,28 @@ impl VfsFullIndexingService {
         }
 
         let config = VfsIndexingService::new(self.db.clone()).get_indexing_config()?;
+
+        // ★ PR #490 §4.7：题目级索引任务（发布/材料更新事务内写入的 ledger）独立补偿执行。
+        // 任务不占用 resources.index_state；失败只重试索引，不重发题、不重发布。
+        let (question_success, question_fail) = match self
+            .process_pending_question_units(batch_size, config.max_retries)
+            .await
+        {
+            Ok(counts) => counts,
+            Err(error) => {
+                warn!(
+                    "[VfsFullIndexingService] question index batch failed: {}",
+                    error
+                );
+                (0, 0)
+            }
+        };
+
         let pending =
             VfsIndexStateRepo::claim_pending_resources(&self.db, batch_size, config.max_retries)?;
 
         if pending.is_empty() {
-            return Ok((0, 0));
+            return Ok((question_success, question_fail));
         }
 
         let total = pending.len();
@@ -4463,7 +4510,39 @@ impl VfsFullIndexingService {
             success, fail
         );
 
-        Ok((success, fail))
+        Ok((success + question_success, fail + question_fail))
+    }
+
+    /// 执行一批题目级索引任务（`vfs_index_units.resource_id = question_id`）。
+    ///
+    /// 任务由发布/材料变更事务通过
+    /// `QuestionIndexLedger::enqueue_question_units_with_conn` 持久化；这里只消费
+    /// 账本、幂等回写，崩溃遗留的 `indexing` 行由账本自身复位。
+    pub async fn process_pending_question_units(
+        &self,
+        batch_size: u32,
+        max_retries: i32,
+    ) -> VfsResult<(usize, usize)> {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let report = crate::vfs::question_index_ledger::run_pending_question_index_batch(
+            &self.db,
+            self,
+            batch_size,
+            max_retries,
+            now_ms,
+        )
+        .await?;
+        if report.claimed > 0 {
+            info!(
+                "[VfsFullIndexingService] Question index batch: claimed={}, indexed={}, retried={}, exhausted={}, claim_lost={}",
+                report.claimed,
+                report.indexed,
+                report.retried,
+                report.exhausted,
+                report.claim_lost
+            );
+        }
+        Ok((report.indexed, report.exhausted))
     }
 
     /// ★ F5 修复：排空 Lance 孤立向量队列
@@ -5198,6 +5277,20 @@ impl VfsFullSearchService {
     // 多模态内容（图片/PDF）由 crate::multimodal 模块统一处理
     // VFS 只负责文本内容的索引和检索
     // 如需多模态检索，请使用 MultimodalRetriever
+}
+
+/// PR #490 §4.7：题目索引账本执行器，复用现有 `index_question` 的单题索引实现。
+#[allow(async_fn_in_trait)]
+impl crate::vfs::question_index_ledger::QuestionIndexExecutor for VfsFullIndexingService {
+    async fn index_question_for_ledger(
+        &self,
+        question_id: &str,
+        exam_id: &str,
+        claim_token: i64,
+    ) -> VfsResult<(usize, usize)> {
+        self.index_question_with_claim(question_id, exam_id, Some(claim_token))
+            .await
+    }
 }
 
 #[cfg(test)]

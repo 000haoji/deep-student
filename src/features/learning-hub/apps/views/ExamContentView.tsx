@@ -1883,15 +1883,42 @@ const ExamContentView: React.FC<ContentViewProps> = ({
   // ★ 断点续导：检测 importing 状态
   const isImportingSession = sessionDetail?.summary.status === 'importing';
   const importReport = sessionDetail?.summary.metadata?.import_report;
+  // `excluded` is a newer terminal state; keep the comparison string-typed so
+  // older report type unions remain compatible.
+  const importStatus: string | undefined = importReport?.status;
+  type ImportRecoveryAction = {
+    action?: string;
+    reason?: string;
+    severity?: string;
+    pages?: unknown[];
+    batch_ids?: unknown[];
+    source_ids?: unknown[];
+  };
+  const recoveryActions: ImportRecoveryAction[] = Array.isArray(importReport?.recovery_actions)
+    ? (importReport.recovery_actions as ImportRecoveryAction[])
+    : [];
+  const blockingCount = Number(
+    (importReport?.completion as { blocking_count?: number } | undefined)?.blocking_count ?? 0,
+  );
+  // Warning-only findings (page furniture, user exclusions) do not make an
+  // import incomplete; a user's "excluded" terminal state is a completion.
   const hasImportQualityWarning = Boolean(importReport && (
-    importReport.status !== 'completed' || importReport.degenerate_count > 0
-    || importReport.failed_pages?.length || importReport.failed_chunks?.length
-    || importReport.quarantined_entries?.length || importReport.conflicts?.length
+    blockingCount > 0
+    || (importStatus !== 'completed' && importStatus !== 'excluded')
+    || importReport.degenerate_count > 0
   ));
-  // A quality warning is not itself a checkpoint. Never offer an impossible retry.
+  // Only concrete stage retries are executable; review-only findings must not
+  // render a resume button that cannot fix them.
+  const executableResumeAction = recoveryActions.find((action) =>
+    action.action === 'reidentify_page'
+    || action.action === 'retry_batches'
+    || action.action === 'retry_figures');
   const canResumeImport = importReport
-    ? importReport.status !== 'completed' && importReport.resume_available === true
+    ? importStatus !== 'completed'
+      && importStatus !== 'excluded'
+      && (executableResumeAction !== undefined || importReport.resume_available === true)
     : isImportingSession;
+  const resumeActionReason = executableResumeAction?.reason;
   const [isResuming, setIsResuming] = useState(false);
   const [resumeError, setResumeError] = useState<string | null>(null);
 
@@ -2332,6 +2359,7 @@ const ExamContentView: React.FC<ContentViewProps> = ({
                 size="sm"
                 onClick={handleResumeImport}
                 disabled={isResuming}
+                title={resumeActionReason}
                 className="gap-1.5 text-warning hover:bg-warning/10 [@media(pointer:coarse)]:!min-h-11"
               >
                 {isResuming ? (
@@ -2767,6 +2795,13 @@ const ExamContentView: React.FC<ContentViewProps> = ({
               isActive={isActive}
               onNavigate={handleBrowseNavigate}
               onRefreshQuestion={readOnly ? undefined : handleRefreshQuestion}
+              onGroupDeleted={
+                readOnly
+                  ? undefined
+                  : () => {
+                      void refreshQuestionsAndStats();
+                    }
+              }
               onPracticeQuestion={handlePracticeFromBrowse}
               onBack={() => requestViewMode('list')}
             />
@@ -2799,6 +2834,13 @@ const ExamContentView: React.FC<ContentViewProps> = ({
               onToggleFavorite={readOnly ? undefined : handleToggleFavorite}
               onUpdateUserNote={readOnly ? undefined : handleUpdateUserNote}
               onDeleteQuestion={readOnly ? undefined : handleDeleteQuestion}
+              onGroupDeleted={
+                readOnly
+                  ? undefined
+                  : () => {
+                      void refreshQuestionsAndStats();
+                    }
+              }
               onBack={handleBackToLauncher}
               onDraftDirtyChange={handlePracticeDraftDirtyChange}
               onDraftNavigationRequested={requestPracticeNavigate}

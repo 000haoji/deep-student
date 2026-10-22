@@ -13,10 +13,11 @@
  * 资源库与聊天右侧面板无 context，工具栏多一个「在音视频中学习」跳转。
  *
  * B 站链接条目（`bilibili` 非空）：默认在应用自己的播放器里播放 `bilistream://`（后端取 B 站
- * MP4 地址并转发 Range 请求），截帧 / 字幕轨 / 播放进度与本地视频一样可用；直接播放出错时
- * 退回 B 站外链播放器（iframe，不能截帧、不记进度）。没有本地音频文件，所以不能转写，
- * 字幕从 B 站重新获取。应用内播放可切换清晰度（后端按登录身份取可用档位，控制条上的菜单），
- * 切换时保持播放位置与播放 / 暂停；外链播放器拿不到应用里的登录，始终按游客播放。
+ * MP4 地址并转发 Range 请求），截帧 / 字幕轨 / 播放进度与本地视频一样可用。应用内播放失败时
+ * **不再自动**切外链播放器：停止转圈并给出可解释原因与「重试 / 手动改用 B 站播放器 / 在浏览器
+ * 打开」。外链播放器（iframe）不能截帧、不记进度，且文档载入不等于媒体就绪。没有本地音频
+ * 文件，所以不能转写，字幕从 B 站重新获取。应用内播放可切换清晰度（后端按登录身份取可用档位，
+ * 控制条上的菜单），切换时保持播放位置与播放 / 暂停；清晰度查询失败不阻断视频挂载。
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -61,6 +62,7 @@ import { BilibiliLinkDialog, type BilibiliLinkDialogMode } from './BilibiliLinkD
 import { buildBilibiliPageUrl, type BilibiliLinkDescriptor } from './bilibiliLinkApi';
 import { shortQualityLabel } from './bilibiliAccount';
 import { useBilibiliQuality } from './useBilibiliQuality';
+import { mediaLoadFailureKey, type MediaLoadState } from './mediaLoadState';
 import type { MediaPlayerHandle, MediaPlayerStatus } from './mediaPlayerHandle';
 import type { TranscriptExportFormat, TranscriptSegment } from './mediaTranscriptApi';
 import { useMediaTranscript } from './useMediaTranscript';
@@ -179,13 +181,16 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
   const sideLayout = containerWidth >= SIDE_LAYOUT_MIN_WIDTH;
   const isVideo = kind === 'video';
   const isLink = bilibili !== null;
-  /** 链接条目直接播放出错后退回 B 站外链播放器（换条目时重置） */
+  /** 链接条目：用户手动切到 B 站外链播放器（换条目时重置；失败不再自动切） */
   const [linkEmbed, setLinkEmbed] = useState(false);
-  /** 外链播放器是播放出错自动退回的（提示语不同） */
-  const [embedFallback, setEmbedFallback] = useState(false);
+  /** 应用内播放器的有界加载状态（失败 / 停滞时给出可执行操作） */
+  const [streamLoadState, setStreamLoadState] = useState<MediaLoadState | null>(null);
+  /** <video> error 计数：即使拿不到加载状态也保证失败可见，不无限转圈 */
+  const [streamErrorCount, setStreamErrorCount] = useState(0);
   useEffect(() => {
     setLinkEmbed(false);
-    setEmbedFallback(false);
+    setStreamLoadState(null);
+    setStreamErrorCount(0);
   }, [resourceId]);
   /** 外链 iframe 播放：拿不到画面与进度 */
   const embedPlayback = isLink && linkEmbed;
@@ -688,13 +693,28 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
       </DsButton>
     ) : null;
 
-  const handleLinkStreamError = useCallback(() => {
-    setLinkEmbed(true);
-    setEmbedFallback(true);
+  // ---------------------------------------------------------------- 应用内播放失败 / 重试
+  // 失败不再自动切外链播放器：只记录失败并交给用户选择，避免两个播放器互相循环
+  const handleLinkMediaError = useCallback(() => {
+    setStreamErrorCount((count) => count + 1);
+  }, []);
+  const handleStreamLoadState = useCallback((state: MediaLoadState) => {
+    setStreamLoadState(state);
+    if (state.phase !== 'failed' && state.phase !== 'stalled') {
+      setStreamErrorCount(0);
+    }
   }, []);
 
   // ---------------------------------------------------------------- 清晰度（应用内播放）
-  const { info: qualityInfo, select: selectQuality } = bilibiliQuality;
+  const {
+    info: qualityInfo,
+    select: selectQuality,
+    status: qualityStatus,
+    error: qualityError,
+    retry: retryQuality,
+    session: streamSession,
+    lastStreamEvent,
+  } = bilibiliQuality;
   /** 用户刚选的档位：B 站降档时提示一次实际清晰度 */
   const chosenQnRef = useRef<number | null>(null);
   const handleQualityChange = useCallback(
@@ -730,6 +750,19 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
     [isLink, qualityInfo, handleQualityChange],
   );
 
+  /** 重试应用内播放：换新会话（URL 里的 s= 变化 → 播放器重挂载并恢复位置） */
+  const handleRetryStream = useCallback(() => {
+    setStreamErrorCount(0);
+    setStreamLoadState(null);
+    retryQuality();
+  }, [retryQuality]);
+
+  // 停滞由播放器自身的界面处理（可自动恢复）；这里只对确定性失败给出换路出口
+  const streamFailed = isLink && !embedPlayback && (streamErrorCount > 0 || streamLoadState?.phase === 'failed');
+  const loadFailureKey = streamLoadState ? mediaLoadFailureKey(streamLoadState) : null;
+  /** 结构化原因：Rust 媒体事件优先（字节/连接层），其次前端预算 / media error */
+  const streamFailureReason = lastStreamEvent?.reason ?? streamLoadState?.reason ?? 'unknown';
+
   const player = bilibili && linkEmbed ? (
     <BilibiliEmbedPlayer
       link={bilibili}
@@ -744,9 +777,12 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
       fileName={fileName}
       compatibilityHint={compatibilityHint}
       isActive={isActive}
-      onError={isLink ? handleLinkStreamError : onError}
+      onError={isLink ? handleLinkMediaError : onError}
       handleRef={handleRef}
       onStatusChange={handleStatusChange}
+      onLoadStateChange={isLink ? handleStreamLoadState : undefined}
+      onRetry={isLink ? handleRetryStream : undefined}
+      sessionId={isLink ? streamSession ?? undefined : undefined}
       crossOrigin="anonymous"
       extraControls={captionsButton}
       quality={videoQuality}
@@ -898,8 +934,12 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
             variant="ghost"
             size="sm"
             onClick={() => {
-              setEmbedFallback(false);
-              setLinkEmbed((prev) => !prev);
+              if (linkEmbed) {
+                setLinkEmbed(false);
+                handleRetryStream();
+              } else {
+                setLinkEmbed(true);
+              }
             }}
             className={cn(toolbarButtonClass, 'gap-1.5 px-2.5 text-xs')}
             data-bilibili-playback={linkEmbed ? 'embed' : 'stream'}
@@ -1036,10 +1076,92 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
         >
           {embedPlayback && (
             <p className="absolute inset-x-0 top-0 z-10 bg-black/60 px-3 py-1 text-[11px] text-white" role="status" data-bilibili-fallback="">
-              {embedFallback
-                ? `${t('learningHub:mediaBilibili.playback.fallback')} ${t('learningHub:mediaBilibili.playback.embedGuest')}`
-                : t('learningHub:mediaBilibili.playback.embedGuest')}
+              {t('learningHub:mediaBilibili.playback.embedGuest')}
             </p>
+          )}
+
+          {/* 应用内播放：清晰度查询状态与失败（可重试；失败不阻断播放地址） */}
+          {isLink && !embedPlayback && (qualityStatus === 'loading' || qualityStatus === 'error') && (
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-20 flex flex-col gap-1 p-1.5">
+              {qualityStatus === 'loading' && (
+                <p
+                  data-bilibili-quality-status="loading"
+                  role="status"
+                  className="pointer-events-auto flex w-fit items-center gap-1 rounded bg-black/65 px-2 py-0.5 text-[11px] text-white/80"
+                >
+                  <CircleNotch size={11} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                  {t('learningHub:mediaBilibili.playback.qualityLoading')}
+                </p>
+              )}
+              {qualityStatus === 'error' && (
+                <div
+                  data-bilibili-quality-error=""
+                  data-bilibili-quality-reason={qualityError ?? undefined}
+                  role="status"
+                  className="pointer-events-auto flex w-fit flex-wrap items-center gap-1.5 rounded bg-black/70 px-2 py-1 text-[11px] text-white"
+                >
+                  <span>{t('learningHub:mediaBilibili.playback.qualityFailed')}</span>
+                  <DsButton
+                    variant="ghost"
+                    size="sm"
+                    onClick={retryQuality}
+                    data-bilibili-quality-retry=""
+                    className="h-6 gap-1 px-1.5 text-[11px] text-white hover:bg-[var(--overlay-control-hover)] hover:text-white"
+                  >
+                    <ArrowClockwise size={12} aria-hidden="true" />
+                    {t('learningHub:mediaBilibili.playback.qualityRetry')}
+                  </DsButton>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 应用内播放失败 / 停滞：停止转圈，给可执行出口（不自动切换） */}
+          {streamFailed && (
+            <div
+              data-bilibili-stream-error=""
+              data-bilibili-stream-reason={streamFailureReason}
+              role="alert"
+              className="absolute inset-x-0 bottom-0 z-20 flex flex-col gap-1.5 bg-black/80 px-3 py-2 text-[11px] text-white"
+            >
+              <p className="font-medium">
+                {t('learningHub:mediaBilibili.playback.loadFailedTitle')}
+                {loadFailureKey ? ` · ${t(loadFailureKey)}` : ''}
+              </p>
+              <p className="text-white/70">{t('learningHub:mediaBilibili.playback.loadFailedHint')}</p>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <DsButton
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleRetryStream}
+                  data-bilibili-action="retry-stream"
+                  className="h-6 gap-1 px-1.5 text-[11px] text-white hover:bg-[var(--overlay-control-hover)] hover:text-white"
+                >
+                  <ArrowClockwise size={12} aria-hidden="true" />
+                  {t('learningHub:mediaBilibili.playback.retry')}
+                </DsButton>
+                <DsButton
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setLinkEmbed(true)}
+                  data-bilibili-action="use-embed"
+                  className="h-6 gap-1 px-1.5 text-[11px] text-white hover:bg-[var(--overlay-control-hover)] hover:text-white"
+                >
+                  <Television size={12} aria-hidden="true" />
+                  {t('learningHub:mediaBilibili.playback.useEmbed')}
+                </DsButton>
+                <DsButton
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleOpenOnBilibili}
+                  data-bilibili-action="open-external"
+                  className="h-6 gap-1 px-1.5 text-[11px] text-white hover:bg-[var(--overlay-control-hover)] hover:text-white"
+                >
+                  <ArrowUpRight size={12} aria-hidden="true" />
+                  {t('learningHub:mediaBilibili.playback.openExternal')}
+                </DsButton>
+              </div>
+            </div>
           )}
           {player}
         </div>

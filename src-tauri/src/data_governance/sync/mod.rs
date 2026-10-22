@@ -4572,6 +4572,351 @@ impl SyncManager {
         field_merge::field_merge_columns_for_table(table_name)
     }
 
+    // ========================================================================
+    // Issue #491：题组 RowSync 乱序受控暂存
+    // ========================================================================
+
+    fn ensure_group_sync_staging_table(conn: &Connection) -> Result<(), SyncError> {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS __question_group_sync_staging (
+                table_name TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                payload_hash TEXT NOT NULL DEFAULT '',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                first_seen_at TEXT NOT NULL,
+                last_attempt_at TEXT,
+                PRIMARY KEY (table_name, record_id)
+            );
+            "#,
+        )
+        .map_err(|e| SyncError::Database(format!("创建题组暂存表失败: {}", e)))
+    }
+
+    /// 返回缺失的父组 id（可暂存）；父组已存在/不适用时返回 None。
+    fn group_sync_missing_parent(
+        conn: &Connection,
+        table_name: &str,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<Option<String>, SyncError> {
+        // 组行依赖 exam_sheets；成员行依赖 question_groups。任一父行缺失都暂存，
+        // 批次末尾按依赖顺序重放（乱序不永久失败、不隔离、不静默丢弃）。
+        let table_exists = |table: &str| -> Result<bool, SyncError> {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                params![table],
+                |row| row.get(0),
+            )
+            .map_err(|e| SyncError::Database(e.to_string()))
+        };
+
+        match table_name {
+            "question_groups" => {
+                if !table_exists("exam_sheets")? {
+                    return Ok(None);
+                }
+                let Some(exam_id) = obj.get("exam_id").and_then(|value| value.as_str()) else {
+                    return Ok(None);
+                };
+                if exam_id.is_empty() {
+                    return Ok(None);
+                }
+                let present: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM exam_sheets WHERE id = ?1 AND deleted_at IS NULL)",
+                        params![exam_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
+                Ok(if present {
+                    None
+                } else {
+                    Some(format!("exam_sheets:{exam_id}"))
+                })
+            }
+            "question_group_materials" | "questions" => {
+                if !table_exists("question_groups")? {
+                    return Ok(None);
+                }
+                let Some(group_id) = obj.get("group_id").and_then(|value| value.as_str()) else {
+                    return Ok(None);
+                };
+                if group_id.is_empty() {
+                    return Ok(None);
+                }
+                let present: bool = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM question_groups WHERE id = ?1 AND deleted_at IS NULL)",
+                        params![group_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
+                Ok(if present {
+                    None
+                } else {
+                    Some(format!("question_groups:{group_id}"))
+                })
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn stage_group_sync_record(
+        conn: &Connection,
+        table_name: &str,
+        record_id: &str,
+        obj: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), SyncError> {
+        Self::ensure_group_sync_staging_table(conn)?;
+        let payload = serde_json::Value::Object(obj.clone()).to_string();
+        conn.execute(
+            r#"
+            INSERT INTO __question_group_sync_staging
+                (table_name, record_id, operation, payload_json, payload_hash, attempts, last_error, first_seen_at)
+            VALUES (?1, ?2, 'UPSERT', ?3, '', 0, NULL, datetime('now'))
+            ON CONFLICT(table_name, record_id) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                operation = excluded.operation,
+                first_seen_at = __question_group_sync_staging.first_seen_at
+            "#,
+            params![table_name, record_id, payload],
+        )
+        .map_err(|e| SyncError::Database(format!("写入题组暂存失败: {}", e)))?;
+        Ok(())
+    }
+
+    /// 批次结束后重放暂存记录（最多 4 轮，父组到达后即可落地）。
+    fn drain_group_sync_staging(conn: &Connection) -> Result<(), SyncError> {
+        Self::ensure_group_sync_staging_table(conn)?;
+        for _pass in 0..4 {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT table_name, record_id, payload_json FROM __question_group_sync_staging
+                     WHERE attempts < 8 ORDER BY table_name ASC, first_seen_at ASC LIMIT 200",
+                )
+                .map_err(|e| SyncError::Database(e.to_string()))?;
+            let rows: Vec<(String, String, String)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .map_err(|e| SyncError::Database(e.to_string()))?
+                .filter_map(Result::ok)
+                .collect();
+            drop(stmt);
+            if rows.is_empty() {
+                break;
+            }
+
+            let mut progress = false;
+            for (table_name, record_id, payload) in rows {
+                let Ok(serde_json::Value::Object(obj)) =
+                    serde_json::from_str::<serde_json::Value>(&payload)
+                else {
+                    conn.execute(
+                        "DELETE FROM __question_group_sync_staging WHERE table_name = ?1 AND record_id = ?2",
+                        params![table_name, record_id],
+                    )
+                    .ok();
+                    continue;
+                };
+                match Self::group_sync_missing_parent(conn, &table_name, &obj)? {
+                    Some(missing) => {
+                        conn.execute(
+                            "UPDATE __question_group_sync_staging
+                             SET attempts = attempts + 1, last_error = ?3, last_attempt_at = datetime('now')
+                             WHERE table_name = ?1 AND record_id = ?2",
+                            params![table_name, record_id, format!("missing parent {}", missing)],
+                        )
+                        .map_err(|e| SyncError::Database(e.to_string()))?;
+                    }
+                    None => {
+                        Self::apply_single_record(
+                            conn,
+                            &table_name,
+                            &record_id,
+                            &serde_json::Value::Object(obj),
+                            Some("vfs"),
+                            true,
+                        )?;
+                        conn.execute(
+                            "DELETE FROM __question_group_sync_staging WHERE table_name = ?1 AND record_id = ?2",
+                            params![table_name, record_id],
+                        )
+                        .map_err(|e| SyncError::Database(e.to_string()))?;
+                        progress = true;
+                    }
+                }
+            }
+            if !progress {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// Issue #491：批次结束后修复题组 manifest —— **仅基于明确的成员墓碑**。
+    ///
+    /// 不变量（禁止"缺什么就收缩什么"）：
+    /// - 组未 soft-delete 且 `publish_state='complete'`；
+    /// - 只有 manifest 中**本地存在且 deleted_at 非空**（远端显式 DELETE 已落地）
+    ///   的成员才会从 manifest 移除；
+    /// - manifest 中仍有"本地完全不存在"或"本地存活但 group_version 不一致"的成员时，
+    ///   说明是 partial/乱序下载，**绝不收缩**（保持不可见，等待剩余行到达）；
+    /// - 收缩时 version+1 并重盖章剩余成员，保持可见性谓词一致。
+    fn repair_question_group_manifests(conn: &Connection) -> Result<(), SyncError> {
+        let has_tables: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='question_groups')
+                 AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='question_group_materials')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(false);
+        if !has_tables {
+            return Ok(());
+        }
+
+        let groups: Vec<(String, i64, String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, version, expected_child_ids_json, expected_material_ids_json
+                     FROM question_groups
+                     WHERE deleted_at IS NULL AND publish_state = 'complete'
+                     ORDER BY created_at ASC LIMIT 500",
+                )
+                .map_err(|e| SyncError::Database(e.to_string()))?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .map_err(|e| SyncError::Database(e.to_string()))?;
+            rows.filter_map(Result::ok).collect()
+        };
+
+        for (group_id, version, expected_children, expected_materials) in groups {
+            // 1) 是否存在"完全缺失"（未下载到）的预期成员 —— partial，禁止收缩。
+            let unresolved_children: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM json_each(?1) e
+                     WHERE NOT EXISTS (SELECT 1 FROM questions q WHERE q.id = e.value)
+                       AND NOT EXISTS (SELECT 1 FROM questions q WHERE q.id = e.value AND q.deleted_at IS NOT NULL)",
+                    params![expected_children],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let unresolved_materials: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM json_each(?1) e
+                     WHERE NOT EXISTS (SELECT 1 FROM question_group_materials m WHERE m.id = e.value)
+                       AND NOT EXISTS (SELECT 1 FROM question_group_materials m WHERE m.id = e.value AND m.deleted_at IS NOT NULL)",
+                    params![expected_materials],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if unresolved_children > 0 || unresolved_materials > 0 {
+                tracing::debug!(
+                    "[sync] 题组 {} 仍缺成员（children_missing={}, materials_missing={}），保持不可见等待补齐",
+                    group_id,
+                    unresolved_children,
+                    unresolved_materials
+                );
+                continue;
+            }
+
+            // 2) 显式墓碑：manifest 内、本地存在但 deleted_at 非空。
+            let tombstoned_children: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM json_each(?1) e
+                     WHERE EXISTS (SELECT 1 FROM questions q WHERE q.id = e.value AND q.deleted_at IS NOT NULL)",
+                    params![expected_children],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            let tombstoned_materials: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM json_each(?1) e
+                     WHERE EXISTS (SELECT 1 FROM question_group_materials m WHERE m.id = e.value AND m.deleted_at IS NOT NULL)",
+                    params![expected_materials],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            if tombstoned_children == 0 && tombstoned_materials == 0 {
+                continue;
+            }
+
+            // 3) 收缩到存活成员（此时 gap 只能来自显式墓碑）。
+            let live_children: Vec<String> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM questions WHERE group_id = ?1 AND deleted_at IS NULL ORDER BY group_order, id",
+                    )
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![group_id], |row| row.get::<_, String>(0))
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
+                rows.filter_map(Result::ok).collect()
+            };
+            let live_materials: Vec<String> = {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT id FROM question_group_materials WHERE group_id = ?1 AND deleted_at IS NULL ORDER BY order_index, id",
+                    )
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![group_id], |row| row.get::<_, String>(0))
+                    .map_err(|e| SyncError::Database(e.to_string()))?;
+                rows.filter_map(Result::ok).collect()
+            };
+
+            let new_children =
+                serde_json::to_string(&live_children).unwrap_or_else(|_| "[]".into());
+            let new_materials =
+                serde_json::to_string(&live_materials).unwrap_or_else(|_| "[]".into());
+            if new_children == expected_children && new_materials == expected_materials {
+                continue;
+            }
+
+            let new_version = version + 1;
+            conn.execute(
+                "UPDATE question_groups
+                 SET expected_child_ids_json = ?2, expected_material_ids_json = ?3,
+                     version = ?4, updated_at = datetime('now')
+                 WHERE id = ?1",
+                params![group_id, new_children, new_materials, new_version],
+            )
+            .map_err(|e| SyncError::Database(format!("修复题组 manifest 失败: {e}")))?;
+            conn.execute(
+                "UPDATE questions SET group_version = ?2
+                 WHERE group_id = ?1 AND deleted_at IS NULL
+                   AND group_order IS NOT NULL AND group_version <> ?2",
+                params![group_id, new_version],
+            )
+            .map_err(|e| SyncError::Database(e.to_string()))?;
+            conn.execute(
+                "UPDATE question_group_materials SET group_version = ?2
+                 WHERE group_id = ?1 AND deleted_at IS NULL AND group_version <> ?2",
+                params![group_id, new_version],
+            )
+            .map_err(|e| SyncError::Database(e.to_string()))?;
+
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let _ = crate::vfs::question_index_ledger::QuestionIndexLedger::enqueue_question_units_with_conn(
+                conn,
+                &live_children,
+                now_ms,
+            );
+            tracing::info!(
+                "[sync] 依据显式墓碑收缩题组 manifest: group={} children={} materials={} version={}",
+                group_id,
+                live_children.len(),
+                live_materials.len(),
+                new_version
+            );
+        }
+        Ok(())
+    }
+
     /// 应用单条下载变更到本地数据库。
     fn apply_single_record(
         conn: &Connection,
@@ -4634,6 +4979,19 @@ impl SyncManager {
 
         if obj.is_empty() {
             return Err(SyncError::Database(format!("记录数据为空: {}", record_id)));
+        }
+
+        // Issue #491：RowSync 乱序到达（子题/材料先于组）不能永久失败，也不能静默丢弃。
+        // 缺父组时写入持久化暂存表，批次结束后按依赖顺序重放；父组到达后自动补齐。
+        if let Some(missing_group) = Self::group_sync_missing_parent(conn, table_name, &obj)? {
+            Self::stage_group_sync_record(conn, table_name, record_id, &obj)?;
+            tracing::info!(
+                "[sync] 题组/成员先于父行到达，已受控暂存: {}.{} (missing parent={})",
+                table_name,
+                record_id,
+                missing_group
+            );
+            return Ok(());
         }
 
         // deleted_at 的显式 null 是"复活意图"；其他 null 字段也会作为 SQL NULL 写入，
@@ -6106,6 +6464,9 @@ impl SyncManager {
             "note_document_revisions" => 45,
             "note_learning_relations" => 70,
             "chat_v2_compactions" => 45,
+            // Issue #491：组必须先于材料/子题落库（乱序补偿见 __question_group_sync_staging）
+            "question_groups" => 46,
+            "question_group_materials" => 48,
             "questions" | "essay_sessions" | "pomodoro_records" => 50,
             "chat_messages" | "review_chat_messages" | "anki_cards" | "review_session_mistakes" => {
                 55
@@ -6798,6 +7159,8 @@ impl SyncManager {
                 }
             }
 
+            Self::drain_group_sync_staging(conn)?;
+            Self::repair_question_group_manifests(conn)?;
             Self::recompute_derived_ref_counts_if_relevant(conn, changes)?;
             // TD-02: completed_pomodoros 是 pomodoro_records 的派生缓存，
             // 在提交边界按事实表重算（幂等），替代已废弃的 MaxValue 字段合并。
@@ -7097,6 +7460,20 @@ impl SyncManager {
             );
         }
 
+        // Issue #491：题组材料的配图同样进入资产闭包（权威正文/图片只在
+        // question_group_materials，不复制进子题）。含软删材料——purge 才递减。
+        if Self::table_has_column(conn, "question_group_materials", "images_json") {
+            subqueries.push(
+                "SELECT json_extract(img.value, '$.hash') AS blob_hash
+                 FROM question_group_materials, json_each(question_group_materials.images_json) AS img
+                 WHERE question_group_materials.images_json IS NOT NULL
+                   AND json_valid(question_group_materials.images_json)
+                   AND json_extract(img.value, '$.hash') IS NOT NULL
+                   AND json_extract(img.value, '$.hash') <> ''"
+                    .to_string(),
+            );
+        }
+
         // [P2 churn] 同 recompute_resource_ref_counts：只更新值实际变化的行。
         if subqueries.is_empty() {
             conn.execute(
@@ -7254,6 +7631,8 @@ impl SyncManager {
                 }
             }
 
+            Self::drain_group_sync_staging(conn)?;
+            Self::repair_question_group_manifests(conn)?;
             Self::recompute_derived_ref_counts_if_relevant(conn, changes)?;
             // TD-02: completed_pomodoros 是 pomodoro_records 的派生缓存，
             // 在提交边界按事实表重算（幂等），替代已废弃的 MaxValue 字段合并。
@@ -7615,6 +7994,8 @@ impl SyncManager {
                 }
             }
 
+            Self::drain_group_sync_staging(conn)?;
+            Self::repair_question_group_manifests(conn)?;
             Self::recompute_derived_ref_counts_if_relevant(conn, changes)?;
             // TD-02: completed_pomodoros 是 pomodoro_records 的派生缓存，
             // 在提交边界按事实表重算（幂等），替代已废弃的 MaxValue 字段合并。
@@ -17875,5 +18256,224 @@ mod tests {
             "明文遗留资产必须被拒收"
         );
         assert!(!dir_b.path().join("images/legacy.png").exists());
+    }
+
+    /// Issue #491：真实 apply_downloaded_changes 的乱序/墓碑综合用例。
+    /// 覆盖：child-first 跨批 staging→drain、parent-first、manifest 缺成员不提前可见、
+    /// 显式 tombstone 才收缩 manifest。
+    #[test]
+    fn group_rowsync_child_first_and_tombstone_apply_through_production_path() {
+        use chrono::Utc;
+        use serde_json::json;
+
+        let (_tmp, db) = crate::vfs::database::setup_migrated_test_db();
+        let conn = db.get_conn_safe().unwrap();
+        conn.execute(
+            "INSERT INTO exam_sheets (id, exam_name, status, temp_id, metadata_json, preview_json, created_at, updated_at)
+             VALUES ('exam_g','group exam','completed','tmp_g','{}','{}','2026-10-21T00:00:00Z','2026-10-21T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+
+        let now = Utc::now().to_rfc3339();
+        let make =
+            |table: &str, id: &str, operation: ChangeOperation, data: Option<serde_json::Value>| {
+                SyncChangeWithData {
+                    table_name: table.to_string(),
+                    record_id: id.to_string(),
+                    operation,
+                    data,
+                    changed_at: now.clone(),
+                    change_log_id: None,
+                    database_name: Some("vfs".to_string()),
+                    suppress_change_log: Some(true),
+                    source_device_id: None,
+                    source_seq: None,
+                }
+            };
+        let child_data = |id: &str, order: i32, label: &str| {
+            json!({
+                "id": id,
+                "exam_id": "exam_g",
+                "content": format!("stem {id}"),
+                "group_id": "g1",
+                "sub_label": label,
+                "group_order": order,
+                "group_version": 1,
+                "created_at": "2026-10-21T00:00:00Z",
+                "updated_at": "2026-10-21T00:00:00Z",
+            })
+        };
+        let group_data = json!({
+            "id": "g1",
+            "exam_id": "exam_g",
+            "group_type": "reading",
+            "source_type": "ocr",
+            "version": 1,
+            "publish_state": "complete",
+            "expected_child_ids_json": "[\"q1\",\"q2\"]",
+            "expected_material_ids_json": "[]",
+            "created_at": "2026-10-21T00:00:00Z",
+            "updated_at": "2026-10-21T00:00:00Z",
+        });
+
+        let staged_count = || -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM __question_group_sync_staging",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+        };
+        let live_children = || -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM questions WHERE group_id='g1' AND deleted_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let visible_group = || -> i64 {
+            let sql = format!(
+                "SELECT COUNT(*) FROM question_groups g WHERE {}",
+                crate::vfs::repos::visible_group_sql("g")
+            );
+            conn.query_row(&sql, [], |row| row.get(0)).unwrap()
+        };
+        let group_manifest = || -> (i64, String) {
+            conn.query_row(
+                "SELECT version, expected_child_ids_json FROM question_groups WHERE id='g1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+        };
+
+        // 1) child-first（组尚未到达）：必须受控暂存，不隔离、不落库半组
+        SyncManager::apply_downloaded_changes(
+            &conn,
+            &[make(
+                "questions",
+                "q1",
+                ChangeOperation::Insert,
+                Some(child_data("q1", 1, "(1)")),
+            )],
+            None,
+        )
+        .expect("child-first batch must not fail");
+        assert_eq!(live_children(), 0, "缺父组时不能落库孤立子题");
+        assert_eq!(staged_count(), 1, "缺父组必须写入受控暂存");
+
+        // 2) group 到达：drain 在批次末尾重放暂存子题
+        SyncManager::apply_downloaded_changes(
+            &conn,
+            &[make(
+                "question_groups",
+                "g1",
+                ChangeOperation::Insert,
+                Some(group_data.clone()),
+            )],
+            None,
+        )
+        .expect("group batch must apply");
+        assert_eq!(live_children(), 1, "父组到达后暂存子题必须落地");
+        assert_eq!(staged_count(), 0);
+        assert_eq!(visible_group(), 0, "manifest 还缺 q2 时组不得可见");
+
+        // 3) parent-first 补齐 q2 后完整可见
+        SyncManager::apply_downloaded_changes(
+            &conn,
+            &[make(
+                "questions",
+                "q2",
+                ChangeOperation::Insert,
+                Some(child_data("q2", 2, "(2)")),
+            )],
+            None,
+        )
+        .expect("second child batch");
+        assert_eq!(live_children(), 2);
+        assert_eq!(visible_group(), 1, "manifest 全到齐后可见");
+
+        // 4) 远端显式 tombstone（DELETE）才收缩 manifest，并推进版本
+        let (version_before, _) = group_manifest();
+        SyncManager::apply_downloaded_changes(
+            &conn,
+            &[make("questions", "q1", ChangeOperation::Delete, None)],
+            None,
+        )
+        .expect("delete batch");
+        assert_eq!(live_children(), 1);
+        let (version_after, manifest) = group_manifest();
+        assert_eq!(version_after, version_before + 1);
+        assert_eq!(manifest, "[\"q2\"]");
+        assert_eq!(visible_group(), 1, "显式墓碑收缩后剩余组保持可见");
+    }
+
+    #[test]
+    fn group_manifest_repair_requires_explicit_tombstones() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE question_groups (
+                id TEXT PRIMARY KEY, exam_id TEXT, version INTEGER, publish_state TEXT,
+                expected_child_ids_json TEXT, expected_material_ids_json TEXT,
+                created_at TEXT, updated_at TEXT, deleted_at TEXT);
+            CREATE TABLE question_group_materials (
+                id TEXT PRIMARY KEY, group_id TEXT, deleted_at TEXT, order_index INTEGER, group_version INTEGER);
+            CREATE TABLE questions (
+                id TEXT PRIMARY KEY, group_id TEXT, deleted_at TEXT, group_order INTEGER, group_version INTEGER);
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO question_groups VALUES ('g1','e1',3,'complete','[\"q1\",\"q2\"]','[\"m1\"]','now','now',NULL)",
+            [],
+        )
+        .unwrap();
+        // child-first partial：q1 已到，q2 完全未到 -> 不可收缩
+        conn.execute("INSERT INTO questions VALUES ('q1','g1',NULL,1,3)", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO question_group_materials VALUES ('m1','g1',NULL,1,3)",
+            [],
+        )
+        .unwrap();
+        SyncManager::repair_question_group_manifests(&conn).unwrap();
+        let (version, children): (i64, String) = conn
+            .query_row(
+                "SELECT version, expected_child_ids_json FROM question_groups WHERE id='g1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, 3, "partial 下载不得推进版本");
+        assert_eq!(children, "[\"q1\",\"q2\"]", "partial 下载不得收缩 manifest");
+
+        // 远端显式删除 q2（墓碑已落地）-> 允许收缩
+        conn.execute(
+            "INSERT INTO questions VALUES ('q2','g1','2026-10-22T00:00:00Z',2,3)",
+            [],
+        )
+        .unwrap();
+        SyncManager::repair_question_group_manifests(&conn).unwrap();
+        let (version, children): (i64, String) = conn
+            .query_row(
+                "SELECT version, expected_child_ids_json FROM question_groups WHERE id='g1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(children, "[\"q1\"]");
+        let (child_version, material_version): (i64, i64) = conn
+            .query_row(
+                "SELECT (SELECT group_version FROM questions WHERE id='q1'),
+                        (SELECT group_version FROM question_group_materials WHERE id='m1')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((child_version, material_version), (4, 4));
     }
 }

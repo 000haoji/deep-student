@@ -7741,6 +7741,447 @@ pub async fn qbank_reset_questions_progress(
 }
 
 // ============================================================================
+// 题组命令（Issue #491：平级组 + 多有序材料 + 独立子题）
+// ============================================================================
+//
+// 语义与约束见 docs/dev/qbank-question-groups.md：
+// - 组头不是 question，不计题数、不产生作答记录；parent_id 仍是变式题语义。
+// - 编辑命令强制 `expected_version`（组版本 CAS），材料没有独立版本。
+// - 所有读路径只返回可见组（publish_state=complete 且 manifest 完整）。
+// - 发布使用一次事务写入组/材料/子题，禁止先建题再回写关系。
+
+use crate::vfs::repos::question_group_repo::{
+    GroupDeletePreview, GroupUpdate, MaterialUpdate, NewMaterial, NewQuestionGroup,
+    ProposedGroupBundle, QuestionGroup, QuestionGroupBundle, QuestionGroupContext,
+    QuestionGroupListResult, QuestionGroupMaterial, SoftDeleteSummary, VfsQuestionGroupRepo,
+};
+
+fn group_repo_db(
+    state: &State<'_, AppState>,
+) -> Result<std::sync::Arc<crate::vfs::database::VfsDatabase>> {
+    state
+        .vfs_db
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| AppError::internal("VFS 数据库未初始化"))
+}
+
+fn map_group_error(error: crate::vfs::error::VfsError) -> AppError {
+    let message = error.to_string();
+    if message.contains("QBANK_CONFLICT") {
+        AppError::conflict(message)
+    } else if message.contains("QBANK_GROUP_MATERIAL_IN_USE")
+        || message.contains("QBANK_GROUP_PARENT_MISSING")
+        || message.contains("QBANK_GROUP_EXAM_MISSING")
+        || message.contains("QBANK_GROUP_FIELDS_INCONSISTENT")
+    {
+        AppError::validation(message)
+    } else {
+        AppError::database(message)
+    }
+}
+
+/// 多写命令的统一事务包装：调用方负责一次提交，失败整体回滚。
+fn with_group_write_tx<T>(
+    vfs_db: &crate::vfs::database::VfsDatabase,
+    f: impl FnOnce(&rusqlite::Connection) -> Result<T>,
+) -> Result<T> {
+    let conn = vfs_db.get_conn_safe().map_err(map_group_error)?;
+    conn.execute("BEGIN IMMEDIATE", [])
+        .map_err(|e| AppError::database(format!("开启题组写事务失败: {e}")))?;
+    match f(&conn) {
+        Ok(value) => {
+            conn.execute("COMMIT", [])
+                .map_err(|e| AppError::database(format!("提交题组写事务失败: {e}")))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(error)
+        }
+    }
+}
+
+/// 获取单题的组上下文（练习 / AI 工具 / 导出共用）
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetQuestionGroupContextRequest {
+    pub exam_id: String,
+    #[serde(default)]
+    pub question_id: Option<String>,
+    #[serde(default)]
+    pub card_id: Option<String>,
+    /// practice | ai_tool | export（当前仅用于审计日志，不影响可见性规则）
+    #[serde(default)]
+    pub purpose: Option<String>,
+}
+
+#[tauri::command]
+pub async fn qbank_get_question_group_context(
+    request: GetQuestionGroupContextRequest,
+    state: State<'_, AppState>,
+) -> Result<Option<QuestionGroupContext>> {
+    let vfs_db = group_repo_db(&state)?;
+    let question_id = match (&request.question_id, &request.card_id) {
+        (Some(id), _) if !id.trim().is_empty() => id.clone(),
+        (_, Some(card_id)) if !card_id.trim().is_empty() => {
+            let question = crate::vfs::repos::VfsQuestionRepo::get_question_by_card_id(
+                &vfs_db,
+                &request.exam_id,
+                card_id,
+            )
+            .map_err(map_group_error)?
+            .ok_or_else(|| AppError::not_found("题目不存在"))?;
+            question.id
+        }
+        _ => return Err(AppError::validation("必须提供 question_id 或 card_id")),
+    };
+    let conn = vfs_db.get_conn_safe().map_err(map_group_error)?;
+    VfsQuestionGroupRepo::get_context_for_question_with_conn(&conn, &question_id)
+        .map_err(map_group_error)
+}
+
+/// 组详情（组 + 有序材料 + 子题简介）
+/// Tauri v2 默认把 snake_case 参数映射为 camelCase JS 键（groupId/examId）。
+#[tauri::command]
+pub async fn qbank_get_question_group(
+    group_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<QuestionGroupBundle>> {
+    let vfs_db = group_repo_db(&state)?;
+    VfsQuestionGroupRepo::get_bundle(&vfs_db, &group_id).map_err(map_group_error)
+}
+
+#[tauri::command]
+pub async fn qbank_list_question_groups(
+    exam_id: String,
+    page: Option<u32>,
+    page_size: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<QuestionGroupListResult> {
+    let vfs_db = group_repo_db(&state)?;
+    let conn = vfs_db.get_conn_safe().map_err(map_group_error)?;
+    VfsQuestionGroupRepo::list_groups_with_conn(
+        &conn,
+        &exam_id,
+        page.unwrap_or(1),
+        page_size.unwrap_or(50),
+    )
+    .map_err(map_group_error)
+}
+
+#[tauri::command]
+pub async fn qbank_create_question_group(
+    params: NewQuestionGroup,
+    state: State<'_, AppState>,
+) -> Result<QuestionGroup> {
+    let vfs_db = group_repo_db(&state)?;
+    let conn = vfs_db.get_conn_safe().map_err(map_group_error)?;
+    VfsQuestionGroupRepo::insert_group_with_conn(&conn, &params).map_err(map_group_error)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateQuestionGroupRequest {
+    pub group_id: String,
+    pub update: GroupUpdate,
+    /// 必填：组版本 CAS（不允许跳过保护）
+    pub expected_version: i64,
+}
+
+#[tauri::command]
+pub async fn qbank_update_question_group(
+    request: UpdateQuestionGroupRequest,
+    state: State<'_, AppState>,
+) -> Result<QuestionGroup> {
+    let vfs_db = group_repo_db(&state)?;
+    with_group_write_tx(&vfs_db, |conn| {
+        VfsQuestionGroupRepo::update_group_with_conn(
+            conn,
+            &request.group_id,
+            &request.update,
+            request.expected_version,
+        )
+        .map_err(map_group_error)
+    })
+}
+
+#[tauri::command]
+pub async fn qbank_preview_group_delete(
+    group_id: String,
+    state: State<'_, AppState>,
+) -> Result<GroupDeletePreview> {
+    let vfs_db = group_repo_db(&state)?;
+    let conn = vfs_db.get_conn_safe().map_err(map_group_error)?;
+    VfsQuestionGroupRepo::preview_delete_group_with_conn(&conn, &group_id).map_err(map_group_error)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteQuestionGroupRequest {
+    pub group_id: String,
+    pub expected_version: i64,
+    /// 必须先调用 qbank_preview_group_delete 让用户确认受影响子题
+    pub confirmed: bool,
+}
+
+#[tauri::command]
+pub async fn qbank_delete_question_group(
+    request: DeleteQuestionGroupRequest,
+    state: State<'_, AppState>,
+) -> Result<SoftDeleteSummary> {
+    if !request.confirmed {
+        return Err(AppError::validation(
+            "删除题组需要用户确认（先调用 qbank_preview_group_delete）",
+        ));
+    }
+    let vfs_db = group_repo_db(&state)?;
+    with_group_write_tx(&vfs_db, |conn| {
+        VfsQuestionGroupRepo::delete_group_with_conn(
+            conn,
+            &request.group_id,
+            request.expected_version,
+        )
+        .map_err(map_group_error)
+    })
+}
+
+#[tauri::command]
+pub async fn qbank_create_group_material(
+    params: NewMaterial,
+    state: State<'_, AppState>,
+) -> Result<QuestionGroupMaterial> {
+    let vfs_db = group_repo_db(&state)?;
+    with_group_write_tx(&vfs_db, |conn| {
+        VfsQuestionGroupRepo::insert_material_with_conn(conn, &params).map_err(map_group_error)
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateGroupMaterialRequest {
+    pub material_id: String,
+    pub update: MaterialUpdate,
+    /// 必填：**组版本** CAS（材料无独立版本）
+    pub expected_version: i64,
+}
+
+#[tauri::command]
+pub async fn qbank_update_group_material(
+    request: UpdateGroupMaterialRequest,
+    state: State<'_, AppState>,
+) -> Result<QuestionGroupMaterial> {
+    let vfs_db = group_repo_db(&state)?;
+    with_group_write_tx(&vfs_db, |conn| {
+        VfsQuestionGroupRepo::update_material_with_conn(
+            conn,
+            &request.material_id,
+            &request.update,
+            request.expected_version,
+        )
+        .map_err(map_group_error)
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeleteGroupMaterialRequest {
+    pub material_id: String,
+    /// 必填：组版本 CAS（材料无独立版本）
+    pub expected_version: i64,
+}
+
+#[tauri::command]
+pub async fn qbank_delete_group_material(
+    request: DeleteGroupMaterialRequest,
+    state: State<'_, AppState>,
+) -> Result<()> {
+    let vfs_db = group_repo_db(&state)?;
+    with_group_write_tx(&vfs_db, |conn| {
+        VfsQuestionGroupRepo::delete_material_with_conn(
+            conn,
+            &request.material_id,
+            request.expected_version,
+        )
+        .map_err(map_group_error)
+    })
+}
+
+/// 材料搜索（派生到具体子题；权威正文不复制）
+#[tauri::command]
+pub async fn qbank_search_group_materials(
+    keyword: String,
+    exam_id: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::vfs::repos::GroupMaterialHit>> {
+    let vfs_db = group_repo_db(&state)?;
+    let escaped = crate::vfs::repos::VfsQuestionRepo::escape_fts5_query(keyword.trim());
+    if escaped.is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = vfs_db.get_conn_safe().map_err(map_group_error)?;
+    VfsQuestionGroupRepo::search_material_hits_with_conn(
+        &conn,
+        &escaped,
+        exam_id.as_deref(),
+        limit.unwrap_or(50) as usize,
+    )
+    .map_err(map_group_error)
+}
+
+// ----------------------------------------------------------------------------
+// 题目包 JSON v2 导入导出（bundle 服务）
+// ----------------------------------------------------------------------------
+
+#[tauri::command]
+pub async fn qbank_export_bundle_json(
+    request: crate::question_bundle_service::BundleExportRequest,
+    state: State<'_, AppState>,
+) -> Result<crate::question_bundle_service::BundleExportResult> {
+    let vfs_db = group_repo_db(&state)?;
+    crate::question_bundle_service::QuestionBundleService::export_json_v2(&vfs_db, &request)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BundleCsvExportRequest {
+    pub exam_id: String,
+    /// 来自保存对话框的绝对路径；必须显式给出，避免"假成功"
+    pub file_path: String,
+    #[serde(default = "default_true_include_study_state")]
+    pub include_study_state: bool,
+}
+
+fn default_true_include_study_state() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleCsvWarning {
+    pub code: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ref_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleCsvExportResult {
+    pub file_path: String,
+    pub row_count: u32,
+    /// 关系被扁平化展开、材料进 group_context 列，无法无损回导
+    pub lossy: bool,
+    /// 不包含图片/资产字节
+    pub assets_not_included: bool,
+    pub warnings: Vec<BundleCsvWarning>,
+}
+
+/// 校验导出路径：拒绝目录遍历、拒绝覆盖数据库文件、要求 .csv 扩展名。
+fn validate_bundle_csv_path(path: &str) -> Result<()> {
+    let candidate = std::path::Path::new(path);
+    if candidate.as_os_str().is_empty() {
+        return Err(AppError::validation("导出路径不能为空"));
+    }
+    for component in candidate.components() {
+        if component == std::path::Component::ParentDir {
+            return Err(AppError::validation("路径不允许包含 '..' 目录遍历"));
+        }
+    }
+    let lower = path.to_ascii_lowercase();
+    for suffix in [".db", ".sqlite", ".sqlite3", ".db-wal", ".db-shm"] {
+        if lower.ends_with(suffix) {
+            return Err(AppError::validation("CSV 导出不允许覆盖数据库文件"));
+        }
+    }
+    let is_csv = candidate
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("csv"))
+        .unwrap_or(false);
+    if !is_csv {
+        return Err(AppError::validation("导出文件必须以 .csv 结尾"));
+    }
+    Ok(())
+}
+
+/// 题组感知 CSV 投影导出（lossy；权威材料仍只存库内一份）
+#[tauri::command]
+pub async fn qbank_export_bundle_csv(
+    request: BundleCsvExportRequest,
+    state: State<'_, AppState>,
+) -> Result<BundleCsvExportResult> {
+    validate_bundle_csv_path(&request.file_path)?;
+    let vfs_db = group_repo_db(&state)?;
+    // 入口参数与 export_json_v2 对齐（include_assets=false 是投影的前提）
+    let csv_text = crate::question_bundle_service::QuestionBundleService::project_csv_for_exam(
+        &vfs_db,
+        &request.exam_id,
+        request.include_study_state,
+    )?;
+    if csv_text.trim().is_empty() {
+        return Err(AppError::validation("没有可导出的题目"));
+    }
+
+    // 先写临时文件再原子改名，失败不留半截 CSV。
+    let target = std::path::PathBuf::from(&request.file_path);
+    let temp_path = target.with_extension("csv.part");
+    tokio::fs::write(&temp_path, csv_text.as_bytes())
+        .await
+        .map_err(|e| AppError::internal(format!("写入 CSV 临时文件失败: {e}")))?;
+    if let Err(error) = tokio::fs::rename(&temp_path, &target).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(AppError::internal(format!("写入 CSV 失败: {error}")));
+    }
+
+    let row_count = csv_text
+        .lines()
+        .count()
+        .saturating_sub(1)
+        .try_into()
+        .unwrap_or(u32::MAX);
+
+    log::info!(
+        "[qbank_export_bundle_csv] exam_id={} file={} rows={} (lossy projection)",
+        request.exam_id,
+        request.file_path,
+        row_count
+    );
+
+    Ok(BundleCsvExportResult {
+        file_path: request.file_path,
+        row_count,
+        lossy: true,
+        assets_not_included: true,
+        warnings: vec![
+            BundleCsvWarning {
+                code: "relation_projection_lossy".to_string(),
+                message: "题组关系被扁平化投影（材料写入 group_context 列），无法无损回导"
+                    .to_string(),
+                ref_id: None,
+            },
+            BundleCsvWarning {
+                code: "assets_not_included".to_string(),
+                message: "CSV 不包含图片/资产字节，需要完整往返请使用 JSON v2".to_string(),
+                ref_id: None,
+            },
+        ],
+    })
+}
+
+#[tauri::command]
+pub async fn qbank_import_bundle_json(
+    request: crate::question_bundle_service::BundleImportRequest,
+    state: State<'_, AppState>,
+) -> Result<crate::question_bundle_service::BundleImportResult> {
+    let vfs_db = group_repo_db(&state)?;
+    crate::question_bundle_service::QuestionBundleService::import_json_v2(&vfs_db, &request)
+}
+
+/// 原子发布整组（导入 / typed 组装调用）
+#[tauri::command]
+pub async fn qbank_publish_question_group(
+    bundle: ProposedGroupBundle,
+    state: State<'_, AppState>,
+) -> Result<QuestionGroupBundle> {
+    let vfs_db = group_repo_db(&state)?;
+    VfsQuestionGroupRepo::publish_group_bundle(&vfs_db, &bundle).map_err(map_group_error)
+}
+
+// ============================================================================
 // 时间维度统计命令（2026-01 新增）
 // ============================================================================
 
