@@ -49,6 +49,23 @@ test('provider contract is a fixed fail-closed CI job', () => {
   assert.match(job, /set -euo pipefail/);
 });
 
+test('shared Rust test archives strip symbols and consumers bound downloads', () => {
+  const jobs = yamlTopLevelSection(read('.github/workflows/ci.yml'), 'jobs', 0);
+  const build = yamlTopLevelSection(jobs, 'rust-test-build');
+  assert.match(build, /CARGO_PROFILE_TEST_STRIP: symbols/);
+  assert.match(build, /cargo nextest archive --locked --archive-file/);
+
+  for (const name of ['rust-tests', 'provider-contract']) {
+    const job = yamlTopLevelSection(jobs, name);
+    assert.match(
+      job,
+      /uses: actions\/download-artifact@[a-f0-9]{40}\s*\n\s+timeout-minutes: 10/,
+    );
+    assert.doesNotMatch(job, /continue-on-error:/);
+    assert.match(job, /--archive-file "\$RUNNER_TEMP\/nextest-archive\.tar\.zst"/);
+  }
+});
+
 test('canonical provider composition pins all services with healthchecks', () => {
   const compose = read('scripts/dev/docker-compose.sync-test.yml');
   const minioDockerfile = read('dstu-test/docker/Dockerfile.minio-tool');
