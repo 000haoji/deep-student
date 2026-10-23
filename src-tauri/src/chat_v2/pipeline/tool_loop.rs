@@ -103,6 +103,7 @@ impl AdmittedToolDispatcher for ChatV2Pipeline {
             ctx.memory_enabled,
             ctx.rag_enabled,
             ctx.web_search_enabled,
+            ctx.question_authoring_config.clone(),
         )
         .await
         .map_err(|error| error.to_string())
@@ -474,6 +475,7 @@ impl ChatV2Pipeline {
         // 工具轮次必须在同一个 future 内迭代。这里曾通过 Box::pin 自递归，
         // 每轮都会嵌套 poll 一个体积很大的 future，多轮工具调用可耗尽 Tokio worker 栈。
         let mut recursion_depth = recursion_depth;
+        let mut overflow_recovery_attempted = false;
         // 工作区注入节流状态：在整个工具循环生命周期内复用，
         // 让冷却时间与 max_injections_per_round 跨多轮工具检查点真实生效
         // （此前每个检查点都 new 一个注入器，节流形同虚设）
@@ -1477,6 +1479,52 @@ impl ChatV2Pipeline {
             }
 
             // 处理 LLM 调用结果
+            let input_overflow = call_result.as_ref().err().is_some_and(|error| {
+                crate::llm_manager::routing::llm_error_code(error)
+                    == Some(crate::llm_manager::routing::LLM_ERROR_CODE_CONTEXT_WINDOW_EXCEEDED)
+                    && error
+                        .details
+                        .as_ref()
+                        .and_then(|d| d.pointer("/budget/stage"))
+                        .and_then(Value::as_str)
+                        == Some("input_guard")
+            });
+            if input_overflow
+                && !stream_has_output
+                && !adapter.has_tool_calls()
+                && !overflow_recovery_attempted
+            {
+                overflow_recovery_attempted = true;
+                let excludes = vec![
+                    ctx.user_message_id.clone(),
+                    ctx.assistant_message_id.clone(),
+                ];
+                let cancel = ctx.cancellation_token.clone();
+                match self
+                    .run_compaction_for_session(
+                        &ctx.session_id,
+                        model_override.as_deref(),
+                        "overflow",
+                        &excludes,
+                        ctx.options.context_limit,
+                        ctx.options.memory_enabled,
+                        cancel.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(outcome) if outcome.did_compact() => {
+                        let (before, after) = outcome.token_estimates();
+                        emitter.emit_compaction_completed(before, after);
+                        self.load_chat_history(ctx).await?;
+                        self.compile_frozen_context(ctx).await?;
+                        // The current tool chain is not executed again; it is appended to the
+                        // rebuilt request on the next iteration at this same recursion depth.
+                        continue;
+                    }
+                    Ok(_) => {}
+                    Err(error) => log::warn!("[compaction] overflow recovery failed: {}", error),
+                }
+            }
             // 🔧 P1-1 修复：llm_manager 存在与 pipeline CancellationToken 平行的第二条取消通道
             // （registry / cancel channel），触发时正常返回 Ok(cancelled=true)。
             // 必须记录该标志并在下方短路，否则「已停止」的会话仍会执行带副作用的工具调用并继续递归。
@@ -1686,6 +1734,14 @@ impl ChatV2Pipeline {
                     adapter.on_error(&error_message);
                     log::error!("[ChatV2::pipeline] LLM call failed: {}", error_message);
 
+                    if crate::llm_manager::routing::llm_error_code(&e)
+                        == Some(crate::llm_manager::routing::LLM_ERROR_CODE_CONTEXT_WINDOW_EXCEEDED)
+                    {
+                        return Err(ChatV2Error::ContextWindowExceeded {
+                            message: error_message,
+                            details: json!({"budget": e.details.as_ref().and_then(|d| d.get("budget")), "lastRoundInputTokens": ctx.token_usage.last_round_input_tokens}),
+                        });
+                    }
                     if error_message.to_ascii_lowercase().contains("timed out") {
                         return Err(ChatV2Error::Timeout(error_message));
                     }
@@ -1886,6 +1942,11 @@ impl ChatV2Pipeline {
                 let executed_results = if calls_to_execute.is_empty() {
                     Vec::new()
                 } else {
+                    // Resolve immediately before dispatch from this request's active
+                    // model/config overrides. Model-supplied ids and stale session
+                    // defaults are not authoritative for question authoring.
+                    let question_authoring_config =
+                        self.resolve_tool_authoring_config(ctx).await.map(Arc::new);
                     self.execute_tool_calls(
                         &calls_to_execute,
                         &emitter,
@@ -1907,6 +1968,7 @@ impl ChatV2Pipeline {
                         memory_enabled,
                         rag_enabled,
                         web_search_enabled,
+                        question_authoring_config,
                         &mcp_tool_name_mapping,
                     )
                     .await?
@@ -2728,6 +2790,7 @@ impl ChatV2Pipeline {
         memory_enabled: bool,
         rag_enabled: bool,
         web_search_enabled: bool,
+        question_authoring_config: Option<Arc<crate::llm_manager::ApiConfig>>,
         tool_name_mapping: &HashMap<String, ExternalToolRoute>,
     ) -> ChatV2Result<Vec<ToolResultInfo>> {
         // 🔧 反向映射：LLM 返回的 sanitized 工具名 → 原始名（含 `:` 等特殊字符）
@@ -2811,6 +2874,7 @@ impl ChatV2Pipeline {
                 let futs = batch.iter().cloned().map(|tc| {
                     let fixed_tc = self.fixup_document_tool_resource_id(&tc, &created_file_ids);
                     let tool_to_execute = fixed_tc.unwrap_or(tc);
+                    let question_authoring_config = question_authoring_config.clone();
                     // 仅 ReadOnly 工具允许瞬时失败自动重试；SafeParallel 不重试
                     let allow_retry = self
                         .executor_registry
@@ -2839,6 +2903,7 @@ impl ChatV2Pipeline {
                             memory_enabled,
                             rag_enabled,
                             web_search_enabled,
+                            question_authoring_config,
                         )
                         .await
                     }
@@ -2970,6 +3035,7 @@ impl ChatV2Pipeline {
                         memory_enabled,
                         rag_enabled,
                         web_search_enabled,
+                        question_authoring_config.clone(),
                     )
                     .await;
 
@@ -3045,6 +3111,7 @@ impl ChatV2Pipeline {
         memory_enabled: bool,
         rag_enabled: bool,
         web_search_enabled: bool,
+        question_authoring_config: Option<Arc<crate::llm_manager::ApiConfig>>,
     ) -> ToolResultInfo {
         let mut retries_done: usize = 0;
         let retry_block_id = MessageBlock::generate_id();
@@ -3073,6 +3140,7 @@ impl ChatV2Pipeline {
                     memory_enabled,
                     rag_enabled,
                     web_search_enabled,
+                    question_authoring_config.clone(),
                 )
                 .await;
 
@@ -3279,6 +3347,39 @@ impl ChatV2Pipeline {
         }
     }
 
+    /// Resolve the actual model that owns this tool round. `options` may
+    /// explicitly select a config; when it does not, the default chat model is
+    /// the one the provider is already using and is therefore the trusted
+    /// authoring model. Runtime parameter overrides are applied to the
+    /// snapshot, while the API key remains backend-only.
+    async fn resolve_tool_authoring_config(
+        &self,
+        ctx: &PipelineContext,
+    ) -> Option<crate::llm_manager::ApiConfig> {
+        if let Some(snapshot) = ctx.execution_snapshot.as_ref() {
+            if let Some(mut config) = self
+                .resolve_api_config_by_id(Some(snapshot.resolved_model_id.as_str()))
+                .await
+            {
+                crate::llm_manager::routing::ParamOverrides {
+                    max_output_tokens: ctx.options.max_tokens,
+                    ..Default::default()
+                }
+                .apply(&mut config);
+                return Some(config);
+            }
+        }
+        if let Some(mut config) = self.resolve_active_api_config(ctx).await {
+            crate::llm_manager::routing::ParamOverrides {
+                max_output_tokens: ctx.options.max_tokens,
+                ..Default::default()
+            }
+            .apply(&mut config);
+            return Some(config);
+        }
+        None
+    }
+
     /// 执行单个工具调用
     ///
     /// 🆕 文档 29 P0-1: 委托给 ToolExecutorRegistry 执行
@@ -3318,6 +3419,7 @@ impl ChatV2Pipeline {
         memory_enabled: bool,
         rag_enabled: bool,
         web_search_enabled: bool,
+        question_authoring_config: Option<Arc<crate::llm_manager::ApiConfig>>,
     ) -> ChatV2Result<ToolResultInfo> {
         log::debug!(
             "[ChatV2::pipeline] Executing tool via ExecutorRegistry: name={}, id={}",
@@ -3381,6 +3483,7 @@ impl ChatV2Pipeline {
         .with_event_meta(skill_state_version, round_id.map(|s| s.to_string()))
         .with_execution_allowed_tools(execution_allowed_tools.clone())
         .with_skill_package_roots(skill_package_roots.clone())
+        .with_question_authoring_config(question_authoring_config)
         .with_shell_guard_approved(admission.shell_guard_admitted())
         .with_admitted_tool_dispatcher(Arc::new(self.clone()))
         .with_feature_flags(memory_enabled, rag_enabled, web_search_enabled);
@@ -4605,6 +4708,7 @@ mod tests {
                 true,
                 true,
                 true,
+                None,
             )
             .await
             .expect("execute_single_tool");
@@ -4671,6 +4775,7 @@ mod tests {
                 true,
                 true,
                 true,
+                None,
             )
             .await
             .expect("execute packed tool");
@@ -4728,6 +4833,7 @@ mod tests {
                 true,
                 true,
                 true,
+                None,
             )
             .await
             .expect("execute packed tool");
@@ -4992,6 +5098,7 @@ mod tests {
                 true,
                 true,
                 true,
+                None,
             )
             .await
             .expect("execute_single_tool")

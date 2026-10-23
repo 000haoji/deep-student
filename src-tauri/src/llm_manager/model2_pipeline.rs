@@ -381,6 +381,17 @@ fn check_request_input_budget(
         details.insert("estimated_input_tokens".into(), json!(used));
         details.insert("input_limit".into(), json!(limit));
         details.insert("compaction_model_id".into(), json!(config.id));
+        details.insert(
+            "budget".into(),
+            json!({
+                "stage": "input_guard",
+                "estimatedInputTokens": used,
+                "limit": limit,
+                "removedHistoryImages": 0,
+                "removedMessages": 0,
+                "trimmedTailChars": 0,
+            }),
+        );
     }
     Err(error)
 }
@@ -1414,6 +1425,46 @@ mod tests {
         assert_eq!(deepseek_v41_image_tokens(544, 544), 184);
         assert_eq!(deepseek_v41_image_tokens(1_000, 1_000), 602);
         assert!(deepseek_v41_image_tokens(8_000, 6_000) <= 1_024);
+    }
+
+    #[test]
+    fn input_guard_preserves_history_images_until_compaction() {
+        let current = json!({"role":"user", "content":[
+            {"type":"text", "text":"current question"},
+            {"type":"image_url", "image_url":{"url":"data:image/png;base64,current"}}
+        ]});
+        let body = json!({"messages":[
+            {"role":"system", "content":"rules"},
+            {"role":"user", "content":[{"type":"image_url", "image_url":{"url":"data:image/png;base64,old"}}]},
+            {"role":"assistant", "content":"old answer"}, current.clone()
+        ]});
+        let original = body.clone();
+        let error = check_request_input_budget(&body, Some(9_000), &ApiConfig::default(), true)
+            .unwrap_err();
+        assert_eq!(body, original);
+        assert_eq!(
+            routing::llm_error_code(&error),
+            Some(routing::LLM_ERROR_CODE_COMPACTION_REQUIRED)
+        );
+        assert_eq!(body["messages"][3], current);
+        assert_eq!(body["messages"][1]["content"][0]["type"], "image_url");
+    }
+
+    #[test]
+    fn chat_input_guard_reports_overflow_without_truncating_current_text_or_tools() {
+        let body = json!({"messages":[
+            {"role":"user", "content":"current question ".repeat(3_000)},
+            {"role":"tool", "tool_call_id":"call_1", "content":json!({"source":"abc".repeat(10_000)}).to_string()}
+        ]});
+        let original = body.clone();
+        let error = check_request_input_budget(&body, Some(1_000), &ApiConfig::default(), false)
+            .unwrap_err();
+        assert_eq!(body, original);
+        assert_eq!(
+            routing::llm_error_code(&error),
+            Some(routing::LLM_ERROR_CODE_CONTEXT_WINDOW_EXCEEDED)
+        );
+        assert_eq!(error.details.unwrap()["budget"]["stage"], "input_guard");
     }
 
     #[test]
