@@ -2,7 +2,7 @@
 //!
 //! 外链播放器（player.bilibili.com iframe）在应用 WebView 里常一直缓冲：第三方 Cookie 被拦、
 //! 风控、UA 识别都不在我们控制之内，也拿不到进度 / 暂停 / 截帧。这里改为：
-//! 1. `x/player/playurl`（html5 平台、`fnval=1`）取单文件 MP4 地址（登录后带会话 Cookie），
+//! 1. `x/player/playurl`（`fnval=1`）取单文件 MP4 地址（登录后带会话 Cookie），
 //!    只接受 B 站视频 CDN 域名，缓存不超过签名过期时间和 50 分钟；
 //! 2. 媒体元素的 Range 请求转发到 CDN（带 B 站 Referer），每次最多回
 //!    [`STREAM_CHUNK_BYTES`]，播放器按 `Content-Range` 继续请求后续区间；
@@ -213,6 +213,15 @@ fn mp4_quality_options(data: &PlayUrlData) -> Vec<QualityOption> {
 }
 
 fn parse_play_info(data: &PlayUrlData, requested_qn: u32) -> Result<PlayInfo, MediaError> {
+    if data
+        .format
+        .as_deref()
+        .is_some_and(|format| !format.starts_with("mp4"))
+    {
+        return Err(MediaError::InvalidInput(
+            "B 站没有返回单文件 MP4 视频".into(),
+        ));
+    }
     let mut urls = pick_play_urls(data)?;
     let url = urls.remove(0);
     Ok(PlayInfo {
@@ -259,6 +268,8 @@ fn is_cdn_url(raw: &str) -> bool {
 
 #[derive(Debug, Deserialize)]
 struct PlayUrlData {
+    #[serde(default)]
+    format: Option<String>,
     #[serde(default)]
     durl: Vec<PlayUrlSegment>,
     #[serde(default)]
@@ -328,20 +339,63 @@ pub(crate) async fn resolve_play_info(
     descriptor: &BiliLinkDescriptor,
     qn: u32,
 ) -> Result<PlayInfo, MediaError> {
+    let mut info = request_play_info(client, descriptor, qn, true).await?;
+    // Some HTML5 responses advertise 1080P but still return a 720P MP4.
+    // Compare the standard MP4 response on the same pinned account/route before caching.
+    if info.quality < qn && info.options.iter().any(|option| option.qn == qn) {
+        match request_play_info(client, descriptor, qn, false).await {
+            Ok(standard) if standard.quality > info.quality && standard.quality <= qn => {
+                info = standard;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                client.attempt.ensure_active()?;
+                if matches!(
+                    error.code(),
+                    "bilibili-login-required"
+                        | "bilibili-request-failed"
+                        | "bilibili-video-unavailable"
+                        | "bilibili-identity-changed"
+                ) {
+                    return Err(error);
+                }
+                log::warn!(
+                    "[media::bilibili_stream] standard MP4 check failed code={}",
+                    error.code()
+                );
+            }
+        }
+    }
+    log::info!(
+        "[media::bilibili_stream] resolved route={:?} logged_in={} requested={} current={}",
+        client.attempt.route,
+        client.attempt.expected_logged_in,
+        qn,
+        info.quality
+    );
+    Ok(info)
+}
+
+async fn request_play_info(
+    client: &BiliClient,
+    descriptor: &BiliLinkDescriptor,
+    qn: u32,
+    html5: bool,
+) -> Result<PlayInfo, MediaError> {
+    let mut query = vec![
+        ("bvid", descriptor.bvid.clone()),
+        ("cid", descriptor.cid.to_string()),
+        ("qn", qn.to_string()),
+        ("fnval", "1".into()),
+        ("fnver", "0".into()),
+        ("fourk", "0".into()),
+        ("high_quality", "1".into()),
+    ];
+    if html5 {
+        query.push(("platform", "html5".into()));
+    }
     let data: PlayUrlData = client
-        .get_api(
-            "/x/player/playurl",
-            &[
-                ("bvid", descriptor.bvid.clone()),
-                ("cid", descriptor.cid.to_string()),
-                ("qn", qn.to_string()),
-                ("fnval", "1".into()),
-                ("fnver", "0".into()),
-                ("fourk", "0".into()),
-                ("platform", "html5".into()),
-                ("high_quality", "1".into()),
-            ],
-        )
+        .get_api("/x/player/playurl", &query)
         .await?
         .ok_or_else(|| MediaError::InvalidInput("B 站没有返回播放地址".into()))?;
     parse_play_info(&data, qn)
@@ -1330,5 +1384,51 @@ mod tests {
         let low = resolve_play_info(&client, &descriptor(), 16).await.unwrap();
         assert_eq!(low.quality, 16);
         assert_eq!(low.url, "https://cn-bj.bilivideo.com/360.mp4?e=1");
+    }
+
+    #[tokio::test]
+    async fn downgraded_advertised_quality_checks_standard_mp4_on_the_same_account() {
+        let mut server = mockito::Server::new_async().await;
+        let html5 = server.mock("GET", "/x/player/playurl")
+            .match_query(mockito::Matcher::UrlEncoded("platform".into(), "html5".into()))
+            .match_header("cookie", "SESSDATA=s")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"data":{"quality":64,"format":"mp4720","accept_quality":[80,64,16],"durl":[{"url":"https://a.bilivideo.com/720.mp4"}]}}"#)
+            .expect(1).create_async().await;
+        let standard = server.mock("GET", "/x/player/playurl")
+            .match_query("bvid=BV1Ss4y1W7KB&cid=995381097&qn=80&fnval=1&fnver=0&fourk=0&high_quality=1")
+            .match_header("cookie", "SESSDATA=s")
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"code":0,"data":{"quality":80,"format":"mp4","accept_quality":[80,64,16],"durl":[{"url":"https://a.bilivideo.com/1080.mp4"}]}}"#)
+            .expect(1).create_async().await;
+        let client = BiliClient::for_test(&server.url()).with_cookie(Some("SESSDATA=s".into()));
+        let info = resolve_play_info(&client, &descriptor(), 80).await.unwrap();
+        assert_eq!(info.quality, 80);
+        assert_eq!(info.url, "https://a.bilivideo.com/1080.mp4");
+        html5.assert_async().await;
+        standard.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn standard_mp4_does_not_replace_a_playable_source_with_flv_or_a_lower_quality() {
+        for (format, current) in [("flv720", 80), ("mp4", 16)] {
+            let mut server = mockito::Server::new_async().await;
+            let html5 = server.mock("GET", "/x/player/playurl")
+                .match_query(mockito::Matcher::UrlEncoded("platform".into(), "html5".into()))
+                .with_header("content-type", "application/json")
+                .with_body(r#"{"code":0,"data":{"quality":64,"format":"mp4720","accept_quality":[80,64,16],"durl":[{"url":"https://a.bilivideo.com/720.mp4"}]}}"#)
+                .expect(1).create_async().await;
+            let standard = server.mock("GET", "/x/player/playurl")
+                .match_query("bvid=BV1Ss4y1W7KB&cid=995381097&qn=80&fnval=1&fnver=0&fourk=0&high_quality=1")
+                .with_header("content-type", "application/json")
+                .with_body(serde_json::json!({"code":0,"data":{"quality":current,"format":format,"accept_quality":[80,64,16],"durl":[{"url":"https://a.bilivideo.com/other"}]}}).to_string())
+                .expect(1).create_async().await;
+            let client = BiliClient::for_test(&server.url());
+            let info = resolve_play_info(&client, &descriptor(), 80).await.unwrap();
+            assert_eq!(info.quality, 64);
+            assert_eq!(info.url, "https://a.bilivideo.com/720.mp4");
+            html5.assert_async().await;
+            standard.assert_async().await;
+        }
     }
 }

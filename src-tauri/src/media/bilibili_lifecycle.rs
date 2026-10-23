@@ -58,25 +58,43 @@ pub async fn touch(app: &tauri::AppHandle, bridge: bool) {
 
 pub fn watch(app: tauri::AppHandle) {
     #[cfg(target_os = "android")]
-    tauri::async_runtime::spawn(async move {
+    {
+        use std::sync::atomic::{AtomicU64, Ordering};
         use tauri::Manager;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            let handle = app.state::<BridgeLifecycleHandle>().0.clone();
-            let active = tauri::async_runtime::spawn_blocking(move || {
-                handle.run_mobile_plugin::<serde_json::Value>("getActive", serde_json::json!({}))
-            })
-            .await;
-            let active = active
-                .ok()
-                .and_then(Result::ok)
-                .is_some_and(|v| v["active"] == true);
-            if !active {
-                super::bilibili_transport::bridge::HUB.revoke();
-                break;
+        static WATCH: AtomicU64 = AtomicU64::new(0);
+        let generation = WATCH.fetch_add(1, Ordering::SeqCst) + 1;
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if WATCH.load(Ordering::SeqCst) != generation {
+                    break;
+                }
+                let handle = app.state::<BridgeLifecycleHandle>().0.clone();
+                let active = tauri::async_runtime::spawn_blocking(move || {
+                    handle
+                        .run_mobile_plugin::<serde_json::Value>("getActive", serde_json::json!({}))
+                })
+                .await;
+                if WATCH.load(Ordering::SeqCst) != generation {
+                    break;
+                }
+                match active {
+                    Ok(Ok(value)) if value["active"] == false => {
+                        super::bilibili_transport::bridge::HUB.revoke();
+                        break;
+                    }
+                    Ok(Ok(value)) if value["active"] == true => {
+                        let hub = &super::bilibili_transport::bridge::HUB;
+                        if hub.should_renew_lease() {
+                            touch(&app, true).await;
+                        }
+                    }
+                    // A plugin error is not proof that the user stopped the service.
+                    _ => log::warn!("[bilibili_bridge] foreground service status unavailable"),
+                }
             }
-        }
-    });
+        });
+    }
     #[cfg(not(target_os = "android"))]
     let _ = app;
 }

@@ -439,7 +439,7 @@
       "title": "Bilibili route", "diagnostics": "Request diagnostics", "mode": "Route mode", "auto": "Automatic", "native": "App native", "browser_bridge": "Browser bridge", "proxy": "Trusted proxy",
       "browserAccount": "Browser account", "anonymous": "Signed out", "fullCapability": "Parsing and media ready", "parsingOnly": "Parsing only",
       "connect": "Connect browser", "disconnect": "Disconnect", "approve": "Approve this browser", "installScript": "Install script", "pairPage": "Open pairing page", "proxyAddress": "Trusted proxy address", "save": "Save", "proxyInAuto": "Allow this proxy in automatic mode",
-      "state": { "unavailable": "Not connected", "pairing": "Waiting for browser", "awaiting_approval": "Waiting for app approval", "probing": "Checking capabilities", "ready": "Ready", "offline": "Disconnected; pair again", "incompatible": "Incompatible script version" }
+      "state": { "unavailable": "Not connected", "pairing": "Waiting for browser", "awaiting_approval": "Waiting for app approval", "probing": "Checking capabilities", "ready": "Ready", "offline": "Disconnected", "incompatible": "Incompatible script version" }
     },
     "account": {
       "hint": "Sign in to Bilibili for more subtitles and higher quality (optional)",

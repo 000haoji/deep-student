@@ -96,8 +96,11 @@ export function useBilibiliQuality(fileId: string | null): BilibiliQualityState 
 
   const select = useCallback((qn: number) => {
     setBilibiliQualityPreference(qn);
+    setFailure(null);
     setRequested(qn);
-  }, []);
+    // The requested quality can already be 1080P while the actual stream is 720P.
+    if (qn === requested) setAttempt(nextBilibiliPlaybackAttempt());
+  }, [requested]);
 
   const streamUrl = useMemo(
     () => (fileId ? buildBilibiliStreamUrl(fileId, requested, epoch, attempt) : null),

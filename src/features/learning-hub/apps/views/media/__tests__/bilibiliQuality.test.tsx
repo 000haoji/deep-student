@@ -273,6 +273,43 @@ describe('MediaStudyView · Bilibili quality', () => {
     expect(notify).toHaveBeenCalledWith('info', 'learningHub:mediaBilibili.playback.qualityDowngraded:720P');
   });
 
+  it('requests a fresh source when reselecting 1080P after the default request was downgraded', async () => {
+    let current = 64;
+    invokeMock.mockImplementation(async (cmd: string, args: { qn: number }) => {
+      if (cmd === 'media_bilibili_auth_status') return ACCOUNT;
+      if (cmd === 'media_bilibili_stream_quality') return { requested: args.qn, current, options: OPTIONS };
+      throw new Error(`unexpected ${cmd}`);
+    });
+    renderLink();
+    await flush();
+    expect(video.props?.quality?.value).toBe(64);
+    status(42.5, true);
+    const first = video.props!.src;
+
+    act(() => video.props?.quality?.onChange(80));
+    await flush();
+    expect(video.props?.src).not.toBe(first);
+    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&a=2');
+    expect(invokeMock).toHaveBeenLastCalledWith('media_bilibili_stream_quality', { fileId: 'file_link', qn: 80, epoch: 0, attempt: 2 });
+    expect(getBilibiliQualityPreference()).toBe(80);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenLastCalledWith('info', 'learningHub:mediaBilibili.playback.qualityDowngraded:720P');
+    status(0, false, true);
+    expect(video.seekTo).toHaveBeenLastCalledWith(42.5);
+    expect(video.play).toHaveBeenCalledTimes(1);
+
+    status(50, false);
+    current = 80;
+    act(() => video.props?.quality?.onChange(80));
+    await flush();
+    expect(video.props?.src).toBe('bilistream://localhost/file_link?qn=80&a=3');
+    expect(video.props?.quality?.value).toBe(80);
+    status(0, false, true);
+    expect(video.seekTo).toHaveBeenLastCalledWith(50);
+    expect(video.play).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+  });
+
   it('logging in bumps the account epoch so a fresh address (and quality list) is used', async () => {
     qualityBackend([{ qn: 64, label: '高清 720P' }, { qn: 16, label: '流畅 360P' }]);
     renderLink();

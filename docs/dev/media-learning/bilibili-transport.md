@@ -6,7 +6,10 @@ remain compatible. No video download or DASH remuxer is introduced.
 
 ## Routes And Identity
 
-- `auto`: a ready, capable browser bridge first, otherwise native.
+- `auto`: an available app QR-login session uses native first on every platform so
+  ordinary imports/playback do not depend on an external browser staying awake.
+  Otherwise a ready, capable browser bridge is preferred, then native. Lookup
+  fallback still requires the same account identity on both routes.
 - `browser_bridge`, `native`, `proxy`: fixed routes, without silent fallback.
 - An automatic lookup may restart once on another compatible route after a
   transport timeout, network failure or bridge loss. Authentication, rate-limit
@@ -69,8 +72,11 @@ Playback errors retain the app player and buffered state. Retry creates a new
 attempt; the official iframe is an explicit, separate external option.
 
 On Android the managed plugin starts a visible `dataSync` foreground service
-from the user-initiated pairing action. Requests renew a two-minute lease. The
-notification can disconnect; stopping the service revokes Rust authorization.
+from the user-initiated pairing action. Requests and a live, approved bridge
+connection renew a two-minute lease. An idle but responsive bridge therefore
+does not lose its approval between imports. Only the latest pairing watcher can
+revoke authorization; a transient plugin error is not treated as a user stop.
+The notification can disconnect; stopping the service revokes Rust authorization.
 The service is not sticky and cannot guarantee the external browser's tab will
 continue executing while backgrounded, locked or reclaimed. Ordinary app
 WebViews cannot install desktop userscripts.
@@ -91,6 +97,21 @@ The redirect capability probe accepts standard redirect statuses, including the
 the exact expected local Location target. Probe failures remain visible after
 authorization is revoked. Playback diagnostics omit source URLs, credentials and
 decoder messages; background time is excluded from the frontend load deadline.
+
+Reselecting a requested quality after Bilibili downgraded it creates a new
+playback attempt instead of reusing the downgraded cache entry. Playback restores
+the position and play/pause state. When the HTML5 MP4 response advertises the
+requested quality but returns a lower one, a standard MP4 query is compared on
+the same pinned route/account before caching. Only a higher-quality, single MP4
+response replaces the source. This is not an entitlement bypass or DASH support.
+Resolution diagnostics log requested/actual quality, route and login presence,
+never the signed source URL or credentials.
+
+On the logged-in Android device tested on 2026-10-23, both MP4 queries returned
+quality 64 (720P) even though 80 appeared in the advertised options. Reselecting
+1080P now issues a fresh request and reports the downgrade. Android acceptance
+for this change is 720P; 1080P playback is not claimed. DASH remains outside this
+change.
 
 ## Import Semantics
 

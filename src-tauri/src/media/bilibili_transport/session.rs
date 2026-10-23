@@ -81,6 +81,29 @@ pub fn update_settings(app: &AppHandle, value: TransportSettings) -> BiliResult<
     Ok(())
 }
 
+fn select_route(
+    mode: RouteMode,
+    bridge_ready: bool,
+    parsing_only: bool,
+    native_first: bool,
+) -> BiliResult<Route> {
+    match mode {
+        RouteMode::Auto if native_first => Ok(Route::Native),
+        RouteMode::Auto if bridge_ready => Ok(Route::BrowserBridge),
+        RouteMode::Auto | RouteMode::Native => Ok(Route::Native),
+        RouteMode::BrowserBridge if bridge_ready => Ok(Route::BrowserBridge),
+        RouteMode::BrowserBridge => Err(BiliError::new(
+            "bridge-offline",
+            if parsing_only {
+                "当前浏览器桥仅支持解析，不支持安全媒体读取"
+            } else {
+                "浏览器桥未就绪，请连接浏览器"
+            },
+        )),
+        RouteMode::Proxy => Ok(Route::Proxy),
+    }
+}
+
 #[derive(Clone)]
 pub struct BiliAttempt {
     pub id: String,
@@ -99,31 +122,30 @@ pub struct BiliAttempt {
 
 impl BiliAttempt {
     pub fn begin(app: &AppHandle, media: bool) -> BiliResult<Self> {
-        let config = settings(app);
+        Self::begin_with_settings(app, media, settings(app))
+    }
+
+    fn begin_with_settings(
+        app: &AppHandle,
+        media: bool,
+        config: TransportSettings,
+    ) -> BiliResult<Self> {
         let bridge = HUB.status();
         let bridge_ready = bridge.parsing && (!media || bridge.media) && bridge.state == "ready";
-        let route = match config.mode {
-            RouteMode::Auto if bridge_ready => Route::BrowserBridge,
-            RouteMode::Auto | RouteMode::Native => Route::Native,
-            RouteMode::BrowserBridge if bridge_ready => Route::BrowserBridge,
-            RouteMode::BrowserBridge => {
-                return Err(BiliError::new(
-                    "bridge-offline",
-                    if media && bridge.parsing {
-                        "当前浏览器桥仅支持解析，不支持安全媒体读取"
-                    } else {
-                        "浏览器桥未就绪，请连接浏览器"
-                    },
-                ))
-            }
-            RouteMode::Proxy => Route::Proxy,
-        };
+        let native_cookie = super::super::bilibili_auth::load_cookie(app);
+        // App QR login must affect auto playback even while a separate browser is paired.
+        let native_first = native_cookie.is_some();
+        let route = select_route(
+            config.mode,
+            bridge_ready,
+            media && bridge.parsing,
+            native_first,
+        )?;
         let connection = if route == Route::BrowserBridge {
             bridge.connection_id.clone()
         } else {
             None
         };
-        let native_cookie = super::super::bilibili_auth::load_cookie(app);
         let native_mid = native_cookie.as_deref().and_then(|cookie| {
             cookie
                 .split(';')
@@ -131,6 +153,7 @@ impl BiliAttempt {
         });
         let bridge_account = bridge.account.clone();
         if config.mode == RouteMode::Auto
+            && !native_first
             && media
             && bridge.parsing
             && !bridge.media
@@ -272,27 +295,20 @@ impl BiliAttempt {
         }
         let mut next = Self::begin(app, false)?;
         if next.route == self.route {
-            if self.route == Route::BrowserBridge {
-                next.route = Route::Native;
-                let cookie = super::super::bilibili_auth::load_cookie(app);
-                next.expected_logged_in = cookie.is_some();
-                next.expected_mid = cookie.as_deref().and_then(|c| {
-                    c.split(';')
-                        .find_map(|p| p.trim().strip_prefix("DedeUserID=")?.parse().ok())
-                });
-                next.transport = Arc::new(NativeTransport::new(cookie, None)?);
-                next.connection = None;
+            let bridge = HUB.status();
+            let mode = if self.route == Route::BrowserBridge {
+                RouteMode::Native
+            } else if self.route == Route::Native && bridge.state == "ready" && bridge.parsing {
+                RouteMode::BrowserBridge
             } else if config.proxy_in_auto && config.proxy_url.is_some() {
-                next.route = Route::Proxy;
-                next.expected_logged_in = false;
-                next.expected_mid = None;
-                next.transport = Arc::new(NativeTransport::new(None, config.proxy_url.as_deref())?);
+                RouteMode::Proxy
             } else {
                 return Err(BiliError::new(
                     "no-compatible-route",
                     "没有满足当前任务条件的其他出口",
                 ));
-            }
+            };
+            next = Self::begin_with_settings(app, false, TransportSettings { mode, ..config })?;
         }
         if next.expected_logged_in != self.expected_logged_in
             || next.expected_mid != self.expected_mid
@@ -425,5 +441,53 @@ impl Drop for TaskGuard {
 pub async fn media_bilibili_cancel(task_id: String) {
     if let Some(token) = TASKS.lock().unwrap().remove(&task_id) {
         token.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_uses_the_app_account_without_requiring_a_browser_on_every_platform() {
+        for ready in [false, true] {
+            for parsing_only in [false, true] {
+                assert_eq!(
+                    select_route(RouteMode::Auto, ready, parsing_only, true).unwrap(),
+                    Route::Native
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_guest_keeps_the_capable_bridge_preference() {
+        assert_eq!(
+            select_route(RouteMode::Auto, true, false, false).unwrap(),
+            Route::BrowserBridge
+        );
+        assert_eq!(
+            select_route(RouteMode::Auto, false, false, false).unwrap(),
+            Route::Native
+        );
+    }
+
+    #[test]
+    fn native_preference_never_overrides_an_explicit_route() {
+        for native_first in [false, true] {
+            assert_eq!(
+                select_route(RouteMode::BrowserBridge, true, false, native_first).unwrap(),
+                Route::BrowserBridge
+            );
+            assert!(select_route(RouteMode::BrowserBridge, false, false, native_first).is_err());
+            assert_eq!(
+                select_route(RouteMode::Native, true, false, native_first).unwrap(),
+                Route::Native
+            );
+            assert_eq!(
+                select_route(RouteMode::Proxy, true, false, native_first).unwrap(),
+                Route::Proxy
+            );
+        }
     }
 }

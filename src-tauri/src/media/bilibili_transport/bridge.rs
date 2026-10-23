@@ -108,6 +108,15 @@ impl BridgeHub {
         self.status.lock().unwrap().clone()
     }
 
+    pub fn should_renew_lease(&self) -> bool {
+        // Idle requests must not revoke a live, explicitly approved pairing.
+        self.connection
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|connection| connection.approved)
+    }
+
     pub fn start_pairing(&self, port: u16) -> String {
         *self.resume.lock().unwrap() = None;
         self.disconnect(None);
@@ -644,6 +653,24 @@ mod tests {
         assert_ne!(rotated, token);
         hub.revoke();
         assert!(hub.reconnect(&rotated, tx).is_err());
+    }
+
+    #[test]
+    fn live_approved_pairing_renews_the_idle_lease_but_disconnect_does_not() {
+        let (hub, id, _) = paired();
+        assert!(!hub.should_renew_lease());
+        hub.approve(&id).unwrap();
+        assert!(hub.should_renew_lease());
+        let token = hub.resume_token(&id).unwrap();
+        hub.ready(&id, BridgeAccount::default(), true);
+        assert!(hub.should_renew_lease());
+        hub.disconnect(Some(&id));
+        assert!(!hub.should_renew_lease());
+        let (tx, _) = mpsc::channel(8);
+        hub.reconnect(&token, tx).unwrap();
+        assert!(hub.should_renew_lease());
+        hub.revoke();
+        assert!(!hub.should_renew_lease());
     }
 
     #[test]
