@@ -744,6 +744,10 @@ export const MediaStudyView: React.FC<MediaStudyViewProps> = ({
       handleRef={handleRef}
       onStatusChange={handleStatusChange}
     />
+  ) : isLink && !playerSrc ? (
+    <div className="flex h-full w-full items-center justify-center bg-black text-white/60" role="status" aria-label={t('common:loading')}>
+      <CircleNotch size={24} className="animate-spin" aria-hidden="true" />
+    </div>
   ) : isVideo ? (
     <VideoPlayer
       key={playerSrc}

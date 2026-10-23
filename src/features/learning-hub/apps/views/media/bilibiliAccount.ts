@@ -172,6 +172,8 @@ export interface BilibiliStreamQuality {
   current: number;
   /** 可选清晰度（高 → 低；只含单文件 MP4 能播的档位，随登录 / 大会员变化） */
   options: BilibiliQualityOption[];
+  /** Linux WebKit requires a loopback HTTP source instead of a custom scheme. */
+  streamUrl?: string;
 }
 
 /** 不记偏好时请求的清晰度（1080P，拿不到时 B 站自动降到可用的最高档） */
@@ -188,7 +190,7 @@ function normalizeQuality(raw: unknown): BilibiliStreamQuality {
         .map((o) => ({ qn: o.qn as number, label: typeof o.label === 'string' && o.label.trim() ? o.label.trim() : String(o.qn) }))
     : [];
   const requested = num(r.requested, BILIBILI_DEFAULT_QN);
-  return { requested, current: num(r.current, requested), options };
+  return { requested, current: num(r.current, requested), options, ...(typeof r.streamUrl === 'string' ? { streamUrl: r.streamUrl } : {}) };
 }
 
 export const bilibiliStreamApi = {

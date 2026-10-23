@@ -162,12 +162,14 @@ describe('MediaStudyView companion panel', () => {
 
 describe('MediaStudyView · Bilibili link items', () => {
   beforeEach(() => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
     vi.stubGlobal('ResizeObserver', FakeResizeObserver);
     transcriptState.transcript = null;
     lastVideo.current = null;
   });
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 

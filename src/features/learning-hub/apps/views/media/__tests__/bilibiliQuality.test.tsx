@@ -6,7 +6,7 @@
  * - B 站降档时提示实际清晰度；外链播放器提示以游客身份播放。
  */
 import React, { useImperativeHandle } from 'react';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const invokeMock = vi.hoisted(() => vi.fn());
@@ -88,6 +88,7 @@ vi.mock('@/features/media-studio/mediaStudioNavigation', () => ({ openMediaStudi
 
 import { MediaStudyView } from '../MediaStudyView';
 import { QualityMenu } from '../QualityMenu';
+import { useBilibiliQuality } from '../useBilibiliQuality';
 import {
   getBilibiliQualityPreference,
   refreshBilibiliAccount,
@@ -144,6 +145,7 @@ function status(currentTime: number, isPlaying: boolean, isReady = true) {
 }
 
 beforeEach(() => {
+  vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Windows NT 10.0; Win64; x64)');
   vi.stubGlobal('ResizeObserver', FakeResizeObserver);
   window.localStorage.clear();
   resetBilibiliAccountForTests();
@@ -157,7 +159,35 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('Linux Bilibili source', () => {
+  it('waits for the loopback URL and replaces it when quality changes', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/605.1.15');
+    invokeMock.mockImplementation(async (cmd: string, args: { qn: number }) => {
+      if (cmd !== 'media_bilibili_stream_quality') return undefined;
+      return { requested: args.qn, current: args.qn, options: OPTIONS, streamUrl: `http://127.0.0.1:12345/deepstudent-bili-stream/v1/file_link?qn=${args.qn}&s=fixture` };
+    });
+    const { result } = renderHook(() => useBilibiliQuality('file_link'));
+    expect(result.current.streamUrl).toBeNull();
+    await flush();
+    expect(result.current.streamUrl).toContain('http://127.0.0.1:12345/deepstudent-bili-stream/v1/');
+    act(() => result.current.select(64));
+    expect(result.current.streamUrl).toBeNull();
+    await flush();
+    expect(result.current.streamUrl).toContain('qn=64');
+  });
+
+  it('keeps Android on the existing custom protocol', async () => {
+    vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue('Mozilla/5.0 (Linux; Android 16; wv)');
+    qualityBackend();
+    const { result } = renderHook(() => useBilibiliQuality('file_link'));
+    expect(result.current.streamUrl).toBe('bilistream://localhost/file_link?qn=80&a=1');
+    await flush();
+    expect(result.current.streamUrl).toBe('bilistream://localhost/file_link?qn=80&a=1');
+  });
 });
 
 describe('shortQualityLabel', () => {

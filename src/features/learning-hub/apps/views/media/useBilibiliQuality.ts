@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { getErrorMessage } from '@/utils/errorUtils';
+import { isAndroid, isLinux } from '@/utils/platform';
 import { useBilibiliTransport } from './bilibiliTransport';
 import {
   BILIBILI_DEFAULT_QN,
@@ -103,8 +104,13 @@ export function useBilibiliQuality(fileId: string | null): BilibiliQualityState 
   }, [requested]);
 
   const streamUrl = useMemo(
-    () => (fileId ? buildBilibiliStreamUrl(fileId, requested, epoch, attempt) : null),
-    [fileId, requested, epoch, attempt],
+    () => {
+      if (!fileId) return null;
+      if (info?.key === key && info.value.streamUrl) return info.value.streamUrl;
+      if (isLinux() && !isAndroid()) return null;
+      return buildBilibiliStreamUrl(fileId, requested, epoch, attempt);
+    },
+    [fileId, requested, epoch, attempt, info, key],
   );
   const retry = useCallback(() => {
     setFailure(null);

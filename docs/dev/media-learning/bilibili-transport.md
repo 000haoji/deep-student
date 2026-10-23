@@ -144,6 +144,16 @@ sync must include `scripts/ci/prepare-bilibili-android.mjs`, both Kotlin classes
 foreground-service permissions and the non-exported manifest service. Verify
 actual packaged classes, Cargo fingerprints, signatures and 16 KiB alignment.
 
+Linux WebKitGTK hands playback to GStreamer, which cannot open `bilistream://`.
+The quality command returns a loopback HTTP URL on Linux. The server is bound to
+`127.0.0.1`, validates the Host, app Origin and playback-session capability, and
+reuses the pinned transport and CDN representation through the existing protocol
+handler. Bounded CDN reads form one continuous HTTP body for the full requested
+Range; exposing a single short chunk as the whole HTTP response truncates playback
+in GStreamer. Android and other platforms retain the custom protocol.
+DEB dependencies include the base, good and bad GStreamer plugin sets plus libav
+for MP4 demuxing, H.264 parsing, AAC/H.264 decoding and WebVTT handling.
+
 These automated checks do not establish real Tampermonkey/Violentmonkey support
 on every browser. Release acceptance must record a real manager/browser version,
 an independently logged-in browser account, real CDN playback and seeking,

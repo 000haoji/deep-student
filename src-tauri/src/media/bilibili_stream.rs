@@ -30,6 +30,9 @@ use super::bilibili_transport::{BiliAttempt, BiliRequest, RequestKind};
 use super::MediaError;
 use crate::vfs::database::VfsDatabase;
 
+#[cfg(target_os = "linux")]
+mod linux;
+
 /// Keep each buffered protocol response small enough for Android's 30s bridge deadline.
 pub const STREAM_CHUNK_BYTES: u64 = 512 * 1024;
 const INITIAL_CHUNK_BYTES: u64 = 64 * 1024;
@@ -83,6 +86,8 @@ static PLAY_CACHE: LazyLock<Mutex<HashMap<String, PlaySource>>> =
 #[derive(Clone)]
 struct PlaybackSession {
     attempt: BiliAttempt,
+    #[cfg(target_os = "linux")]
+    token: String,
     representation: Option<Representation>,
     gate: Arc<tokio::sync::Mutex<()>>,
     last_used: Instant,
@@ -118,6 +123,8 @@ fn playback_session(app: &AppHandle, key: &str) -> Result<PlaybackSession, Media
     }
     let session = PlaybackSession {
         attempt: BiliAttempt::begin(app, true)?,
+        #[cfg(target_os = "linux")]
+        token: uuid::Uuid::new_v4().simple().to_string(),
         representation: None,
         gate: Arc::new(tokio::sync::Mutex::new(())),
         last_used: Instant::now(),
@@ -496,6 +503,8 @@ pub struct StreamQualityView {
     pub current: u32,
     /// 可选清晰度（高 → 低）
     pub options: Vec<QualityOption>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_url: Option<String>,
 }
 
 /// 链接条目在应用内播放时的可选清晰度与实际清晰度。
@@ -529,10 +538,24 @@ pub async fn media_bilibili_stream_quality(
         );
         e.to_string()
     })?;
+    #[cfg(target_os = "linux")]
+    let stream_url = Some(
+        linux::stream_url(
+            &app,
+            &file_id,
+            requested,
+            epoch.unwrap_or(0),
+            attempt.unwrap_or(0),
+        )
+        .await?,
+    );
+    #[cfg(not(target_os = "linux"))]
+    let stream_url = None;
     Ok(StreamQualityView {
         requested,
         current: info.quality,
         options: info.options,
+        stream_url,
     })
 }
 

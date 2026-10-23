@@ -145,7 +145,7 @@ export function useMediaPlayback<T extends HTMLMediaElement>({
       if (failed) return;
       failed = true;
       setIsBuffering(false);
-      if (/^(?:bilistream:|https?:\/\/bilistream\.localhost\/)/.test(src)) {
+      if (/^(?:bilistream:|https?:\/\/bilistream\.localhost\/|http:\/\/127\.0\.0\.1:\d+\/deepstudent-bili-stream\/v1\/)/.test(src)) {
         const details = {
           reason,
           mediaErrorCode: el.error?.code ?? null,
