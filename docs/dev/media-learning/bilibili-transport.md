@@ -29,7 +29,7 @@ matched by the script; it exports neither a generic fetch API nor cookies.
 
 The one-use challenge is carried in the fragment and removed immediately by
 the script. The WebSocket requires the exact local Host/Origin. A script must
-present protocol/script version 1 / 1.0.0, consume the challenge and receive an
+present protocol/script version 1 / 1.0.1, consume the challenge and receive an
 explicit app-side approval before executing requests. A short-lived in-memory
 resume grant is rotated on reconnect; revocation invalidates it. Refreshing the
 page loses sandbox memory and requires fresh pairing. Account verification is
@@ -55,6 +55,11 @@ and two media reads run concurrently. Subtitle bodies are capped at 20 MiB;
 API/gRPC bodies and decompressed protobuf messages at 2 MiB. Media requests are
 512 KiB, initially 64 KiB. The outer playback deadline is 24 seconds. The script
 has an independent watchdog and aborts its GM handle on cancellation or loss.
+The manager's stream is drained into one byte-bounded request buffer while
+credit is withheld: not every manager propagates consumer backpressure to its
+network reader. The cap therefore remains enforceable without a Rust ACK.
+HTTP headers may arrive after the `onloadstart` stream (status zero); neither
+success nor an empty response is reported before real headers arrive.
 
 Range responses validate status, Content-Range, total length and exact bytes.
 After bytes are delivered, switching a signed URL or CDN requires an equal
@@ -106,6 +111,14 @@ on every browser. Release acceptance must record a real manager/browser version,
 an independently logged-in browser account, real CDN playback and seeking,
 logout/account switch, suspend/reconnect, and Android lock/background behavior.
 Do not claim untested platforms or replace this with mocked GM callbacks.
+
+An isolated Chromium 148.0.7778.96 / official Tampermonkey 5.4.1 test exercised
+actual script installation, loopback handshake, manual redirects, positive
+cookie control/anonymous isolation, Range/Referer, early oversized-response
+abort, and real anonymous Bilibili playurl plus a 64 KiB CDN Range. It found the
+OPENED/status-zero callback issue corrected in script 1.0.1. This is not a
+logged-in-account, video-element playback, Android or Violentmonkey acceptance
+claim. Manager permissions and page injection must be enabled by the user.
 
 Design reference: wangke-agent at
 `03a2a6e8adfcceb9e736028ea05a7bd016f85bdc`; implementation here is independent,
