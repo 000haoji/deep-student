@@ -26,4 +26,10 @@ describe('Bilibili transport panel', () => {
     await waitFor(() => expect(screen.getByText('仅解析可用')).toBeTruthy());
     expect(screen.queryByText('解析和媒体可用')).toBeNull();
   });
+  it('keeps the failed capability visible after the connection is revoked', async () => {
+    mock.mockResolvedValue({ settings: { mode: 'auto', proxyUrl: null, proxyInAuto: false }, bridge: { state: 'offline', connectionId: null, parsing: false, media: false, account: null, generation: 3, lastError: { code: 'bilibili-redirect-unsupported', message: 'Manual redirect unavailable' } } });
+    render(<BilibiliTransportPanel />);
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('bilibili-redirect-unsupported'));
+    expect(screen.getByRole('alert').textContent).toContain('Manual redirect unavailable');
+  });
 });

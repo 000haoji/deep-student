@@ -32,6 +32,7 @@ pub struct BridgeStatus {
     pub media: bool,
     pub account: Option<BridgeAccount>,
     pub generation: u64,
+    pub last_error: Option<BiliError>,
 }
 
 pub(super) struct Pairing {
@@ -120,7 +121,9 @@ impl BridgeHub {
             expires: Instant::now() + Duration::from_secs(120),
             port,
         });
-        self.status.lock().unwrap().state = "pairing".into();
+        let mut status = self.status.lock().unwrap();
+        status.state = "pairing".into();
+        status.last_error = None;
         challenge
     }
 
@@ -225,6 +228,21 @@ impl BridgeHub {
         self.disconnect(None);
     }
 
+    pub fn fail_probe(&self, id: &str, error: BiliError) {
+        if self.status().connection_id.as_deref() != Some(id) {
+            return;
+        }
+        if error.retryable {
+            self.disconnect(Some(id));
+        } else {
+            self.revoke();
+        }
+        let mut status = self.status.lock().unwrap();
+        if status.connection_id.is_none() {
+            status.last_error = Some(error);
+        }
+    }
+
     pub fn approve(&self, id: &str) -> BiliResult<()> {
         let mut connection = self.connection.lock().unwrap();
         let conn = connection
@@ -255,6 +273,7 @@ impl BridgeHub {
         }
         let mut status = self.status.lock().unwrap();
         status.state = "ready".into();
+        status.last_error = None;
         status.parsing = true;
         status.media = media;
         status.account = Some(account);
@@ -625,6 +644,25 @@ mod tests {
         assert_ne!(rotated, token);
         hub.revoke();
         assert!(hub.reconnect(&rotated, tx).is_err());
+    }
+
+    #[test]
+    fn probe_failure_remains_visible_without_leaving_an_authorized_connection() {
+        let (hub, id, _) = paired();
+        hub.approve(&id).unwrap();
+        hub.fail_probe(
+            &id,
+            BiliError::new("redirect-unsupported", "Manual redirect unavailable"),
+        );
+        let status = hub.status();
+        assert_eq!(
+            status.last_error.unwrap().code,
+            "bilibili-redirect-unsupported"
+        );
+        assert!(!status.parsing && !status.media);
+        assert!(status.connection_id.is_none());
+        hub.start_pairing(42);
+        assert!(hub.status().last_error.is_none());
     }
     #[tokio::test]
     async fn stream_ack_sequence_limit_and_drop_cancellation() {

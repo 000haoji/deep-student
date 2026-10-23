@@ -56,6 +56,6 @@ export function BilibiliTransportPanel() {
       <label className="flex items-center gap-2"><Checkbox checked={status.settings.proxyInAuto} disabled={busy} onCheckedChange={(value) => void action(() => bilibiliTransportApi.configure({ ...status.settings, proxyInAuto: value === true }))} />{label('proxyInAuto')}</label>
     </div></details>
     {!!status.diagnostics?.length && <details><summary className="cursor-pointer text-muted-foreground">{label('diagnostics')}</summary><ul className="max-h-36 overflow-auto py-2 font-mono text-2xs">{status.diagnostics.slice(-8).reverse().map((item) => <li key={item.requestId} className="break-all py-0.5">#{item.requestId} {item.route} {item.stage} {item.host} {item.status ?? item.errorCode} {item.elapsedMs}ms {item.bytes}B</li>)}</ul></details>}
-    {error && <p role="alert" className="break-words text-destructive">{error}</p>}
+    {(error || bridge.lastError) && <p role="alert" className="break-words text-destructive">{error ?? `${bridge.lastError!.message} (${bridge.lastError!.code})`}</p>}
   </section>;
 }

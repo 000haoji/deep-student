@@ -345,6 +345,17 @@ impl BiliAttempt {
             bytes: result.as_ref().ok().map(|r| r.body.len()).unwrap_or(0),
         });
         drop(diagnostics);
+        if let Err(error) = &result {
+            log::warn!(
+                "[bilibili_transport] request={} route={:?} stage={:?} host={} elapsed_ms={} code={}",
+                id,
+                self.route,
+                stage,
+                host,
+                started.elapsed().as_millis(),
+                error.code
+            );
+        }
         log::debug!(
             "[bilibili_transport] request={} route={:?} host={} elapsed_ms={} status={:?}",
             id,

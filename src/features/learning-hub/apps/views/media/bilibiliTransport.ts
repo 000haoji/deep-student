@@ -18,6 +18,7 @@ export interface BilibiliTransportStatus {
     parsing: boolean;
     media: boolean;
     generation: number;
+    lastError?: { code: string; message: string } | null;
     account: { loggedIn: boolean; mid: number | null; uname: string | null } | null;
   };
 }

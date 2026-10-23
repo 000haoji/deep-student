@@ -287,11 +287,7 @@ async fn connection(
                 "[bilibili_bridge] capability probe failed code={}",
                 error.code
             );
-            if error.retryable {
-                probe_hub.disconnect(Some(&probe_id));
-            } else {
-                probe_hub.revoke();
-            }
+            probe_hub.fail_probe(&probe_id, error);
         }
     });
     let mut ping = tokio::time::interval(Duration::from_secs(5));
@@ -381,15 +377,36 @@ pub fn decode_account(response: &BiliResponse) -> BiliResult<BridgeAccount> {
     })
 }
 
+fn validate_redirect_probe(response: &BiliResponse, local: &str) -> BiliResult<()> {
+    let requested = url::Url::parse(&format!("{local}/redirect")).unwrap();
+    let target = url::Url::parse(&format!("{local}/target")).unwrap();
+    let location = response
+        .header("location")
+        .and_then(|location| requested.join(location).ok());
+    // Some GM managers normalize an opaque manual redirect from 302 to 301.
+    if !matches!(response.status, 301 | 302 | 303 | 307 | 308)
+        || response.final_url != requested
+        || location.as_ref() != Some(&target)
+    {
+        log::warn!(
+            "[bilibili_bridge] redirect probe status={} location_present={} target_matches={} final_url_matches={}",
+            response.status,
+            response.header("location").is_some(),
+            location.as_ref() == Some(&target),
+            response.final_url == requested
+        );
+        return Err(BiliError::new(
+            "redirect-unsupported",
+            "浏览器管理器未返回可验证的手动跳转，请更换管理器或使用应用直连",
+        ));
+    }
+    Ok(())
+}
+
 async fn probe(hub: &BridgeHub, id: &str, port: u16) -> BiliResult<()> {
     let local = format!("http://127.0.0.1:{port}{BASE}probe");
     let redirect = probe_request(hub, id, format!("{local}/redirect"), 1024, false).await?;
-    if redirect.status != 302 || redirect.header("location").is_none() {
-        return Err(BiliError::new(
-            "redirect-unsupported",
-            "浏览器管理器不支持受控跳转",
-        ));
-    }
+    validate_redirect_probe(&redirect, &local)?;
     let nav = probe_request(
         hub,
         id,
@@ -519,6 +536,52 @@ mod tests {
     use super::*;
     use tungstenite::client::IntoClientRequest;
 
+    #[test]
+    fn manual_redirect_accepts_manager_normalization_but_not_followed_or_unsafe_targets() {
+        let local = "http://127.0.0.1:42/deepstudent-bili-bridge/v1/probe";
+        let mut response = BiliResponse {
+            status: 301,
+            headers: std::collections::BTreeMap::from([(
+                "location".into(),
+                format!("{local}/target"),
+            )]),
+            body: Vec::new(),
+            final_url: url::Url::parse(&format!("{local}/redirect")).unwrap(),
+            set_cookies: Vec::new(),
+        };
+        for status in [301, 302, 303, 307, 308] {
+            response.status = status;
+            assert!(validate_redirect_probe(&response, local).is_ok());
+        }
+        response.headers.insert(
+            "location".into(),
+            "/deepstudent-bili-bridge/v1/probe/target".into(),
+        );
+        assert!(validate_redirect_probe(&response, local).is_ok());
+        for location in [
+            "http://127.0.0.1:43/target",
+            "https://evil.test/",
+            "//evil.test/",
+            "/other",
+        ] {
+            response.headers.insert("location".into(), location.into());
+            assert!(validate_redirect_probe(&response, local).is_err());
+        }
+        response
+            .headers
+            .insert("location".into(), format!("{local}/target"));
+        response.final_url = url::Url::parse(&format!("{local}/target")).unwrap();
+        assert!(validate_redirect_probe(&response, local).is_err());
+        response.final_url = url::Url::parse(&format!("{local}/redirect")).unwrap();
+        for status in [200, 206, 300, 304, 403] {
+            response.status = status;
+            assert!(validate_redirect_probe(&response, local).is_err());
+        }
+        response.status = 302;
+        response.headers.clear();
+        assert!(validate_redirect_probe(&response, local).is_err());
+    }
+
     #[tokio::test]
     async fn actual_loopback_socket_checks_origin_pairs_probes_and_transfers_binary() {
         let port = start_server().await.unwrap();
@@ -582,7 +645,7 @@ mod tests {
                         )
                     } else if url.ends_with("/redirect") {
                         (
-                            302,
+                            301,
                             Vec::new(),
                             std::collections::BTreeMap::from([(
                                 "location",

@@ -75,6 +75,23 @@ The service is not sticky and cannot guarantee the external browser's tab will
 continue executing while backgrounded, locked or reclaimed. Ordinary app
 WebViews cannot install desktop userscripts.
 
+Android WebView's intercepted-response loader applies the request Range to the
+returned InputStream even when the app has already returned a 206 body. Wry's
+ByteArrayInputStream therefore lost the offset twice: a 288 MB live video stalled
+at 512 KiB while repeating the same Range. The managed `BilibiliRangeResponse`
+adapter exposes a virtual prefix for WebView's range validation and consumes its
+initial skip without discarding the bounded Rust body. Virtual skips are capped
+at the JNI int limit. It allocates no prefix and affects only `bilistream` GET
+206 responses. A Gradle preparation task applies the adapter after Wry generates
+its Kotlin client and before Kotlin snapshots compiler inputs. Unknown Wry
+templates fail the build instead of silently dropping the fix.
+
+The redirect capability probe accepts standard redirect statuses, including the
+301 normalization used by some managers, but requires the original final URL and
+the exact expected local Location target. Probe failures remain visible after
+authorization is revoked. Playback diagnostics omit source URLs, credentials and
+decoder messages; background time is excluded from the frontend load deadline.
+
 ## Import Semantics
 
 Video metadata remains available if subtitles fail. Subtitle states distinguish
@@ -119,6 +136,14 @@ abort, and real anonymous Bilibili playurl plus a 64 KiB CDN Range. It found the
 OPENED/status-zero callback issue corrected in script 1.0.1. This is not a
 logged-in-account, video-element playback, Android or Violentmonkey acceptance
 claim. Manager permissions and page injection must be enabled by the user.
+
+On 2026-10-23, the vivo Android 16 device reproduced the 288 MB video stall with
+the delivered native library. The Range adapter allowed actual 720P video-element
+playback and a seek to 60 seconds using the same library and network. Independent
+WebView byte checks passed at offsets 3,000,000 and 3,000,000,000 with exact
+65,536-byte payloads. These tests used an isolated `.bridgecheck` package, not
+the user's data. They do not establish Android Edge/Tampermonkey background
+reliability or logged-in-account playback acceptance.
 
 Design reference: wangke-agent at
 `03a2a6e8adfcceb9e736028ea05a7bd016f85bdc`; implementation here is independent,

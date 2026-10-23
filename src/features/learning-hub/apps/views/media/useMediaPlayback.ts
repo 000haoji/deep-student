@@ -13,6 +13,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { useEventRegistry } from '@/hooks/useEventRegistry';
 
 /** 可选倍速档位 */
 export const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3] as const;
@@ -107,7 +109,11 @@ export function useMediaPlayback<T extends HTMLMediaElement>({
 
   const onErrorRef = useRef(onError);
   const activeRef = useRef(isActive);
+  const visibilityChangedAt = useRef(0);
   activeRef.current = isActive;
+  useEventRegistry([
+    { target: 'document', type: 'visibilitychange', listener: () => { visibilityChangedAt.current = Date.now(); } },
+  ], []);
   useEffect(() => {
     onErrorRef.current = onError;
   }, [onError]);
@@ -139,6 +145,22 @@ export function useMediaPlayback<T extends HTMLMediaElement>({
       if (failed) return;
       failed = true;
       setIsBuffering(false);
+      if (/^(?:bilistream:|https?:\/\/bilistream\.localhost\/)/.test(src)) {
+        const details = {
+          reason,
+          mediaErrorCode: el.error?.code ?? null,
+          readyState: el.readyState,
+          networkState: el.networkState,
+          currentTime: Number.isFinite(el.currentTime) ? el.currentTime : null,
+          paused: el.paused,
+          visibility: document.visibilityState,
+        };
+        // Do not log currentSrc or the decoder's message: either can contain signed URLs.
+        console.error('[bilibili_player]', JSON.stringify(details));
+        void invoke('report_frontend_log', {
+          payload: { level: 'ERROR', kind: 'BILIBILI_PLAYBACK', component: 'useMediaPlayback', message: 'Bilibili playback failed', extra: details },
+        }).catch(() => undefined);
+      }
       onErrorRef.current?.(reason);
     };
     const noteProgress = () => {
@@ -148,7 +170,8 @@ export function useMediaPlayback<T extends HTMLMediaElement>({
     let previousBuffered = 0;
     let waiting = false;
     const watchdog = window.setInterval(() => {
-      if (!activeRef.current) {
+      lastProgress = Math.max(lastProgress, visibilityChangedAt.current);
+      if (!activeRef.current || document.visibilityState === 'hidden') {
         noteProgress();
         return;
       }

@@ -465,7 +465,16 @@ pub async fn media_bilibili_stream_quality(
         false,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        log::warn!(
+            "[media::bilibili_stream] quality file={} qn={} attempt={} code={}",
+            file_id,
+            requested,
+            attempt.unwrap_or(0),
+            e.code()
+        );
+        e.to_string()
+    })?;
     Ok(StreamQualityView {
         requested,
         current: info.quality,
@@ -714,6 +723,24 @@ pub async fn handle(app: &AppHandle, request: Request<Vec<u8>>) -> Response<Vec<
         Ok(response) => response,
         Err(_) => text_error(&request, 504, "视频加载超时，请重试或在 B 站打开"),
     };
+    let range = request
+        .headers()
+        .get("range")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("none");
+    if request.method() != "OPTIONS"
+        && (result.status().is_client_error() || range == "none" || range.starts_with("bytes=0-"))
+    {
+        log::info!(
+            "[media::bilibili_stream] response method={} range={} origin={} status={} bytes={} elapsed_ms={}",
+            request.method(),
+            range.chars().take(80).collect::<String>(),
+            request.headers().contains_key("origin"),
+            result.status(),
+            result.body().len(),
+            started.elapsed().as_millis()
+        );
+    }
     if result.status().is_server_error() {
         let (qn, epoch) = parse_stream_query(request.uri().query());
         let file_id = parse_stream_path(request.uri().path()).unwrap_or_default();
