@@ -31,15 +31,25 @@ function harness(responder, { autoCredit = true } = {}) {
     location: { hostname: '127.0.0.1', pathname: '/deepstudent-bili-bridge/v1/', port: '12345', host: '127.0.0.1:12345', origin: 'http://127.0.0.1:12345', hash: `#${'a'.repeat(64)}` },
     history: { replaceState() {} },
     document: { getElementById: () => ({ textContent: '' }), addEventListener() {} },
-    window: { addEventListener() {} }, WebSocket, URL, Uint8Array, DataView, BigInt, Map, setTimeout, clearTimeout,
+    window: { addEventListener() {} }, WebSocket, URL, Uint8Array, DataView, BigInt, Map, Blob, setTimeout, clearTimeout,
     atob: (value) => Buffer.from(value, 'base64').toString('binary'),
     GM_xmlhttpRequest(options) {
       requests.push(options);
       const response = responder(options);
-      queueMicrotask(() => options.onloadstart({ status: 206, finalUrl: options.url, responseHeaders: 'Content-Range: bytes 0-3/4\r\nContent-Length: 4', response: new ReadableStream({
+      queueMicrotask(() => {
+        const stream = new ReadableStream({
         start(controller) { for (const bytes of [new Uint8Array([1,2]), new Uint8Array([3,4])]) controller.enqueue(bytes); controller.close(); },
         cancel() { cancelled++; },
-      }), ...response }));
+        });
+        if (response.splitHeaders) {
+          options.onloadstart({ status: 0, readyState: 1, response: stream });
+          queueMicrotask(() => options.onreadystatechange({ status: 206, readyState: 2, finalUrl: options.url, responseHeaders: 'Content-Range: bytes 0-3/4\r\nContent-Length: 4' }));
+        } else {
+          const result = { status: 206, finalUrl: options.url, responseHeaders: 'Content-Range: bytes 0-3/4\r\nContent-Length: 4', response: stream, ...response };
+          options.onloadstart(result);
+          if (response.response === null) options.onload(result);
+        }
+      });
       return { abort() { aborted++; } };
     },
   };
@@ -68,7 +78,7 @@ test('media bytes use binary frames and CDN requests are anonymous', async () =>
   assert.equal(h.sent.at(-1).type, 'response_end');
   h.socket.close();
 });
-test('lack of ACK prevents reads; cancel aborts upstream and settles once', async () => {
+test('lack of ACK prevents frame delivery; cancel aborts upstream and settles once', async () => {
   const h = harness(() => ({}), { autoCredit: false });
   h.request(); await tick();
   assert.equal(h.sent.filter((v) => v instanceof Uint8Array).length, 0);
@@ -76,6 +86,23 @@ test('lack of ACK prevents reads; cancel aborts upstream and settles once', asyn
   await tick();
   assert.ok(h.aborted > 0);
   assert.equal(h.sent.filter((v) => v.type === 'error').length, 1);
+  h.socket.close();
+});
+test('Tampermonkey OPENED stream waits for separately delivered response headers', async () => {
+  const h = harness(() => ({ splitHeaders: true }));
+  h.request(); await tick(); await tick();
+  const heads = h.sent.filter((value) => value.type === 'response_head');
+  assert.equal(heads.length, 1);
+  assert.equal(heads[0].status, 206);
+  assert.equal(h.sent.filter((value) => value instanceof Uint8Array).length, 2);
+  assert.equal(h.sent.at(-1).type, 'response_end');
+  h.socket.close();
+});
+test('an uncooperative manager cannot buffer an unbounded response while Rust withholds ACK', async () => {
+  const h = harness(() => ({ responseHeaders: '', response: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(4096)); controller.close(); } }) }), { autoCredit: false });
+  h.request(); await tick();
+  assert.ok(h.sent.some((value) => value.type === 'error' && value.code === 'response-too-large'));
+  assert.ok(h.aborted > 0);
   h.socket.close();
 });
 test('ignored Range, streaming overflow, redirected target and unsupported stream fail closed', async () => {

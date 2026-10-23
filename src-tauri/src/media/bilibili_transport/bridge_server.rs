@@ -241,7 +241,7 @@ async fn connection(
         .and_then(|m| m.into_text().ok())
         .and_then(|m| serde_json::from_str::<Value>(&m).ok())
         .ok_or_else(|| BiliError::new("bridge-auth", "浏览器桥握手失败"))?;
-    if hello["type"] != "hello" || hello["protocol"] != 1 || hello["scriptVersion"] != "1.0.0" {
+    if hello["type"] != "hello" || hello["protocol"] != 1 || hello["scriptVersion"] != "1.0.1" {
         return Err(BiliError::new("bridge-version", "浏览器桥版本不兼容"));
     }
     let (tx, mut rx) = mpsc::channel::<Message>(8);
@@ -251,7 +251,7 @@ async fn connection(
         hub.authenticate(
             hello["challenge"].as_str().unwrap_or_default(),
             port,
-            "1.0.0",
+            "1.0.1",
             tx.clone(),
         )?
     };
@@ -537,7 +537,7 @@ mod tests {
         let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
         socket
             .send(Message::Text(
-                json!({"type":"hello", "protocol":1,"scriptVersion":"1.0.0","challenge":challenge})
+                json!({"type":"hello", "protocol":1,"scriptVersion":"1.0.1","challenge":challenge})
                     .to_string(),
             ))
             .await
