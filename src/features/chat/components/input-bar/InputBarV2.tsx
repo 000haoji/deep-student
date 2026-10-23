@@ -996,10 +996,12 @@ export const InputBarV2: React.FC<InputBarV2Props> = memo(
     } = useInputBarV2(store, inputBarOptions);
 
     // 手动压缩上下文（放在 useInputBarV2 之后：依赖其解构出的 isStreaming）
+    const compactionPendingRef = useRef(false);
     const handleCompactContext = useCallback(async () => {
       const modelConfigId =
         model2OverrideId || activeRuntimeModelInfo?.id || currentModelInfo?.id || modelId;
-      if (!sessionId || !modelConfigId || isCompactingContext || isStreaming) return;
+      if (!sessionId || !modelConfigId || compactionPendingRef.current || isStreaming) return;
+      compactionPendingRef.current = true;
       setIsCompactingContext(true);
       setCompactContextStatus(null);
       try {
@@ -1034,6 +1036,11 @@ export const InputBarV2: React.FC<InputBarV2Props> = memo(
             break;
           case 'notNeeded':
             setCompactContextStatus('not-needed');
+            showGlobalNotification(
+              'info',
+              t('chatV2:compaction.manualSkipped', { reason: reasonText }),
+              t('chatV2:inputBar.plusMenu.compactionSkipped'),
+            );
             break;
           case 'skipped':
             setCompactContextStatus('skipped');
@@ -1063,13 +1070,13 @@ export const InputBarV2: React.FC<InputBarV2Props> = memo(
           t('chatV2:inputBar.plusMenu.compactionFailed'),
         );
       } finally {
+        compactionPendingRef.current = false;
         setIsCompactingContext(false);
       }
     }, [
       activeRuntimeModelInfo?.id,
       contextUsageLimitTokens,
       currentModelInfo?.id,
-      isCompactingContext,
       isStreaming,
       model2OverrideId,
       modelId,
@@ -1286,6 +1293,13 @@ export const InputBarV2: React.FC<InputBarV2Props> = memo(
     //（最多叠加 5 个，遇到非技能令牌即停）
     const sendMessageWithSkillCommands = useCallback(async () => {
       const rawInput = store.getState().inputValue;
+      if (rawInput.trim().toLowerCase() === '/compact') {
+        if (isStreaming || compactionPendingRef.current) return;
+        store.getState().setInputValue('');
+        await handleCompactContext();
+        return;
+      }
+      if (compactionPendingRef.current) return;
       const parsed = parseLeadingSkillCommands(rawInput);
       if (parsed.skillIds.length > 0) {
         for (const skillId of parsed.skillIds) {
@@ -1302,7 +1316,7 @@ export const InputBarV2: React.FC<InputBarV2Props> = memo(
         store.getState().setInputValue(parsed.rest);
       }
       await sendMessage();
-    }, [store, activeSkillIds, activateSkill, sendMessage]);
+    }, [store, activeSkillIds, activateSkill, sendMessage, handleCompactContext, isStreaming]);
 
     return (
       <>
@@ -1317,13 +1331,13 @@ export const InputBarV2: React.FC<InputBarV2Props> = memo(
         <InputBarUI
         // 状态
         inputValue={inputValue}
-        canSend={canSend}
+        canSend={canSend && !isCompactingContext}
         canAbort={canAbort}
         isStreaming={isStreaming}
         // 🆕 队列模式：允许流式时入队，并在队列满时禁用发送
         queueEnabled={queueSettings.queueEnabled}
         queueFull={queueLength >= QUEUE_HARD_CAP}
-        canSubmit={canSubmit}
+        canSubmit={canSubmit && !isCompactingContext}
         contextWindowUsage={contextWindowUsage}
         sessionUsage={sessionUsage}
         attachments={attachments}

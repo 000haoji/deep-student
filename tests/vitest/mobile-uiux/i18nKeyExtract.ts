@@ -203,6 +203,8 @@ export const THINKING_DEPTH_SUFFIXES = [
 /** KNOWN_COMPACTION_REASONS（src/features/chat/utils/compactionFeedback.ts）；unknown 是兜底键 */
 export const COMPACTION_REASON_CODES = [
   'sessionTooShort',
+  'noCompactibleRange',
+  'noModel',
   'usableTooSmall',
   'lockBusy',
   'streaming',
