@@ -1249,7 +1249,7 @@ impl ChatV2Pipeline {
         // 🔧 P1-4 后本阶段是兜底路径：工具环内（tool_loop）已在下一轮 LLM 调用前
         // 主动执行压缩，只有「最后一轮 LLM 回复才命中阈值」的情况会走到这里。
         if ctx.needs_compaction {
-            match self.run_compaction(ctx).await {
+            match self.run_compaction(ctx, &emitter).await {
                 Ok(outcome) => {
                     // 🆕 压缩已落盘：立即向前端广播，水位环不等下一轮 usage 即可刷新
                     if outcome.did_compact() {

@@ -111,6 +111,7 @@ const KNOWN_COMPACTION_REASONS = new Set([
   'staleLineage',
   'cooldown',
   'invalidResponse',
+  'internalError',
 ]);
 
 /**

@@ -590,7 +590,7 @@ impl ChatV2Pipeline {
                 for hook in self.hooks.iter() {
                     hook.before_compaction(self, ctx, recursion_depth).await;
                 }
-                match self.run_compaction(ctx).await {
+                match self.run_compaction(ctx, &emitter).await {
                     Ok(outcome) if outcome.did_compact() => {
                         // 🆕 压缩已落盘：立即向前端广播，水位环不等下一轮 usage 即可刷新
                         let (tokens_before, tokens_after) = outcome.token_estimates();
@@ -1501,7 +1501,7 @@ impl ChatV2Pipeline {
                 ];
                 let cancel = ctx.cancellation_token.clone();
                 match self
-                    .run_compaction_for_session(
+                    .run_compaction_for_session_with_feedback(
                         &ctx.session_id,
                         model_override.as_deref(),
                         "overflow",
@@ -1509,6 +1509,7 @@ impl ChatV2Pipeline {
                         ctx.options.context_limit,
                         ctx.options.memory_enabled,
                         cancel.as_ref(),
+                        Some(&emitter),
                     )
                     .await
                 {
@@ -1521,8 +1522,19 @@ impl ChatV2Pipeline {
                         // rebuilt request on the next iteration at this same recursion depth.
                         continue;
                     }
-                    Ok(_) => {}
-                    Err(error) => log::warn!("[compaction] overflow recovery failed: {}", error),
+                    Ok(outcome) => {
+                        if outcome.is_failed() {
+                            if let Some(reason) = outcome.reason_code() {
+                                emitter.emit_compaction_failed(reason);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("[compaction] overflow recovery failed: {}", error);
+                        emitter.emit_compaction_failed(
+                            super::compaction::CompactionSkipReason::InternalError.as_code(),
+                        );
+                    }
                 }
             }
             // 🔧 P1-1 修复：llm_manager 存在与 pipeline CancellationToken 平行的第二条取消通道

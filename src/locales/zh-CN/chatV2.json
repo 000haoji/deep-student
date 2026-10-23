@@ -1437,6 +1437,11 @@
     "compactDisabledStreaming": "生成中不可压缩"
   },
   "compaction": {
+    "startedTitle": "正在压缩上下文",
+    "started": "正在总结较早的对话，原始消息将保留。",
+    "completedTitle": "上下文压缩完成",
+    "completed": "已生成上下文摘要，原始消息已保留。",
+    "completedWithUsage": "已生成摘要，上下文估算由 {{before}} 变为 {{after}} tokens。",
     "manualSkipped": "本次未压缩：{{reason}}",
     "manualFailed": "上下文压缩失败：{{reason}}，请稍后重试",
     "autoFailedTitle": "自动压缩失败",
@@ -1455,6 +1460,7 @@
       "staleLineage": "会话上下文已变化，请重试",
       "cooldown": "压缩暂时冷却中，稍后再试",
       "invalidResponse": "返回结果异常",
+      "internalError": "压缩任务发生内部错误",
       "unknown": "未知原因"
     }
   },

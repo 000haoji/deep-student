@@ -1437,6 +1437,11 @@
     "compactDisabledStreaming": "Unavailable while generating"
   },
   "compaction": {
+    "startedTitle": "Compacting context",
+    "started": "Summarizing earlier conversation. Original messages will be kept.",
+    "completedTitle": "Context compaction complete",
+    "completed": "The context summary is ready. Original messages were kept.",
+    "completedWithUsage": "Summary ready. Estimated context changed from {{before}} to {{after}} tokens.",
     "manualSkipped": "Compaction skipped: {{reason}}",
     "manualFailed": "Context compaction failed: {{reason}}. Please try again.",
     "autoFailedTitle": "Auto-compaction failed",
@@ -1455,6 +1460,7 @@
       "staleLineage": "The session context changed, please retry",
       "cooldown": "Compaction is cooling down, try again later",
       "invalidResponse": "Unexpected backend response",
+      "internalError": "An internal error interrupted compaction",
       "unknown": "Unknown reason"
     }
   },

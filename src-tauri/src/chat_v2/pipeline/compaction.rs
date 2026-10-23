@@ -64,6 +64,7 @@ use self::segmentation::{select_manual_tail, select_tail, split_into_turns, spli
 use super::ChatV2Pipeline;
 use crate::chat_v2::context::PipelineContext;
 use crate::chat_v2::error::{ChatV2Error, ChatV2Result};
+use crate::chat_v2::events::ChatV2EventEmitter;
 use crate::chat_v2::repo::ChatV2Repo;
 use crate::chat_v2::types::{
     block_status, block_types, ChatMessage, CompactionRecord, MessageBlock, MessageRole,
@@ -249,6 +250,7 @@ impl ChatV2Pipeline {
     pub(crate) async fn run_compaction(
         &self,
         ctx: &mut PipelineContext,
+        emitter: &ChatV2EventEmitter,
     ) -> ChatV2Result<CompactionOutcome> {
         if !ctx.needs_compaction {
             return Ok(CompactionOutcome::NotNeeded(
@@ -269,7 +271,7 @@ impl ChatV2Pipeline {
         ];
 
         let outcome = self
-            .run_compaction_for_session(
+            .run_compaction_for_session_with_feedback(
                 &session_id,
                 model_id.as_deref(),
                 "auto",
@@ -277,6 +279,7 @@ impl ChatV2Pipeline {
                 context_limit,
                 ctx.options.memory_enabled,
                 cancellation_token.as_ref(),
+                Some(emitter),
             )
             .await?;
 
@@ -316,7 +319,7 @@ impl ChatV2Pipeline {
             .and_then(|limit| u32::try_from(limit).ok())
             .or(options.context_limit);
         let outcome = self
-            .run_compaction_for_session(
+            .run_compaction_for_session_with_feedback(
                 session_id,
                 model_id,
                 "auto",
@@ -324,6 +327,7 @@ impl ChatV2Pipeline {
                 input_limit,
                 options.memory_enabled,
                 cancellation_token,
+                Some(emitter),
             )
             .await;
         if cancellation_token.is_some_and(|token| token.is_cancelled()) {
@@ -434,6 +438,30 @@ impl ChatV2Pipeline {
         session_memory_enabled: Option<bool>,
         cancellation_token: Option<&tokio_util::sync::CancellationToken>,
     ) -> ChatV2Result<CompactionOutcome> {
+        self.run_compaction_for_session_with_feedback(
+            session_id,
+            model_id,
+            reason,
+            exclude_ids,
+            context_limit,
+            session_memory_enabled,
+            cancellation_token,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn run_compaction_for_session_with_feedback(
+        &self,
+        session_id: &str,
+        model_id: Option<&str>,
+        reason: &str,
+        exclude_ids: &[String],
+        context_limit: Option<u32>,
+        session_memory_enabled: Option<bool>,
+        cancellation_token: Option<&tokio_util::sync::CancellationToken>,
+        emitter: Option<&ChatV2EventEmitter>,
+    ) -> ChatV2Result<CompactionOutcome> {
         // 🆕 2026-09 防抖动冷却：失败（或无可压缩区间）后在冷却期内的自动
         // 触发直接跳过，避免「每轮触发 → 昂贵准备 → 失败/空转」循环
         // （实测曾 7 分钟内空转 12 次 + 3 次 75 秒无效摘要调用）。
@@ -464,6 +492,7 @@ impl ChatV2Pipeline {
                 context_limit,
                 session_memory_enabled,
                 cancellation_token,
+                emitter,
             )
             .await?;
 
@@ -494,6 +523,7 @@ impl ChatV2Pipeline {
         context_limit: Option<u32>,
         session_memory_enabled: Option<bool>,
         cancellation_token: Option<&tokio_util::sync::CancellationToken>,
+        emitter: Option<&ChatV2EventEmitter>,
     ) -> ChatV2Result<CompactionOutcome> {
         // 🆕 压缩专用模型：全局设置了就统一覆盖（所有触发路径共用此单点）
         let dedicated_model = self.compaction_model_override();
@@ -944,6 +974,20 @@ impl ChatV2Pipeline {
 
         // 6. 释放连接，执行 LLM 调用
         drop(conn);
+
+        // Only announce real summary work. Clear progress even if its future is dropped.
+        struct FeedbackGuard<'a>(Option<&'a ChatV2EventEmitter>);
+        impl Drop for FeedbackGuard<'_> {
+            fn drop(&mut self) {
+                if let Some(emitter) = self.0 {
+                    emitter.emit_compaction_finished();
+                }
+            }
+        }
+        if let Some(emitter) = emitter {
+            emitter.emit_compaction_started(reason);
+        }
+        let _feedback = FeedbackGuard(emitter);
 
         // 摘要/落盘闭包内的失败原因回传通道。默认 SummaryFailed；
         // 取消 / lineage 失效路径会覆写。用 Arc<Mutex> 而非 RefCell 以保持

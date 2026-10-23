@@ -7,8 +7,11 @@ or global default in that order, and reacts to model and assignment changes.
 The slider accepts the exact configured context window, including 1,000,448
 tokens. Automatic input budgets continue to reserve output tokens and headroom.
 
-This PR excludes the separate DeepSeek tool-discovery/request-normalization
-experiment at the user's request. That work is retained only as a local patch.
+The final integrated revision also includes PR #493's trusted runtime skill
+discovery feedback and the DeepSeek Chat Completions request normalization.
+The latter was initially held as a local patch and is included after the user's
+subsequent instruction to submit the remaining fixes. Request formatting does
+not depend on whether detailed logging is enabled.
 
 ## Manual Compaction
 
@@ -39,6 +42,23 @@ If the summary request fails or its repair still produces an invalid summary,
 manual compaction reports failure without committing a static substitute or
 hiding original messages. Automatic compaction retains the existing explicitly
 marked degraded-summary fallback.
+
+## Visible Progress And Completion
+
+Manual `/compact` and button actions show an immediate start notification and
+a persistent spinner/status line above the composer. Completion shows a success
+notification with before/after token estimates when available; skipped and
+failed commands explain the result without claiming success. Pending input and
+attachments remain intact, and duplicate compaction/submission is blocked.
+
+Automatic preflight, in-loop, overflow-recovery and end-of-turn compactions emit
+`compaction_started` once real summary work begins. The session store drives the
+same persistent composer status. A scope guard emits `compaction_finished` on
+all exits, including cancellation, errors and dropped futures. Successful commit
+then emits the existing `compaction_completed` notification and usage update;
+failure retains the existing `compaction_failed` feedback. A request skipped
+before summary work starts does not create a misleading progress notification.
+Runtime progress is session-local and is not persisted with conversation data.
 
 ## Automatic Compaction
 
@@ -78,6 +98,10 @@ control this policy.
   user message. An uncompactible oversized request stops before network I/O.
 - Composer tests cover the existing button and `/compact` at 200K/1M tokens,
   preserving pending files and not sending/queuing a chat message.
+- Additional regressions cover visible pending state, duplicate prevention,
+  automatic lifecycle feedback and completion/failure notifications. These were
+  added with the final feedback change; the full test suite was not rerun at the
+  user's request. Final package builds and static checks are reported separately.
 
 Full local CI results and build provenance are recorded separately in the
 ignored `.local-work/verification/` and `.local-work/deliverables/` directories.
