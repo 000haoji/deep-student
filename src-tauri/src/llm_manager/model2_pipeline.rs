@@ -2352,6 +2352,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deepseek_chat_audit_toggle_does_not_change_the_final_request() {
+        let temp = TempDir::new().unwrap();
+        let config = ApiConfig {
+            model: "tree-deepseek-v4.1-flash".into(),
+            model_adapter: "deepseek".into(),
+            provider_type: Some("custom".into()),
+            api_protocol: Some("openai_chat_completions".into()),
+            base_url: "https://relay.example/v1".into(),
+            ..Default::default()
+        };
+        let body = json!({"model": config.model, "max_completion_tokens": 128, "messages": [
+            {"role": "system", "content": [{"type": "text", "text": "<available_skills>exact IDs</available_skills>", "cache_control": {"type": "ephemeral"}}]},
+            {"role": "user", "content": "Load the skill"}
+        ]});
+        let adapter = build_provider_adapter(&config);
+        let prepared = LLMManager::prepare_plain_provider_request(
+            adapter.as_ref(),
+            &config,
+            &body,
+            None,
+            Some("sess-audit-test"),
+            "test request",
+        )
+        .unwrap();
+        assert_eq!(
+            prepared.body["messages"][0]["content"],
+            "<available_skills>exact IDs</available_skills>"
+        );
+        assert_eq!(prepared.body["max_tokens"], 128);
+        let before = prepared.body.clone();
+        let persist = DebugPersistConfig {
+            log_dir: temp.path().to_path_buf(),
+        };
+        for persist_config in [None, Some(&persist)] {
+            log_and_emit_llm_request(
+                "CHAT_STREAM",
+                &crate::llm_manager::NoopStreamSink,
+                "chat_v2_event_sess-audit-test",
+                Some("msg-test"),
+                &config.model,
+                &prepared.url,
+                &prepared.body,
+                persist_config,
+            );
+            assert_eq!(prepared.body, before);
+        }
+        assert!(crate::debug_log_service::flush_pending_debug_log_writes().await);
+        let files: Vec<_> = std::fs::read_dir(temp.path()).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        let saved: Value =
+            serde_json::from_slice(&std::fs::read(files[0].as_ref().unwrap().path()).unwrap())
+                .unwrap();
+        assert_eq!(saved["request_body"]["messages"], before["messages"]);
+    }
+
+    #[tokio::test]
     async fn codex_transport_bridges_sse_and_maps_usage_limit_404() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -4650,6 +4706,7 @@ impl LLMManager {
             .build_request(&config.base_url, api_key, &config.model, request_body)
             .map_err(|error| Self::provider_error(build_error_context, error))?;
         let mut prepared = PreparedProviderRequest::from_provider(provider_request);
+        super::adapters::normalize_deepseek_chat_request(&mut prepared.body, config);
         merge_configured_provider_headers(&mut prepared, config.headers.as_ref());
 
         // P0 缓存：稳定 prompt_cache_key（禁止随机 UUID 回落）。

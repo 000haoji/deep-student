@@ -136,6 +136,31 @@ fn classify_requested_skills(
     (loaded, not_found, rejected)
 }
 
+fn with_skill_discovery_hint(message: String, ctx: &ExecutionContext) -> String {
+    let mut available: Vec<&str> = ctx
+        .skill_contents
+        .iter()
+        .flat_map(|contents| contents.keys())
+        .filter(|id| {
+            !ctx.skill_admission_errors
+                .as_ref()
+                .is_some_and(|errors| errors.contains_key(*id))
+        })
+        .map(String::as_str)
+        .collect();
+    available.sort_unstable();
+    if available.is_empty() {
+        return format!(
+            "{message}. No loadable skills are available in this request. Do not guess IDs or retry until the runtime catalog changes."
+        );
+    }
+    // The tool loop sends the error string, not the failure output, to the model.
+    format!(
+        "{message}. Available skill IDs: {}. Retry load_skills with the needed exact IDs from this list; do not guess aliases or wildcards.",
+        json!(available)
+    )
+}
+
 impl SkillsExecutor {
     pub fn new() -> Self {
         Self
@@ -210,7 +235,8 @@ impl ToolExecutor for SkillsExecutor {
                     match serde_json::from_value(call.arguments.clone()) {
                         Ok(v) => v,
                         Err(e) => {
-                            let error_msg = format!("参数解析失败: {}", e);
+                            let error_msg =
+                                with_skill_discovery_hint(format!("参数解析失败: {}", e), ctx);
                             let duration_ms = start_time.elapsed().as_millis() as u64;
                             ctx.emit_tool_call_error(&error_msg);
                             return Ok(ToolResultInfo::failure(
@@ -225,7 +251,8 @@ impl ToolExecutor for SkillsExecutor {
                     };
 
                 if parsed_input.skills.is_empty() {
-                    let error_msg = "请指定至少一个技能 ID".to_string();
+                    let error_msg =
+                        with_skill_discovery_hint("请指定至少一个技能 ID".to_string(), ctx);
                     let duration_ms = start_time.elapsed().as_millis() as u64;
                     ctx.emit_tool_call_error(&error_msg);
                     return Ok(ToolResultInfo::failure(
@@ -455,6 +482,9 @@ impl ToolExecutor for SkillsExecutor {
                         parts.join(". ")
                     )
                 };
+                if !not_found_skills.is_empty() {
+                    message = with_skill_discovery_hint(message, ctx);
+                }
                 if has_untrusted_rejection {
                     message.push_str(
                         " If trust was granted earlier in this same tool loop, this is the immutable pre-grant runtime catalog snapshot, not a failed grant. Do not retry load_skills in this request; the trusted package becomes loadable on the next user turn.",
@@ -544,6 +574,103 @@ impl ToolExecutor for SkillsExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chat_v2::events::ChatV2EventEmitter;
+    use std::sync::Arc;
+
+    fn discovery_context() -> ExecutionContext {
+        let mut ctx = ExecutionContext::new(
+            "sess-skills-diagnostic".into(),
+            "msg-skills-diagnostic".into(),
+            "blk-skills-diagnostic".into(),
+            Arc::new(ChatV2EventEmitter::new_headless(
+                "sess-skills-diagnostic".into(),
+            )),
+            Arc::new(crate::tools::ToolRegistry::new()),
+            None,
+        );
+        ctx.skill_contents = Some(HashMap::from([
+            (
+                "qbank-tools".into(),
+                "private question-bank instructions".into(),
+            ),
+            ("docx-tools".into(), "private document instructions".into()),
+            ("rejected-skill".into(), "must stay hidden".into()),
+        ]));
+        ctx.skill_admission_errors = Some(HashMap::from([
+            ("rejected-skill".into(), "untrusted".into()),
+            ("disabled-skill".into(), "disabled".into()),
+        ]));
+        ctx
+    }
+
+    #[tokio::test]
+    async fn invalid_skill_requests_return_exact_admitted_ids_without_loading_anything() {
+        let ctx = discovery_context();
+        for arguments in [
+            json!({}),
+            json!({"skills": []}),
+            json!({"skills": ["docx", "pdf"]}),
+        ] {
+            let result = SkillsExecutor::new()
+                .execute(
+                    &ToolCall {
+                        id: "call-missing".into(),
+                        name: BUILTIN_LOAD_SKILLS_TOOL_NAME.into(),
+                        arguments,
+                    },
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            assert!(!result.success);
+            let error = result.error.unwrap();
+            assert!(
+                error.contains(r#"Available skill IDs: ["docx-tools","qbank-tools"]"#),
+                "{error}"
+            );
+            assert!(!error.contains("private"));
+            assert!(!error.contains("rejected-skill"));
+            assert!(!error.contains("disabled-skill"));
+            assert!(result
+                .output
+                .get("result")
+                .is_none_or(|output| output["loaded_skill_ids"] == json!([])));
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_skill_load_reports_unknown_ids_without_autoloading_suggestions() {
+        let ctx = discovery_context();
+        let result = SkillsExecutor::new()
+            .execute(
+                &ToolCall {
+                    id: "call-partial".into(),
+                    name: BUILTIN_LOAD_SKILLS_TOOL_NAME.into(),
+                    arguments: json!({"skills": ["qbank-tools", "pdf"]}),
+                },
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.success);
+        assert_eq!(
+            result.output["result"]["loaded_skill_ids"],
+            json!(["qbank-tools"])
+        );
+        assert!(result.output["result"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Available skill IDs:"));
+    }
+
+    #[test]
+    fn discovery_without_runtime_skills_does_not_invent_fallback_ids() {
+        let mut ctx = discovery_context();
+        ctx.skill_contents = None;
+        let error = with_skill_discovery_hint("Missing: pdf".into(), &ctx);
+        assert!(error.contains("No loadable skills are available"));
+        assert!(!error.contains("docx-tools"));
+    }
 
     #[test]
     fn test_is_load_skills_tool() {
