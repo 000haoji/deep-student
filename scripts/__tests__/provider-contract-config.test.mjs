@@ -55,11 +55,15 @@ test('shared Rust test archives strip symbols and consumers bound downloads', ()
   assert.match(build, /CARGO_PROFILE_TEST_STRIP: symbols/);
   assert.match(build, /cargo nextest archive --locked --archive-file/);
 
-  for (const name of ['rust-tests', 'provider-contract']) {
+  for (const [name, timeoutMinutes] of [
+    ['rust-tests', 50],
+    ['provider-contract', 45],
+  ]) {
     const job = yamlTopLevelSection(jobs, name);
+    assert.match(job, new RegExp(`^ {4}timeout-minutes: ${timeoutMinutes}$`, 'm'));
     assert.match(
       job,
-      /uses: actions\/download-artifact@[a-f0-9]{40}\s*\n\s+timeout-minutes: 10/,
+      /uses: actions\/download-artifact@[a-f0-9]{40}[ \t]*\n(?:[ \t]*#[^\n]*\n)*[ \t]+timeout-minutes: 20[ \t]*$/m,
     );
     assert.doesNotMatch(job, /continue-on-error:/);
     assert.match(job, /--archive-file "\$RUNNER_TEMP\/nextest-archive\.tar\.zst"/);
