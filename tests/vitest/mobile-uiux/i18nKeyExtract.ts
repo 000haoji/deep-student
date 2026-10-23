@@ -213,6 +213,7 @@ export const COMPACTION_REASON_CODES = [
   'staleLineage',
   'cooldown',
   'invalidResponse',
+  'internalError',
 ] as const;
 
 export const INPUT_BAR_TEMPLATE_EXPANSIONS: readonly TemplateExpansion[] = [
