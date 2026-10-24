@@ -1803,16 +1803,32 @@ mod tests {
     async fn input_overflow_recovers_without_reexecuting_completed_tools() {
         use crate::chat_v2::types::{SendMessageRequest, SendOptions, ToolResultInfo};
         let mut server = mockito::Server::new_async().await;
+        let summary_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let request_log = summary_requests.clone();
         let summary = GENERIC_COMPACTION_PROFILE
             .required_headings
             .iter()
             .map(|heading| format!("{}\nTask progress preserved.\n", heading))
             .collect::<String>();
-        let summary_call = server.mock("POST", "/chat/completions")
-            .match_body(mockito::Matcher::PartialJson(serde_json::json!({"stream":false})))
+        let summary_response = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": summary}, "finish_reason": "stop"}]
+        })
+        .to_string();
+        let summary_call = server
+            .mock("POST", "/chat/completions")
+            .match_body(mockito::Matcher::PartialJson(
+                serde_json::json!({"stream":false}),
+            ))
             .with_header("content-type", "application/json")
-            .with_body(serde_json::json!({"choices":[{"message":{"role":"assistant","content":summary},"finish_reason":"stop"}]}).to_string())
-            .expect(1).create_async().await;
+            .with_body_from_request(move |request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(request.body().unwrap()).unwrap();
+                request_log.lock().unwrap().push(body);
+                summary_response.clone().into_bytes()
+            })
+            .expect_at_least(2)
+            .create_async()
+            .await;
         let stream_call = server.mock("POST", "/chat/completions")
             .match_body(mockito::Matcher::AllOf(vec![
                 mockito::Matcher::PartialJson(serde_json::json!({"stream":true})),
@@ -1853,7 +1869,7 @@ mod tests {
         pipeline.freeze_execution_context(&mut ctx).await.unwrap();
         let mut legacy = make_summary_system_message(&content, "not-a-summary");
         legacy.role = "user".into();
-        legacy.content = content;
+        legacy.content = content.clone();
         legacy.metadata = None;
         ctx.chat_history = vec![legacy];
         pipeline.compile_frozen_context(&mut ctx).await.unwrap();
@@ -1884,6 +1900,45 @@ mod tests {
         );
         summary_call.assert_async().await;
         stream_call.assert_async().await;
+
+        // Oversized history needs multiple summary passes, with no lost chunks or retries.
+        let requests = summary_requests.lock().unwrap();
+        let chunks = requests
+            .iter()
+            .map(|request| {
+                let prompt = request
+                    .pointer("/messages/0/content/0/text")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| request.pointer("/messages/0/content")?.as_str())
+                    .expect("summary request must contain a text prompt");
+                prompt
+                    .split_once("<conversation_data>\n")
+                    .expect("each summary pass must summarize a history chunk")
+                    .1
+                    .split_once("\n</conversation_data>")
+                    .unwrap()
+                    .0
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(chunks.concat(), format!("[#0 USER]\n{}\n\n", content));
+
+        let conn = pipeline.db.get_conn_safe().unwrap();
+        let record = ChatV2Repo::get_active_compaction_with_conn(&conn, &ctx.session_id)
+            .unwrap()
+            .unwrap();
+        let summary_block =
+            ChatV2Repo::get_message_blocks_with_conn(&conn, &record.summary_message_id)
+                .unwrap()
+                .into_iter()
+                .find(|block| block.block_type == block_types::COMPACTION_SUMMARY)
+                .unwrap();
+        let metadata = summary_block.tool_output.as_ref().unwrap();
+        assert_eq!(
+            metadata["summaryPasses"].as_u64(),
+            Some(requests.len() as u64)
+        );
+        assert_eq!(metadata["summaryDegraded"], false);
+        assert_eq!(summary_block.content.as_deref(), Some(summary.trim()));
     }
 
     #[tokio::test]
