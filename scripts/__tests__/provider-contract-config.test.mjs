@@ -70,6 +70,17 @@ test('shared Rust test archives strip symbols and consumers bound downloads', ()
   }
 });
 
+test('provider gate reserves setup time without extending test execution', () => {
+  const jobs = yamlTopLevelSection(read('.github/workflows/ci.yml'), 'jobs', 0);
+  const job = yamlTopLevelSection(jobs, 'provider-contract');
+
+  assert.match(job, /^ {4}timeout-minutes: 45$/m);
+  assert.match(
+    job,
+    /name: Execute ignored provider tests from the archive \(no Cargo compilation\)\n {8}timeout-minutes: 15\n/,
+  );
+});
+
 test('canonical provider composition pins all services with healthchecks', () => {
   const compose = read('scripts/dev/docker-compose.sync-test.yml');
   const minioDockerfile = read('dstu-test/docker/Dockerfile.minio-tool');
