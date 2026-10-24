@@ -91,6 +91,13 @@ root request、automation propose）、高危 Workbench、领域破坏性操作�
 - 引用标签 `[知识库-N]`、`[图片-N]`、`[记忆-N]`、`[搜索-N]` 是协议标记，不翻译；
   检索 executor 的 citation guide 同时给出双语可读说明。
 
+题库工具使用 QuestionDocument v2：共享 `materials`、`groups` 和独立 `questions` 同事务提交。
+`qbank_import_document(mode=preview)` 只创建草稿，明确导入用 `mode=commit`；需要复核时仍不自动提交。
+对话命题直接使用当前对话模型组织结构化参数，不额外调用默认出题模型；后台委托继承本轮可信模型快照。
+只有 `committed=true` 回执可以报告已创建，并分别读取 `imported_count` 与 `total_questions`。
+材料、组不计为题；`partial`、`needs_review`、未匹配答案和覆盖不足须如实说明。
+题目引用兼容 `[题目集:exam_id#q_id:名称]` 和题组 `#qgroup_id` 定位；JSON/ZIP 导出保留材料关系。
+
 当前已按此约定改造 `user_todo_executor`、`qbank_executor`、`paper_save_executor` 和
 `builtin_retrieval_executor`。公共 helper 位于 `chat_v2/tools/arg_utils.rs`。
 
